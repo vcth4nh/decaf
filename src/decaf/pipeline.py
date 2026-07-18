@@ -448,6 +448,7 @@ def run(
     settings: Settings,
     *,
     on_done: Callable[[ArtifactReport], None] | None = None,
+    on_found: Callable[[int], None] | None = None,
     runner: Callable | None = None,
     resolver: Callable | None = None,
 ) -> RunReport:
@@ -461,6 +462,8 @@ def run(
         raise DecafError(f"Java {java_major} is too old (Java {engines.JAVA_MIN}+ required)")
 
     artifacts = scan_input(settings.input)
+    if on_found is not None:
+        on_found(len(artifacts))
     runner = runner or engines.run_engine
     resolver = resolver or maven.resolve_sources
 
@@ -503,6 +506,8 @@ def run(
                     for fut in done:
                         report, nested = fut.result()
                         reports.append(report)
+                        if nested and on_found is not None:
+                            on_found(len(nested))
                         if on_done is not None:
                             on_done(report)
                         for n in nested:

@@ -133,6 +133,13 @@ def main(
         disable=quiet,
     )
 
+    found_total = 0
+
+    def on_found(count: int) -> None:
+        nonlocal found_total
+        found_total += count
+        progress.update(task, total=found_total)
+
     def on_done(r: ArtifactReport) -> None:
         progress.advance(task)
         if not quiet:
@@ -141,7 +148,7 @@ def main(
     try:
         with progress:
             task = progress.add_task("decompiling", total=None)
-            report = run(settings, on_done=on_done)
+            report = run(settings, on_done=on_done, on_found=on_found)
     except (DecafError, ScanError) as exc:
         raise _fail(str(exc))
 

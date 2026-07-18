@@ -58,7 +58,7 @@ def test_nonempty_output_needs_force(tmp_path: Path, make_jar, monkeypatch):
     assert result.exit_code == 2
     assert "not empty" in result.output
 
-    monkeypatch.setattr(cli, "run", lambda settings, on_done=None: ok_report())
+    monkeypatch.setattr(cli, "run", lambda settings, on_done=None, on_found=None: ok_report())
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out), "--force"])
     assert result.exit_code == 0
 
@@ -77,7 +77,7 @@ def test_decaf_error_exits_2(tmp_path: Path, make_jar, monkeypatch):
 
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
 
-    def boom(settings, on_done=None):
+    def boom(settings, on_done=None, on_found=None):
         raise DecafError("java not found on PATH (Java 11+ required)")
 
     monkeypatch.setattr(cli, "run", boom)
@@ -93,7 +93,7 @@ def test_exit_1_when_failures(tmp_path: Path, make_jar, monkeypatch):
         ArtifactReport(rel="x.jar", kind="archive", outcome="failed", failure="all engines failed")
     )
     failing.totals = {**failing.totals, "artifacts": 3, "failed": 1}
-    monkeypatch.setattr(cli, "run", lambda settings, on_done=None: failing)
+    monkeypatch.setattr(cli, "run", lambda settings, on_done=None, on_found=None: failing)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     assert result.exit_code == 1
     assert "x.jar" in result.output
@@ -103,8 +103,9 @@ def test_settings_wiring(tmp_path: Path, make_jar, monkeypatch):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     captured = {}
 
-    def capture(settings, on_done=None):
+    def capture(settings, on_done=None, on_found=None):
         captured["settings"] = settings
+        captured["on_found"] = on_found
         return ok_report()
 
     monkeypatch.setattr(cli, "run", capture)
@@ -122,6 +123,7 @@ def test_settings_wiring(tmp_path: Path, make_jar, monkeypatch):
     assert s.jobs == 2 and s.cpus == 8 and s.timeout == 30.0
     assert s.repos[0] == "https://r.test/m2"
     assert s.repos[-1] == "https://repo1.maven.org/maven2"
+    assert callable(captured["on_found"])  # CLI feeds discovery counts to the progress total
 
 
 def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):

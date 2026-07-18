@@ -172,6 +172,18 @@ def test_run_max_depth_zero_skips_all_nested(fake_env, make_jar, tmp_path: Path)
     assert (out / "src/com/w/W.java").is_file()  # the war itself is still decompiled
 
 
+def test_run_reports_found_counts(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_inputs(make_jar, tmp_path)
+    found: list[int] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_found=found.append,
+        runner=perfect_engine,
+    )
+    assert found == [2, 1]  # initial scan, then the war's nested jar mid-run
+    assert sum(found) == len(report.artifacts)
+
+
 def test_run_resource_only_war_nested_jars_reached(fake_env, make_jar, tmp_path: Path):
     """A war whose only Java content is bundled jars (no loose .class) must
     still have those jars decompiled, even though the war itself is skipped."""
