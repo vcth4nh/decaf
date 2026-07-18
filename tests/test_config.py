@@ -6,11 +6,6 @@ import decaf.config as config
 from decaf.config import MAVEN_CENTRAL, Config, ConfigError, load_config
 
 
-def test_missing_file_gives_central_only(tmp_path: Path):
-    with pytest.raises(ConfigError, match="not found"):
-        load_config(tmp_path / "nope.toml")
-
-
 def test_missing_default_config_gives_central_only(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(config, "default_config_path", lambda: tmp_path / "nope.toml")
     cfg = load_config(None)

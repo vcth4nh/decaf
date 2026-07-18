@@ -98,6 +98,5 @@ works against any repository.
 ```bash
 uv sync
 uv run pytest                      # fast offline suite
-uv run pytest -m network           # + live registry/Maven tests
-uv run pytest -m "slow or network" # + real-engine integration
+uv run pytest -m "slow or network" # + real-engine and live-Maven integration
 ```
