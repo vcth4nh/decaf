@@ -217,6 +217,19 @@ def test_resource_only_skipped_and_corrupt_failed(tmp_path: Path, make_jar):
     assert rep2.failure == "unreadable archive"
 
 
+def test_resource_only_container_still_descended(make_jar, tmp_path: Path):
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    war = make_jar("only-libs.war", {"WEB-INF/lib/dep.jar": inner.read_bytes()})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    report, nested = process_artifact(
+        Artifact(war, "only-libs.war", ArtifactKind.RESOURCE_ONLY), ctx
+    )
+    assert report.outcome == "skipped"
+    assert len(nested) == 1
+    assert nested[0].rel == "only-libs.war!/WEB-INF/lib/dep.jar"
+    assert nested[0].kind is ArtifactKind.ARCHIVE
+
+
 def test_class_tree_decompiled_from_copied_tree(tmp_path: Path):
     (tmp_path / "loose/com/x").mkdir(parents=True)
     (tmp_path / "loose/com/x/A.class").write_bytes(b"a")

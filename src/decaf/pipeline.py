@@ -367,6 +367,7 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
             report.outcome = "failed"
             report.failure = "unreadable archive"
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
+            nested = _discover_nested(artifact, ctx)  # e.g. a war bundling only jars
             report.outcome = "skipped"
         elif artifact.kind is ArtifactKind.BEYOND_DEPTH:
             report.outcome = "skipped"

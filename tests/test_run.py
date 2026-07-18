@@ -172,6 +172,23 @@ def test_run_max_depth_zero_skips_all_nested(fake_env, make_jar, tmp_path: Path)
     assert (out / "src/com/w/W.java").is_file()  # the war itself is still decompiled
 
 
+def test_run_resource_only_war_nested_jars_reached(fake_env, make_jar, tmp_path: Path):
+    """A war whose only Java content is bundled jars (no loose .class) must
+    still have those jars decompiled, even though the war itself is skipped."""
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    input_dir = tmp_path / "in"
+    make_jar("only-libs.war", {"WEB-INF/lib/dep.jar": inner.read_bytes()}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(
+        Settings(input=input_dir, output=out, maven=False, mirror=False),
+        runner=perfect_engine,
+    )
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["only-libs.war"].outcome == "skipped"
+    assert rels["only-libs.war!/WEB-INF/lib/dep.jar"].outcome == "ok"
+    assert (out / "src/com/d/D.java").is_file()
+
+
 def test_run_requires_java(monkeypatch, make_jar, tmp_path: Path):
     monkeypatch.setattr(engines, "find_java", lambda: None)
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
