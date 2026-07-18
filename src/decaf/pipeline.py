@@ -5,9 +5,26 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tempfile
 import threading
+import traceback
+import zipfile
+from collections.abc import Callable, Collection
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+import httpx
+
+from .engines import ENGINES
+from .maven import extract_java
+from .scanner import (
+    Artifact,
+    ArtifactKind,
+    classify_zip,
+    copy_class_tree,
+    find_nested_archives,
+    safe_extract_zip,
+)
 
 _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
 
@@ -146,3 +163,230 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "java_files": sum(r.java_files for r in reports),
         "collisions": sum(len(r.collisions) for r in reports),
     }
+
+
+@dataclass
+class Settings:
+    input: Path
+    output: Path
+    engine: str = "vineflower"
+    fallback: bool = True
+    mirror: bool = False
+    maven: bool = True
+    jobs: int = 0  # 0 = auto: min(4, cpu count)
+    timeout: float = 600.0
+    repos: tuple[str, ...] = ()
+    verbose: bool = False
+    quiet: bool = False
+
+
+def chain_for(
+    primary: str, fallback: bool, available: Collection[str] | None = None
+) -> list[str]:
+    from .engines import ENGINE_ORDER
+
+    chain = [primary] + [e for e in ENGINE_ORDER if e != primary]
+    if not fallback:
+        chain = chain[:1]
+    if available is not None:
+        chain = [e for e in chain if e in available]
+    return chain
+
+
+@dataclass
+class Ctx:
+    settings: Settings
+    writer: MergeWriter | MirrorWriter
+    chain: list[str]
+    engine_jars: dict[str, Path]
+    java: str
+    tmp_root: Path
+    client: httpx.Client | None
+    sources_cache: Path
+    runner: Callable
+    resolver: Callable
+
+
+def _tmp_dir(ctx: Ctx) -> Path:
+    return Path(tempfile.mkdtemp(dir=ctx.tmp_root))
+
+
+def _class_stem(entry: str) -> str:
+    return normalize_java_rel(entry)[: -len(".class")]
+
+
+def expected_class_stems(source: Path) -> set[str]:
+    """Top-level class names (no $-inner, no module/package-info) a decompile should yield."""
+    if source.is_dir():
+        entries = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
+    else:
+        try:
+            with zipfile.ZipFile(source) as zf:
+                entries = [n for n in zf.namelist() if n.endswith(".class")]
+        except (zipfile.BadZipFile, OSError):
+            return set()
+    stems = set()
+    for e in entries:
+        base = e.rsplit("/", 1)[-1]
+        if "$" in base or base in ("module-info.class", "package-info.class"):
+            continue
+        stems.add(_class_stem(e))
+    return stems
+
+
+def produced_stems(dest: Path) -> set[str]:
+    return {
+        normalize_java_rel(p.relative_to(dest).as_posix())[: -len(".java")]
+        for p in dest.rglob("*.java")
+    }
+
+
+def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
+    """Copy the .class files (plus their $-inners) for missing stems into a temp tree."""
+
+    def wanted(entry: str) -> bool:
+        stem = _class_stem(entry)
+        return stem in missing or stem.split("$", 1)[0] in missing
+
+    out = _tmp_dir(ctx)
+    if source.is_dir():
+        count = 0
+        for p in sorted(source.rglob("*.class")):
+            rel = p.relative_to(source).as_posix()
+            if wanted(rel):
+                target = out / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(p, target)
+                count += 1
+    else:
+        with zipfile.ZipFile(source) as zf:
+            names = [n for n in zf.namelist() if n.endswith(".class") and wanted(n)]
+        count = safe_extract_zip(source, out, members=names)
+    return out if count else None
+
+
+def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport) -> None:
+    source = target if target.is_dir() else artifact.path
+    expected = expected_class_stems(source)
+    report.classes = len(expected)
+    produced: set[str] = set()
+
+    used_index: int | None = None
+    for i, name in enumerate(ctx.chain):
+        dest = _tmp_dir(ctx)
+        res = ctx.runner(
+            ENGINES[name], ctx.engine_jars[name], target, dest,
+            ctx.settings.timeout, java=ctx.java,
+        )
+        report.attempts.append(
+            EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
+        )
+        if res.java_files > 0:
+            java, resources, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            report.java_files += java
+            report.resources_skipped += resources
+            report.collisions += collisions
+            report.method = name
+            produced |= produced_stems(dest)
+            used_index = i
+            break
+
+    if used_index is None:
+        report.outcome = "failed"
+        report.failure = "all engines failed"
+        return
+
+    missing = expected - produced
+    for name in ctx.chain[used_index + 1 :]:
+        if not missing:
+            break
+        retry_tree = _extract_failed_classes(source, missing, ctx)
+        if retry_tree is None:
+            break
+        dest = _tmp_dir(ctx)
+        res = ctx.runner(
+            ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
+            ctx.settings.timeout, java=ctx.java,
+        )
+        report.attempts.append(
+            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
+        )
+        if res.java_files > 0:
+            java, _, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            report.java_files += java
+            report.collisions += collisions
+            produced |= produced_stems(dest)
+            missing = expected - produced
+    report.missing_classes = len(missing)
+    report.outcome = "ok"
+
+
+def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
+    try:
+        with zipfile.ZipFile(artifact.path) as zf:
+            names = find_nested_archives(zf.namelist())
+    except (zipfile.BadZipFile, OSError):
+        return []
+    if not names:
+        return []
+    extract_dir = _tmp_dir(ctx)
+    safe_extract_zip(artifact.path, extract_dir, members=names)
+    nested = []
+    for name in names:
+        p = extract_dir / name
+        if p.is_file():
+            nested.append(Artifact(p, f"{artifact.rel}!/{name}", classify_zip(p)))
+    return nested
+
+
+def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
+    report = ArtifactReport(rel=artifact.rel, kind=artifact.kind.value, outcome="ok")
+    nested: list[Artifact] = []
+    try:
+        if artifact.kind is ArtifactKind.CORRUPT:
+            report.outcome = "failed"
+            report.failure = "unreadable archive"
+        elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
+            report.outcome = "skipped"
+        elif artifact.kind is ArtifactKind.SOURCES_JAR:
+            tmp = _tmp_dir(ctx)
+            extract_java(artifact.path, tmp)
+            java, resources, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+            report.java_files = java
+            report.resources_skipped = resources
+            report.collisions = collisions
+            if java == 0:
+                report.outcome = "failed"
+                report.failure = "sources jar contained no .java files"
+            else:
+                report.method = "extracted"
+        elif artifact.kind is ArtifactKind.CLASS_TREE:
+            tmp = _tmp_dir(ctx)
+            copy_class_tree(artifact.path, tmp)
+            _decompile(artifact, tmp, ctx, report)
+        else:  # ARCHIVE
+            nested = _discover_nested(artifact, ctx)
+            resolved = None
+            if ctx.settings.maven and ctx.client is not None:
+                resolved = ctx.resolver(
+                    artifact.path, list(ctx.settings.repos), ctx.client, ctx.sources_cache
+                )
+            if resolved:
+                gav, sources_jar, repo = resolved
+                tmp = _tmp_dir(ctx)
+                if extract_java(sources_jar, tmp) > 0:
+                    java, resources, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+                    report.method = "maven"
+                    report.gav = str(gav)
+                    report.repo = repo
+                    report.java_files = java
+                    report.resources_skipped = resources
+                    report.collisions = collisions
+                else:
+                    resolved = None
+            if not resolved:
+                _decompile(artifact, artifact.path, ctx, report)
+    except Exception:
+        report.outcome = "failed"
+        report.failure = traceback.format_exc()[-2000:]
+    return report, nested
