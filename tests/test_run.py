@@ -277,6 +277,24 @@ def test_interrupt_during_submission_still_writes_report(fake_env, make_jar, tmp
     assert (out / "decaf-report.json").is_file()
 
 
+def test_run_streams_engine_stderr_with_prefix(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("app.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    lines: list[str] = []
+
+    def chatty_engine(spec, jar_path, target, dest, timeout, java="java",
+                      cpu_budget=None, on_stderr_line=None):
+        on_stderr_line("warning: something odd")
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=chatty_engine,
+        on_stderr=lines.append,
+    )
+    assert lines == ["vineflower app.jar: warning: something odd"]
+
+
 def test_second_interrupt_during_teardown_still_writes_report(fake_env, make_jar, tmp_path: Path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 

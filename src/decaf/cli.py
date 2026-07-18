@@ -8,6 +8,7 @@ from typing import Annotated, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
@@ -93,7 +94,7 @@ def main(
     cpus: Annotated[int, typer.Option("--cpus", min=0, help="Total CPU budget across all workers (0 = all cores)")] = 0,
     timeout: Annotated[float, typer.Option("--timeout", help="Per-archive engine timeout, seconds")] = 600.0,
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show engine stderr for failures")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Only print the final summary")] = False,
     version: Annotated[bool, typer.Option("--version", callback=_version_callback, is_eager=True,
                                           help="Print version and exit")] = False,
@@ -147,10 +148,14 @@ def main(
         if not quiet:
             progress.console.print(_status_line(r))
 
+    def on_stderr(text: str) -> None:
+        progress.console.print(f"[dim]{escape(text)}[/]")
+
     try:
         with progress:
             task = progress.add_task("decompiling", total=None)
-            report = run(settings, on_done=on_done, on_found=on_found)
+            report = run(settings, on_done=on_done, on_found=on_found,
+                         on_stderr=on_stderr if verbose else None)
     except (DecafError, ScanError) as exc:
         raise _fail(str(exc))
 

@@ -94,6 +94,41 @@ def test_run_engine_success(tmp_path: Path, monkeypatch):
     assert res == EngineResult("cfr", 0, False, 2, "all good")
 
 
+def test_run_engine_streams_stderr_lines_live(tmp_path: Path, monkeypatch):
+    # The engine writes one line, then waits for a gate file the callback creates
+    # on seeing that line — so the test only finishes fast if lines stream live.
+    script = (
+        "import pathlib, sys, time\n"
+        "sys.stderr.write('first line\\n'); sys.stderr.flush()\n"
+        "gate = pathlib.Path(r'{dest}') / 'gate'\n"
+        "deadline = time.time() + 10\n"
+        "while not gate.exists() and time.time() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "sys.stderr.write('second line\\n')\n"
+    )
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    lines: list[str] = []
+
+    def on_line(line: str) -> None:
+        lines.append(line)
+        if line == "first line":
+            (tmp_path / "out" / "gate").write_text("go")
+
+    start = time.monotonic()
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out",
+                     timeout=30, on_stderr_line=on_line)
+    assert time.monotonic() - start < 8  # engine exit was gated on the callback
+    assert lines == ["first line", "second line"]
+    assert res.stderr_tail == "first line\nsecond line\n"
+
+
+def test_run_engine_streaming_timeout_still_kills(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(engines, "build_command", _fake_build("import time; time.sleep(60)"))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out",
+                     timeout=1, on_stderr_line=lambda line: None)
+    assert res.timed_out is True
+
+
 def test_run_engine_timeout_kills_group(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(engines, "build_command", _fake_build("import time; time.sleep(60)"))
     start = time.monotonic()
