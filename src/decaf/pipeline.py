@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import threading
+import time
 import traceback
 import zipfile
 from collections.abc import Callable, Collection
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import httpx
 
+from . import engines, maven
 from .engines import ENGINES
 from .maven import extract_java
 from .scanner import (
@@ -24,6 +28,7 @@ from .scanner import (
     copy_class_tree,
     find_nested_archives,
     safe_extract_zip,
+    scan_input,
 )
 
 _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
@@ -390,3 +395,124 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
     return report, nested
+
+
+class DecafError(Exception):
+    """Environment or usage error; the CLI reports it and exits 2."""
+
+
+def _preflight_engines(
+    settings: Settings, java_major: int, client: httpx.Client
+) -> tuple[list[str], dict[str, Path]]:
+    wanted = chain_for(settings.engine, settings.fallback)
+    jars: dict[str, Path] = {}
+    for name in wanted:
+        spec = ENGINES[name]
+        if spec.min_java > java_major:
+            if name == settings.engine:
+                raise DecafError(
+                    f"engine {name} needs Java {spec.min_java}+, found Java {java_major}"
+                )
+            continue
+        try:
+            jars[name] = engines.ensure_engine(spec, client)
+        except engines.EngineError as exc:
+            if name == settings.engine:
+                raise DecafError(str(exc)) from exc
+    chain = chain_for(settings.engine, settings.fallback, available=set(jars))
+    if not chain:
+        raise DecafError(f"primary engine {settings.engine!r} unavailable")
+    return chain, jars
+
+
+def run(
+    settings: Settings,
+    *,
+    on_done: Callable[[ArtifactReport], None] | None = None,
+    runner: Callable | None = None,
+    resolver: Callable | None = None,
+) -> RunReport:
+    start = time.monotonic()
+    found = engines.find_java()
+    if found is None:
+        raise DecafError("java not found on PATH (Java 11+ required)")
+    java_exe, java_major = found
+    if java_major < engines.JAVA_MIN:
+        raise DecafError(f"Java {java_major} is too old (Java {engines.JAVA_MIN}+ required)")
+
+    artifacts = scan_input(settings.input)
+    runner = runner or engines.run_engine
+    resolver = resolver or maven.resolve_sources
+
+    interrupted = False
+    reports: list[ArtifactReport] = []
+    chain: list[str] = []
+    tmp_root = Path(tempfile.mkdtemp(prefix="decaf-"))
+    client = httpx.Client(follow_redirects=True, timeout=30)
+    try:
+        chain, engine_jars = _preflight_engines(settings, java_major, client)
+        writer: MergeWriter | MirrorWriter
+        if settings.mirror:
+            writer = MirrorWriter(settings.output)
+        else:
+            writer = MergeWriter(settings.output / "src")
+        ctx = Ctx(
+            settings=settings,
+            writer=writer,
+            chain=chain,
+            engine_jars=engine_jars,
+            java=java_exe,
+            tmp_root=tmp_root,
+            client=client if settings.maven else None,
+            sources_cache=engines.cache_root() / "sources",
+            runner=runner,
+            resolver=resolver,
+        )
+        jobs = settings.jobs or min(4, os.cpu_count() or 1)
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            pending: set = set()
+            try:
+                for a in artifacts:
+                    pending.add(pool.submit(process_artifact, a, ctx))
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        report, nested = fut.result()
+                        reports.append(report)
+                        if on_done is not None:
+                            on_done(report)
+                        for n in nested:
+                            pending.add(pool.submit(process_artifact, n, ctx))
+            except KeyboardInterrupt:
+                interrupted = True
+                engines.PROCESSES.kill_all()
+                for fut in pending:
+                    fut.cancel()
+    finally:
+        client.close()
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    reports.sort(key=lambda r: r.rel)
+    run_report = RunReport(
+        settings={
+            "input": str(settings.input),
+            "output": str(settings.output),
+            "engine": settings.engine,
+            "fallback": settings.fallback,
+            "mirror": settings.mirror,
+            "maven": settings.maven,
+            "jobs": settings.jobs or min(4, os.cpu_count() or 1),
+            "timeout": settings.timeout,
+            "repos": list(settings.repos),
+            "chain": chain,
+            "java": java_exe,
+            "java_major": java_major,
+        },
+        artifacts=reports,
+        totals=compute_totals(reports),
+        duration_seconds=round(time.monotonic() - start, 2),
+        interrupted=interrupted,
+    )
+    settings.output.mkdir(parents=True, exist_ok=True)
+    (settings.output / "decaf-report.json").write_text(run_report.to_json())
+    return run_report
