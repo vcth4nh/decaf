@@ -33,7 +33,7 @@ def test_help_lists_flags():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     for flag in ["--output", "--engine", "--no-fallback", "--mirror", "--no-maven",
-                 "--repo", "--config", "--jobs", "--timeout", "--force", "--version"]:
+                 "--repo", "--config", "--jobs", "--cpus", "--timeout", "--force", "--version"]:
         assert flag in result.output
 
 
@@ -111,13 +111,13 @@ def test_settings_wiring(tmp_path: Path, make_jar, monkeypatch):
         app,
         [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--engine", "cfr",
          "--no-fallback", "--mirror", "--no-maven", "--repo", "https://r.test/m2",
-         "-j", "2", "--timeout", "30"],
+         "-j", "2", "--cpus", "8", "--timeout", "30"],
     )
     assert result.exit_code == 0
     s = captured["settings"]
     assert s.engine == "cfr"
     assert s.fallback is False and s.mirror is True and s.maven is False
-    assert s.jobs == 2 and s.timeout == 30.0
+    assert s.jobs == 2 and s.cpus == 8 and s.timeout == 30.0
     assert s.repos[0] == "https://r.test/m2"
     assert s.repos[-1] == "https://repo1.maven.org/maven2"
 
@@ -127,7 +127,7 @@ def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):
     import decaf.engines as engines
     from decaf.engines import EngineResult
 
-    def fake_engine(spec, jar_path, target, dest, timeout, java="java"):
+    def fake_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
         out = Path(dest) / "com/x/A.java"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("class A {}")

@@ -34,11 +34,18 @@ decaf ./libs                        # merged source tree in ./decaf-out/src
 decaf app.war -o out --mirror       # one folder per archive, mirroring input
 decaf ./libs --engine cfr --no-fallback
 decaf ./libs --no-maven -j 8 --timeout 120
+decaf ./libs --cpus 8               # cap total CPU (shared machine)
 decaf ./libs --repo https://nexus.mycorp.com/repository/maven-public
 ```
 
 Exit codes: `0` all artifacts succeeded · `1` some failed (see
 `decaf-out/decaf-report.json`) · `2` usage/environment error.
+
+CPU use is budgeted: each engine JVM is started with
+`-XX:ActiveProcessorCount = cpus ÷ jobs`, so the total stays near your core
+count instead of oversubscribing (decompilers like Vineflower default to one
+thread per visible core). `--cpus N` lowers the overall budget; workers are
+clamped so they never exceed it.
 
 ## Output layouts
 

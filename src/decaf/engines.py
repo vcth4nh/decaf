@@ -220,21 +220,29 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def build_command(
-    spec: EngineSpec, jar_path: Path, target: Path, dest: Path, java: str = "java"
+    spec: EngineSpec,
+    jar_path: Path,
+    target: Path,
+    dest: Path,
+    java: str = "java",
+    cpu_budget: int | None = None,
 ) -> list[str]:
     t, d, jar = str(target), str(dest), str(jar_path)
+    # ActiveProcessorCount caps the JVM's visible cores, which sizes the
+    # engine's own thread pools (e.g. vineflower --thread-count), GC, and JIT.
+    prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
     if spec.name == "vineflower":
-        return [java, "-jar", jar, t, d]
+        return [*prefix, "-jar", jar, t, d]
     if spec.name == "cfr":
-        return [java, "-jar", jar, t, "--outputdir", d, "--silent", "true"]
+        return [*prefix, "-jar", jar, t, "--outputdir", d, "--silent", "true"]
     if spec.name == "procyon":
         if target.suffix.lower() in ARCHIVE_EXTS:
-            return [java, "-jar", jar, "-jar", t, "-o", d]
-        return [java, "-jar", jar, "-o", d, t]
+            return [*prefix, "-jar", jar, "-jar", t, "-o", d]
+        return [*prefix, "-jar", jar, "-o", d, t]
     if spec.name == "fernflower":
-        return [java, "-cp", jar, str(spec.main_class), t, d]
+        return [*prefix, "-cp", jar, str(spec.main_class), t, d]
     if spec.name == "jd":
-        return [java, "-jar", jar, t, "-od", d]
+        return [*prefix, "-jar", jar, t, "-od", d]
     raise EngineError(f"unknown engine {spec.name!r}")
 
 
@@ -245,23 +253,30 @@ def run_engine(
     dest: Path,
     timeout: float,
     java: str = "java",
+    cpu_budget: int | None = None,
 ) -> EngineResult:
     dest.mkdir(parents=True, exist_ok=True)
     if target.is_dir() and spec.name not in NATIVE_DIR_ENGINES:
-        result = _run_per_class(spec, jar_path, target, dest, timeout, java)
+        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget)
     else:
-        result = _run_once(spec, jar_path, target, dest, timeout, java)
+        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget)
     _unpack_emitted_archives(dest)
     result.java_files = sum(1 for _ in dest.rglob("*.java"))
     return result
 
 
 def _run_once(
-    spec: EngineSpec, jar_path: Path, target: Path, dest: Path, timeout: float, java: str
+    spec: EngineSpec,
+    jar_path: Path,
+    target: Path,
+    dest: Path,
+    timeout: float,
+    java: str,
+    cpu_budget: int | None = None,
 ) -> EngineResult:
     if PROCESSES.closed:
         return EngineResult(spec.name, -1, False, 0, "interrupted")
-    cmd = build_command(spec, jar_path, target, dest, java=java)
+    cmd = build_command(spec, jar_path, target, dest, java=java, cpu_budget=cpu_budget)
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
     )
@@ -280,7 +295,13 @@ def _run_once(
 
 
 def _run_per_class(
-    spec: EngineSpec, jar_path: Path, root: Path, dest: Path, timeout: float, java: str
+    spec: EngineSpec,
+    jar_path: Path,
+    root: Path,
+    dest: Path,
+    timeout: float,
+    java: str,
+    cpu_budget: int | None = None,
 ) -> EngineResult:
     returncode = 0
     timed_out = False
@@ -288,7 +309,7 @@ def _run_per_class(
     for f in sorted(root.rglob("*.class")):
         if "$" in f.name:
             continue  # inner classes ride along with their outer class
-        r = _run_once(spec, jar_path, f, dest, timeout, java)
+        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget)
         returncode = returncode or r.returncode
         timed_out = timed_out or r.timed_out
         if r.stderr_tail:

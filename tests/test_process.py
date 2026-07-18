@@ -12,7 +12,7 @@ def writing_runner(files_per_engine: dict[str, dict[str, str]]):
     """Fake run_engine: each engine 'produces' the given {rel: content} files."""
     calls: list[tuple[str, Path]] = []
 
-    def _run(spec, jar_path, target, dest, timeout, java="java"):
+    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
         calls.append((spec.name, Path(target)))
         files = files_per_engine.get(spec.name, {})
         for rel, content in files.items():

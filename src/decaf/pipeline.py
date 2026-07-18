@@ -182,6 +182,7 @@ class Settings:
     mirror: bool = False
     maven: bool = True
     jobs: int = 0  # 0 = auto: min(4, cpu count)
+    cpus: int = 0  # total CPU budget across all workers; 0 = all cores
     timeout: float = 600.0
     repos: tuple[str, ...] = ()
     verbose: bool = False
@@ -213,6 +214,7 @@ class Ctx:
     sources_cache: Path
     runner: Callable
     resolver: Callable
+    cpu_budget: int | None = None  # visible cores per engine JVM
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -286,7 +288,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         dest = _tmp_dir(ctx)
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
-            ctx.settings.timeout, java=ctx.java,
+            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
         )
         report.attempts.append(
             EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
@@ -318,7 +320,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         dest = _tmp_dir(ctx)
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
-            ctx.settings.timeout, java=ctx.java,
+            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
         )
         report.attempts.append(
             EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
@@ -457,6 +459,10 @@ def run(
     chain: list[str] = []
     tmp_root = Path(tempfile.mkdtemp(prefix="decaf-"))
     client = httpx.Client(follow_redirects=True, timeout=30)
+    total_cpus = settings.cpus or (os.cpu_count() or 1)
+    jobs = settings.jobs or min(4, os.cpu_count() or 1)
+    jobs = max(1, min(jobs, total_cpus))
+    cpu_budget = max(1, total_cpus // jobs)
     try:
         chain, engine_jars = _preflight_engines(settings, java_major, client)
         writer: MergeWriter | MirrorWriter
@@ -475,8 +481,8 @@ def run(
             sources_cache=engines.cache_root() / "sources",
             runner=runner,
             resolver=resolver,
+            cpu_budget=cpu_budget,
         )
-        jobs = settings.jobs or min(4, os.cpu_count() or 1)
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             pending: set = set()
             try:
@@ -509,7 +515,9 @@ def run(
             "fallback": settings.fallback,
             "mirror": settings.mirror,
             "maven": settings.maven,
-            "jobs": settings.jobs or min(4, os.cpu_count() or 1),
+            "jobs": jobs,
+            "cpus": total_cpus,
+            "cpu_budget": cpu_budget,
             "timeout": settings.timeout,
             "repos": list(settings.repos),
             "chain": chain,

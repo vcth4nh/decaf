@@ -51,10 +51,30 @@ def test_build_command_jd():
     assert cmd == [J, "-jar", str(JAR), "/in/app.jar", "-od", "/out"]
 
 
+def test_build_command_cpu_budget():
+    cmd = build_command(ENGINES["vineflower"], JAR, Path("/in/app.jar"), OUT, java=J, cpu_budget=3)
+    assert cmd == [J, "-XX:ActiveProcessorCount=3", "-jar", str(JAR), "/in/app.jar", "/out"]
+    spec = ENGINES["fernflower"]
+    cmd = build_command(spec, JAR, Path("/in/app.jar"), OUT, java=J, cpu_budget=3)
+    assert cmd == [J, "-XX:ActiveProcessorCount=3", "-cp", str(JAR), spec.main_class, "/in/app.jar", "/out"]
+
+
+def test_run_engine_forwards_cpu_budget(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
+        seen["budget"] = cpu_budget
+        return [sys.executable, "-c", "pass"]
+
+    monkeypatch.setattr(engines, "build_command", _b)
+    run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=10, cpu_budget=5)
+    assert seen["budget"] == 5
+
+
 def _fake_build(script: str):
     """Replace build_command with one that runs a python script; {dest} is substituted."""
 
-    def _b(spec, jar_path, target, dest, java="java"):
+    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
         return [sys.executable, "-c", script.format(dest=str(dest), target=str(target))]
 
     return _b
@@ -107,7 +127,7 @@ def test_run_engine_dir_target_iterates_for_non_native(tmp_path: Path, monkeypat
     seen: list[str] = []
     real_targets_script = "import pathlib; pathlib.Path(r'{dest}').joinpath('x.java').write_text('x')"
 
-    def _b(spec, jar_path, target, dest, java="java"):
+    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
         seen.append(str(target))
         return [sys.executable, "-c", real_targets_script.format(dest=str(dest))]
 
@@ -130,7 +150,7 @@ def test_process_registry_kill_all():
 def test_closed_registry_refuses_to_spawn(tmp_path, monkeypatch):
     calls = []
 
-    def _b(spec, jar_path, target, dest, java="java"):
+    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
         calls.append(1)
         return [sys.executable, "-c", "print('x')"]
 

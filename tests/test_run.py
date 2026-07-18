@@ -9,7 +9,7 @@ from decaf.engines import EngineResult
 from decaf.pipeline import DecafError, Settings, run
 
 
-def perfect_engine(spec, jar_path, target, dest, timeout, java="java"):
+def perfect_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
     """Fake engine: emits one .java per top-level .class entry, mirroring entry paths."""
     dest = Path(dest)
     target = Path(target)
@@ -92,7 +92,7 @@ def test_run_mirror_mode_nested_archive_resource_no_collision(fake_env, make_jar
     decompiled .java files; the mirror output for the nested artifact's own
     decompile needs a directory at that same path, so the blob must not land."""
 
-    def resource_emitting_engine(spec, jar_path, target, dest, timeout, java="java"):
+    def resource_emitting_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
         result = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
         target = Path(target)
         if not target.is_dir():
@@ -198,3 +198,22 @@ def test_run_resets_closed_registry(fake_env, make_jar, tmp_path: Path):
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine)
     assert report.totals["ok"] == 1
+
+
+def test_run_cpu_budget_and_jobs_clamp(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    seen: list[int | None] = []
+
+    def spy_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        seen.append(cpu_budget)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=4, cpus=2),
+        runner=spy_engine,
+    )
+    assert report.settings["jobs"] == 2  # clamped: workers never exceed --cpus
+    assert report.settings["cpus"] == 2
+    assert report.settings["cpu_budget"] == 1
+    assert seen == [1]  # each engine JVM sees a 1-core budget
