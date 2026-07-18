@@ -50,7 +50,7 @@ def test_cli_end_to_end_real_engine(fixture_jar, tmp_path: Path):
                     zf.writestr("WEB-INF/classes/" + info.filename, src.read(info))
         zf.writestr("WEB-INF/lib/greeter.jar", fixture_jar.read_bytes())
     out = tmp_path / "out"
-    result = runner.invoke(app, [str(input_dir), "-o", str(out), "--no-maven"])
+    result = runner.invoke(app, [str(input_dir), "-o", str(out), "--no-maven", "--merge"])
     assert result.exit_code == 0, result.output
     assert (out / "src/com/example/Greeter.java").is_file()
     report = json.loads((out / "decaf-report.json").read_text())
@@ -60,7 +60,7 @@ def test_cli_end_to_end_real_engine(fixture_jar, tmp_path: Path):
 
     out_mirror = tmp_path / "out-mirror"
     result_mirror = runner.invoke(
-        app, [str(input_dir), "-o", str(out_mirror), "--no-maven", "--mirror"]
+        app, [str(input_dir), "-o", str(out_mirror), "--no-maven"]
     )
     assert result_mirror.exit_code == 0, result_mirror.output
     assert (out_mirror / "site.war/WEB-INF/lib/greeter.jar/com/example/Greeter.java").is_file()
@@ -73,7 +73,7 @@ def test_cli_maven_first_real(tmp_path: Path):
     with httpx.Client(follow_redirects=True, timeout=60) as client:
         (input_dir / "slf4j-api-2.0.13.jar").write_bytes(client.get(url).content)
     out = tmp_path / "out"
-    result = runner.invoke(app, [str(input_dir), "-o", str(out)])
+    result = runner.invoke(app, [str(input_dir), "-o", str(out), "--merge"])
     assert result.exit_code == 0, result.output
     report = json.loads((out / "decaf-report.json").read_text())
     assert report["artifacts"][0]["method"] == "maven"

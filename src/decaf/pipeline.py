@@ -179,8 +179,9 @@ class Settings:
     output: Path
     engine: str = "vineflower"
     fallback: bool = True
-    mirror: bool = False
+    mirror: bool = True  # mirror the input layout; False = one merged src/ tree
     maven: bool = True
+    max_depth: int = 1  # archive-in-archive levels to extract; 0 = top-level only
     jobs: int = 0  # 0 = auto: min(4, cpu count)
     cpus: int = 0  # total CPU budget across all workers; 0 = all cores
     timeout: float = 600.0
@@ -343,6 +344,11 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
         return []
     if not names:
         return []
+    if artifact.rel.count("!/") >= ctx.settings.max_depth:
+        return [
+            Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.BEYOND_DEPTH)
+            for name in names
+        ]
     extract_dir = _tmp_dir(ctx)
     safe_extract_zip(artifact.path, extract_dir, members=names)
     nested = []
@@ -362,6 +368,9 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
             report.failure = "unreadable archive"
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
             report.outcome = "skipped"
+        elif artifact.kind is ArtifactKind.BEYOND_DEPTH:
+            report.outcome = "skipped"
+            report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             tmp = _tmp_dir(ctx)
             extract_java(artifact.path, tmp)
@@ -515,6 +524,7 @@ def run(
             "fallback": settings.fallback,
             "mirror": settings.mirror,
             "maven": settings.maven,
+            "max_depth": settings.max_depth,
             "jobs": jobs,
             "cpus": total_cpus,
             "cpu_budget": cpu_budget,

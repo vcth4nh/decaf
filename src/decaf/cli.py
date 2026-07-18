@@ -51,7 +51,7 @@ def _status_line(r: ArtifactReport) -> str:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
         return f"[green]✓[/] {r.rel} ({detail})"
     if r.outcome == "skipped":
-        return f"[yellow]-[/] {r.rel} (resource-only, skipped)"
+        return f"[yellow]-[/] {r.rel} ({r.failure or 'resource-only'}, skipped)"
     reason = (r.failure or "failed").splitlines()[-1]
     return f"[red]✗[/] {r.rel} ({reason})"
 
@@ -84,8 +84,9 @@ def main(
     output: Annotated[Path, typer.Option("--output", "-o", help="Output directory")] = Path("decaf-out"),
     engine: Annotated[Engine, typer.Option("--engine", help="Primary decompiler engine")] = Engine.vineflower,
     no_fallback: Annotated[bool, typer.Option("--no-fallback", help="Do not try other engines on failure")] = False,
-    mirror: Annotated[bool, typer.Option("--mirror", help="Mirror the input layout instead of one merged src/ tree")] = False,
+    merge: Annotated[bool, typer.Option("--merge", help="Merge all sources into one src/ tree instead of mirroring the input layout")] = False,
     no_maven: Annotated[bool, typer.Option("--no-maven", help="Skip Maven sources lookup, always decompile")] = False,
+    max_depth: Annotated[int, typer.Option("--max-depth", min=0, help="Archive-in-archive levels to unpack (0 = none; folders are always fully scanned)")] = 1,
     repo: Annotated[Optional[list[str]], typer.Option("--repo", help="Extra Maven repository URL (repeatable)")] = None,
     config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
     jobs: Annotated[int, typer.Option("--jobs", "-j", min=0, help="Parallel workers (0 = min(4, cpus))")] = 0,
@@ -112,8 +113,9 @@ def main(
         output=output,
         engine=engine.value,
         fallback=not no_fallback,
-        mirror=mirror,
+        mirror=not merge,
         maven=not no_maven,
+        max_depth=max_depth,
         jobs=jobs,
         cpus=cpus,
         timeout=timeout,

@@ -32,8 +32,9 @@ def ok_report(**overrides) -> RunReport:
 def test_help_lists_flags():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for flag in ["--output", "--engine", "--no-fallback", "--mirror", "--no-maven",
-                 "--repo", "--config", "--jobs", "--cpus", "--timeout", "--force", "--version"]:
+    for flag in ["--output", "--engine", "--no-fallback", "--merge", "--no-maven",
+                 "--max-depth", "--repo", "--config", "--jobs", "--cpus", "--timeout",
+                 "--force", "--version"]:
         assert flag in result.output
 
 
@@ -110,13 +111,14 @@ def test_settings_wiring(tmp_path: Path, make_jar, monkeypatch):
     result = runner.invoke(
         app,
         [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--engine", "cfr",
-         "--no-fallback", "--mirror", "--no-maven", "--repo", "https://r.test/m2",
-         "-j", "2", "--cpus", "8", "--timeout", "30"],
+         "--no-fallback", "--merge", "--no-maven", "--max-depth", "3",
+         "--repo", "https://r.test/m2", "-j", "2", "--cpus", "8", "--timeout", "30"],
     )
     assert result.exit_code == 0
     s = captured["settings"]
     assert s.engine == "cfr"
-    assert s.fallback is False and s.mirror is True and s.maven is False
+    assert s.fallback is False and s.mirror is False and s.maven is False
+    assert s.max_depth == 3
     assert s.jobs == 2 and s.cpus == 8 and s.timeout == 30.0
     assert s.repos[0] == "https://r.test/m2"
     assert s.repos[-1] == "https://repo1.maven.org/maven2"
@@ -142,6 +144,6 @@ def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):
     out = tmp_path / "out"
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out), "--no-maven"])
     assert result.exit_code == 0, result.output
-    assert (out / "src/com/x/A.java").is_file()
+    assert (out / "app.jar/com/x/A.java").is_file()  # mirror layout is the default
     report = json.loads((out / "decaf-report.json").read_text())
     assert report["totals"]["ok"] == 1

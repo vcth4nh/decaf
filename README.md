@@ -2,7 +2,9 @@
 
 All-in-one Java decompiler CLI. Point it at a folder; it decompiles every
 `.jar` / `.war` / `.ear` / `.aar` / loose `.class` it finds (including archives
-nested inside archives) into one browsable source tree.
+nested inside archives — one level deep by default, `--max-depth` to change)
+into a source tree that mirrors your input, or one merged package tree with
+`--merge`.
 
 - **Sources first:** artifacts that resolve to a Maven GAV (embedded
   `pom.properties`, or SHA-1 lookup on Maven Central) get their real
@@ -30,16 +32,21 @@ uvx --from . decaf --help
 ## Usage
 
 ```bash
-decaf ./libs                        # merged source tree in ./decaf-out/src
-decaf app.war -o out --mirror       # one folder per archive, mirroring input
+decaf ./libs                        # one folder per archive under ./decaf-out
+decaf app.war -o out --merge        # single merged source tree in out/src
 decaf ./libs --engine cfr --no-fallback
 decaf ./libs --no-maven -j 8 --timeout 120
 decaf ./libs --cpus 8               # cap total CPU (shared machine)
+decaf ./libs --max-depth 2          # also unpack jars nested two archives deep
 decaf ./libs --repo https://nexus.mycorp.com/repository/maven-public
 ```
 
 Exit codes: `0` all artifacts succeeded · `1` some failed (see
 `decaf-out/decaf-report.json`) · `2` usage/environment error.
+
+Archive nesting is capped by `--max-depth` (default 1: jars inside a war or
+fat jar are processed, but not jars inside those). Deeper archives are listed
+in the report as skipped. Folder recursion is never limited.
 
 CPU use is budgeted: each engine JVM is started with
 `-XX:ActiveProcessorCount = cpus ÷ jobs`, so the total stays near your core
@@ -49,15 +56,15 @@ clamped so they never exceed it.
 
 ## Output layouts
 
-**Merged (default):** every artifact's `.java` files are merged into
+**Mirror (default):** the output mirrors the input tree, one directory per
+archive with its full engine output including resources:
+`in/libs/app.war` → `out/libs/app.war/WEB-INF/lib/dep.jar/<sources>`.
+
+**Merged (`--merge`):** every artifact's `.java` files are merged into
 `OUTPUT/src/` by package — ready to open in an IDE. Duplicate classes are
 deduped; conflicting duplicates are first-wins (deterministic by input path
 order) and recorded in the report. Container prefixes like `WEB-INF/classes/`
 are stripped. Resources are skipped (counted in the report).
-
-**Mirror (`--mirror`):** the output mirrors the input tree, one directory per
-archive with its full engine output including resources:
-`in/libs/app.war` → `out/libs/app.war/WEB-INF/lib/dep.jar/<sources>`.
 
 ## Configuration
 

@@ -22,6 +22,7 @@ class ArtifactKind(Enum):
     RESOURCE_ONLY = "resource_only"
     CLASS_TREE = "class_tree"
     CORRUPT = "corrupt"
+    BEYOND_DEPTH = "beyond_depth"  # nested archive left unextracted (--max-depth)
 
 
 @dataclass(frozen=True)

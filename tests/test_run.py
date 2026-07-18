@@ -57,7 +57,7 @@ def test_run_merged_end_to_end(fake_env, make_jar, tmp_path: Path):
     out = tmp_path / "out"
     done: list[str] = []
     report = run(
-        Settings(input=input_dir, output=out, maven=False),
+        Settings(input=input_dir, output=out, maven=False, mirror=False),
         on_done=lambda r: done.append(r.rel),
         runner=perfect_engine,
     )
@@ -76,11 +76,11 @@ def test_run_merged_end_to_end(fake_env, make_jar, tmp_path: Path):
     assert on_disk["settings"]["chain"] == ["vineflower", "cfr", "procyon", "fernflower", "jd"]
 
 
-def test_run_mirror_mode(fake_env, make_jar, tmp_path: Path):
+def test_run_mirror_is_default(fake_env, make_jar, tmp_path: Path):
     input_dir = make_inputs(make_jar, tmp_path)
     out = tmp_path / "out"
     run(
-        Settings(input=input_dir, output=out, maven=False, mirror=True),
+        Settings(input=input_dir, output=out, maven=False),
         runner=perfect_engine,
     )
     assert (out / "libs/app.jar/com/x/A.java").is_file()
@@ -112,6 +112,64 @@ def test_run_mirror_mode_nested_archive_resource_no_collision(fake_env, make_jar
     assert report.totals["failed"] == 0
     assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
     assert (out / "app.war/WEB-INF/lib/dep.jar").is_dir()
+
+
+def make_deep_inputs(make_jar, tmp_path: Path) -> Path:
+    """Two levels of archive nesting: app.war → dep.jar → inner.jar."""
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    dep = make_jar("deep-dep.jar", {"com/d/D.class": b"d", "lib/inner.jar": inner.read_bytes()})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "app.war",
+        {
+            "WEB-INF/classes/com/w/W.class": b"w",
+            "WEB-INF/lib/dep.jar": dep.read_bytes(),
+        },
+        base=input_dir,
+    )
+    return input_dir
+
+
+def test_run_default_depth_stops_after_one_level(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_deep_inputs(make_jar, tmp_path)
+    out = tmp_path / "out"
+    report = run(
+        Settings(input=input_dir, output=out, maven=False, mirror=False),
+        runner=perfect_engine,
+    )
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["app.war!/WEB-INF/lib/dep.jar"].outcome == "ok"  # depth 1: still processed
+    deep = rels["app.war!/WEB-INF/lib/dep.jar!/lib/inner.jar"]
+    assert deep.outcome == "skipped"
+    assert deep.kind == "beyond_depth"
+    assert "--max-depth 1" in (deep.failure or "")
+    assert (out / "src/com/d/D.java").is_file()
+    assert not (out / "src/com/i/I.java").exists()
+    assert report.settings["max_depth"] == 1
+
+
+def test_run_max_depth_two_reaches_deeper(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_deep_inputs(make_jar, tmp_path)
+    out = tmp_path / "out"
+    report = run(
+        Settings(input=input_dir, output=out, maven=False, mirror=False, max_depth=2),
+        runner=perfect_engine,
+    )
+    assert report.totals["skipped"] == 0
+    assert (out / "src/com/i/I.java").is_file()
+
+
+def test_run_max_depth_zero_skips_all_nested(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_inputs(make_jar, tmp_path)
+    out = tmp_path / "out"
+    report = run(
+        Settings(input=input_dir, output=out, maven=False, mirror=False, max_depth=0),
+        runner=perfect_engine,
+    )
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["app.war!/WEB-INF/lib/dep.jar"].outcome == "skipped"
+    assert not (out / "src/com/d/D.java").exists()
+    assert (out / "src/com/w/W.java").is_file()  # the war itself is still decompiled
 
 
 def test_run_requires_java(monkeypatch, make_jar, tmp_path: Path):

@@ -137,6 +137,26 @@ def test_nested_archives_discovered(make_jar, tmp_path: Path):
     assert nested[0].path.is_file()
 
 
+def test_nested_discovery_respects_max_depth(make_jar, tmp_path: Path):
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    dep = make_jar("dep.jar", {"com/d/D.class": b"d", "lib/inner.jar": inner.read_bytes()})
+    runner = writing_runner({"vineflower": {"com/d/D.java": "class D {}"}})
+    ctx = make_ctx(tmp_path, runner)  # default max_depth=1
+    report, nested = process_artifact(
+        Artifact(dep, "app.war!/WEB-INF/lib/dep.jar", ArtifactKind.ARCHIVE), ctx
+    )
+    assert report.outcome == "ok"  # the at-cap artifact itself is still decompiled
+    assert len(nested) == 1
+    assert nested[0].kind is ArtifactKind.BEYOND_DEPTH
+    assert nested[0].rel == "app.war!/WEB-INF/lib/dep.jar!/lib/inner.jar"
+
+    deep_report, deep_nested = process_artifact(nested[0], ctx)
+    assert deep_report.outcome == "skipped"
+    assert "--max-depth 1" in (deep_report.failure or "")
+    assert deep_nested == []
+    assert len(runner.calls) == 1  # only the dep itself was ever decompiled
+
+
 def test_maven_first_short_circuits_engines(make_jar, tmp_path: Path):
     jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
     sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// real source\nclass A {}"})
