@@ -22,6 +22,7 @@ from . import engines, maven
 from .engines import ENGINES
 from .maven import extract_java
 from .scanner import (
+    ARCHIVE_EXTS,
     Artifact,
     ArtifactKind,
     classify_zip,
@@ -132,13 +133,15 @@ class MirrorWriter:
         for p in sorted(tree.rglob("*")):
             if not p.is_file():
                 continue
-            target = dest / p.relative_to(tree)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(p, target)
             if p.suffix == ".java":
                 java += 1
             else:
                 resources += 1
+                if p.suffix.lower() in ARCHIVE_EXTS:
+                    continue  # a nested archive's decompiled directory takes this path; blob and directory cannot coexist
+            target = dest / p.relative_to(tree)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(p, target)
         return java, resources, []
 
 

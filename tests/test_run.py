@@ -87,6 +87,33 @@ def test_run_mirror_mode(fake_env, make_jar, tmp_path: Path):
     assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
 
 
+def test_run_mirror_mode_nested_archive_resource_no_collision(fake_env, make_jar, tmp_path: Path):
+    """Real engines pass a nested archive through as a resource file alongside the
+    decompiled .java files; the mirror output for the nested artifact's own
+    decompile needs a directory at that same path, so the blob must not land."""
+
+    def resource_emitting_engine(spec, jar_path, target, dest, timeout, java="java"):
+        result = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        target = Path(target)
+        if not target.is_dir():
+            with zipfile.ZipFile(target) as zf:
+                if "WEB-INF/lib/dep.jar" in zf.namelist():
+                    out = Path(dest) / "WEB-INF/lib/dep.jar"
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(zf.read("WEB-INF/lib/dep.jar"))
+        return result
+
+    input_dir = make_inputs(make_jar, tmp_path)
+    out = tmp_path / "out"
+    report = run(
+        Settings(input=input_dir, output=out, maven=False, mirror=True),
+        runner=resource_emitting_engine,
+    )
+    assert report.totals["failed"] == 0
+    assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
+    assert (out / "app.war/WEB-INF/lib/dep.jar").is_dir()
+
+
 def test_run_requires_java(monkeypatch, make_jar, tmp_path: Path):
     monkeypatch.setattr(engines, "find_java", lambda: None)
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")

@@ -75,6 +75,14 @@ def test_mirror_writer_copies_everything(tmp_path: Path):
     assert (dest / "res.properties").is_file()
 
 
+def test_mirror_writer_skips_archive_blobs(tmp_path: Path):
+    w = MirrorWriter(tmp_path / "out")
+    t = tree(tmp_path / "t", {"com/x/A.java": "class A {}", "WEB-INF/lib/dep.jar": "blob-bytes"})
+    java, resources, collisions = w.add_tree(t, "app.war")
+    assert (java, resources, collisions) == (1, 1, [])
+    assert not (tmp_path / "out/app.war/WEB-INF/lib/dep.jar").exists()
+
+
 def test_report_json_and_totals(tmp_path: Path):
     reports = [
         ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="maven", java_files=3),

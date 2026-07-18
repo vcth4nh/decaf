@@ -58,6 +58,13 @@ def test_cli_end_to_end_real_engine(fixture_jar, tmp_path: Path):
     rels = [a["rel"] for a in report["artifacts"]]
     assert "site.war!/WEB-INF/lib/greeter.jar" in rels
 
+    out_mirror = tmp_path / "out-mirror"
+    result_mirror = runner.invoke(
+        app, [str(input_dir), "-o", str(out_mirror), "--no-maven", "--mirror"]
+    )
+    assert result_mirror.exit_code == 0, result_mirror.output
+    assert (out_mirror / "site.war/WEB-INF/lib/greeter.jar/com/example/Greeter.java").is_file()
+
 
 def test_cli_maven_first_real(tmp_path: Path):
     url = "https://repo1.maven.org/maven2/org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar"
