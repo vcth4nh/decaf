@@ -70,6 +70,15 @@ def test_nonempty_output_needs_force(tmp_path: Path, make_jar, monkeypatch):
     assert result.exit_code == 0
 
 
+def test_output_is_existing_file_exits_2(tmp_path: Path, make_jar):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    out = tmp_path / "somefile"
+    out.write_text("hi")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out)])
+    assert result.exit_code == 2
+    assert "not a directory" in result.output
+
+
 def test_bad_config_exits_2(tmp_path: Path, make_jar):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     cfg = tmp_path / "decaf.toml"
