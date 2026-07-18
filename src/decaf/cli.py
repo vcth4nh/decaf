@@ -101,6 +101,8 @@ def main(
     """Decompile every Java artifact under INPUT, preferring real Maven sources."""
     if not input.exists():
         raise _fail(f"input {input} does not exist")
+    if output.exists() and not output.is_dir():
+        raise _fail(f"output {output} exists and is not a directory")
     if output.exists() and any(output.iterdir()) and not force:
         raise _fail(f"output {output} is not empty (use --force to write anyway)")
     try:
