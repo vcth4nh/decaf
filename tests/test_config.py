@@ -35,6 +35,12 @@ def test_extra_repos_prepended_and_deduped(tmp_path: Path):
     )
 
 
+def test_extra_repo_bad_scheme_raises(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "default_config_path", lambda: tmp_path / "nope.toml")
+    with pytest.raises(ConfigError, match="http"):
+        load_config(None, extra_repos=["htp://typo.example/m2"])
+
+
 def test_bad_toml_raises(tmp_path: Path):
     f = tmp_path / "config.toml"
     f.write_text("repositories = [unclosed\n")

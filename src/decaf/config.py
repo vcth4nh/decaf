@@ -52,6 +52,10 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
                 raise ConfigError(f"{cfg_path}: repository {r!r} must be an http(s) URL")
         file_repos = repos
 
+    for r in extra_repos:
+        if not r.startswith(("http://", "https://")):
+            raise ConfigError(f"--repo {r!r} must be an http(s) URL")
+
     ordered: list[str] = []
     for repo in [*extra_repos, *file_repos, MAVEN_CENTRAL]:
         repo = repo.rstrip("/")
