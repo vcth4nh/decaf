@@ -49,10 +49,11 @@ fat jar are processed, but not jars inside those). Deeper archives are listed
 in the report as skipped. Folder recursion is never limited.
 
 CPU use is budgeted: each engine JVM is started with
-`-XX:ActiveProcessorCount = cpus ÷ jobs`, so the total stays near your core
-count instead of oversubscribing (decompilers like Vineflower default to one
-thread per visible core). `--cpus N` lowers the overall budget; workers are
-clamped so they never exceed it.
+`-XX:ActiveProcessorCount = cpus ÷ jobs`, so the total never oversubscribes
+the machine (decompilers like Vineflower default to one thread per visible
+core). The default budget is all cores minus one, keeping the machine
+responsive during long runs; `--cpus N` sets it exactly (e.g. your full core
+count to use everything). Workers are clamped so they never exceed the budget.
 
 ## Output layouts
 
