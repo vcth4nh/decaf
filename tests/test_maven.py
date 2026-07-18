@@ -110,6 +110,48 @@ def test_fetch_sources_all_miss(tmp_path: Path):
         assert fetch_sources(Gav("g", "a", "1"), ["https://x.test"], c, tmp_path) is None
 
 
+def test_fetch_sources_concurrent_same_gav(tmp_path: Path, make_jar):
+    import threading
+    import zipfile as _zip
+
+    gav = Gav("com.example", "lib", "1.2")
+    payload = make_jar("payload.jar", {"com/example/A.java": "class A {}"}).read_bytes()
+
+    def handler(request):
+        return httpx.Response(200, content=payload)
+
+    results, errors = [], []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        try:
+            barrier.wait()
+            with make_client(handler) as c:
+                results.append(fetch_sources(gav, ["https://r.test/m2"], c, tmp_path / "cache"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert errors == []
+    assert len(results) == 8 and all(r is not None for r in results)
+    path = results[0][0]
+    assert _zip.is_zipfile(path)
+    assert path.read_bytes() == payload
+
+
+def test_fetch_sources_rejects_non_zip_payload(tmp_path: Path):
+    def handler(request):
+        return httpx.Response(200, content=b"<html>error page</html>")
+
+    with make_client(handler) as c:
+        assert fetch_sources(Gav("g", "a", "1"), ["https://x.test"], c, tmp_path / "cache") is None
+    assert not (tmp_path / "cache" / "g_a_1-sources.jar").exists()
+
+
 def test_extract_java_only_java_files(make_jar, tmp_path: Path):
     jar = make_jar(
         "s.jar",

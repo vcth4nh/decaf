@@ -125,3 +125,41 @@ def test_process_registry_kill_all():
     assert PROCESSES.kill_all() == 1
     proc.wait(timeout=5)
     assert proc.returncode != 0
+
+
+def test_closed_registry_refuses_to_spawn(tmp_path, monkeypatch):
+    calls = []
+
+    def _b(spec, jar_path, target, dest, java="java"):
+        calls.append(1)
+        return [sys.executable, "-c", "print('x')"]
+
+    monkeypatch.setattr(engines, "build_command", _b)
+    PROCESSES.kill_all()  # closes the registry
+    try:
+        res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=5)
+        assert res.java_files == 0
+        assert res.returncode != 0
+        assert calls == []  # nothing spawned
+    finally:
+        PROCESSES.reset()
+
+
+def test_registry_reset_reopens(tmp_path, monkeypatch):
+    script = "import pathlib; pathlib.Path(r'{dest}').joinpath('A.java').write_text('class A {{}}')"
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    PROCESSES.kill_all()
+    PROCESSES.reset()
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    assert res.java_files == 1
+
+
+def test_register_on_closed_registry_kills(monkeypatch):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    PROCESSES.kill_all()
+    try:
+        PROCESSES.register(proc)
+        proc.wait(timeout=5)
+        assert proc.returncode != 0
+    finally:
+        PROCESSES.reset()

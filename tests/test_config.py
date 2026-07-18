@@ -2,11 +2,18 @@ from pathlib import Path
 
 import pytest
 
+import decaf.config as config
 from decaf.config import MAVEN_CENTRAL, Config, ConfigError, load_config
 
 
 def test_missing_file_gives_central_only(tmp_path: Path):
-    cfg = load_config(tmp_path / "nope.toml")
+    with pytest.raises(ConfigError, match="not found"):
+        load_config(tmp_path / "nope.toml")
+
+
+def test_missing_default_config_gives_central_only(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "default_config_path", lambda: tmp_path / "nope.toml")
+    cfg = load_config(None)
     assert cfg == Config(repositories=(MAVEN_CENTRAL,))
 
 
@@ -49,3 +56,8 @@ def test_schema_errors(tmp_path: Path, content: str, msg: str):
     f.write_text(content + "\n")
     with pytest.raises(ConfigError, match=msg):
         load_config(f)
+
+
+def test_explicit_missing_config_raises(tmp_path: Path):
+    with pytest.raises(ConfigError, match="not found"):
+        load_config(tmp_path / "typo.toml")

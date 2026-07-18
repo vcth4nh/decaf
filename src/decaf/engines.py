@@ -174,10 +174,21 @@ class ProcessRegistry:
     def __init__(self) -> None:
         self._procs: dict[int, subprocess.Popen] = {}
         self._lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def register(self, proc: subprocess.Popen) -> None:
         with self._lock:
-            self._procs[proc.pid] = proc
+            if self._closed:
+                kill = True
+            else:
+                self._procs[proc.pid] = proc
+                kill = False
+        if kill:
+            _kill_group(proc)
 
     def unregister(self, proc: subprocess.Popen) -> None:
         with self._lock:
@@ -185,11 +196,17 @@ class ProcessRegistry:
 
     def kill_all(self) -> int:
         with self._lock:
+            self._closed = True
             procs = list(self._procs.values())
             self._procs.clear()
         for proc in procs:
             _kill_group(proc)
         return len(procs)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._procs.clear()
+            self._closed = False
 
 
 PROCESSES = ProcessRegistry()
@@ -242,6 +259,8 @@ def run_engine(
 def _run_once(
     spec: EngineSpec, jar_path: Path, target: Path, dest: Path, timeout: float, java: str
 ) -> EngineResult:
+    if PROCESSES.closed:
+        return EngineResult(spec.name, -1, False, 0, "interrupted")
     cmd = build_command(spec, jar_path, target, dest, java=java)
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True

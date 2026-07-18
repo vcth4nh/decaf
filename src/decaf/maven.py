@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -97,17 +99,28 @@ def fetch_sources(
         return cached, marker.read_text().strip()
     for repo in repos:
         url = f"{repo}/{gav.sources_path()}"
+        tmp = tempfile.NamedTemporaryFile(
+            dir=cache_dir, prefix=cached.name + ".", suffix=".part", delete=False
+        )
+        tmp_name = Path(tmp.name)
+        ok = False
         try:
             with client.stream("GET", url, follow_redirects=True, timeout=30) as resp:
                 if resp.status_code != 200:
                     continue
-                part = cached.with_suffix(".part")
-                with open(part, "wb") as out:
-                    for chunk in resp.iter_bytes():
-                        out.write(chunk)
+                for chunk in resp.iter_bytes():
+                    tmp.write(chunk)
+                ok = True
         except httpx.HTTPError:
             continue
-        part.replace(cached)
+        finally:
+            tmp.close()
+            if not ok:
+                os.unlink(tmp_name)
+        if not zipfile.is_zipfile(tmp_name):
+            os.unlink(tmp_name)
+            continue
+        os.replace(tmp_name, cached)
         marker.write_text(repo)
         return cached, repo
     return None

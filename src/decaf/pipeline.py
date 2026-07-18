@@ -281,6 +281,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
 
     used_index: int | None = None
     for i, name in enumerate(ctx.chain):
+        if engines.PROCESSES.closed:
+            break
         dest = _tmp_dir(ctx)
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
@@ -306,6 +308,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
 
     missing = expected - produced
     for name in ctx.chain[used_index + 1 :]:
+        if engines.PROCESSES.closed:
+            break
         if not missing:
             break
         retry_tree = _extract_failed_classes(source, missing, ctx)
@@ -436,6 +440,7 @@ def run(
     resolver: Callable | None = None,
 ) -> RunReport:
     start = time.monotonic()
+    engines.PROCESSES.reset()
     found = engines.find_java()
     if found is None:
         raise DecafError("java not found on PATH (Java 11+ required)")

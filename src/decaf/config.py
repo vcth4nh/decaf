@@ -28,9 +28,15 @@ def default_config_path() -> Path:
 def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Config:
     file_repos: list[str] = []
     cfg_path = path or default_config_path()
+    if path is not None and not path.is_file():
+        raise ConfigError(f"{path}: config file not found")
     if cfg_path.is_file():
         try:
-            data = tomllib.loads(cfg_path.read_text())
+            text = cfg_path.read_text()
+        except OSError as exc:
+            raise ConfigError(f"{cfg_path}: cannot read config: {exc}") from exc
+        try:
+            data = tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"{cfg_path}: invalid TOML: {exc}") from exc
         for key in data:

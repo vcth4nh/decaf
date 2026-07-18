@@ -188,3 +188,13 @@ def test_interrupt_during_submission_still_writes_report(fake_env, make_jar, tmp
     report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
     assert report.interrupted is True
     assert (out / "decaf-report.json").is_file()
+
+
+def test_run_resets_closed_registry(fake_env, make_jar, tmp_path: Path):
+    import decaf.engines as _e
+
+    _e.PROCESSES.kill_all()  # simulate leftover state from an interrupted run
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine)
+    assert report.totals["ok"] == 1
