@@ -88,6 +88,16 @@ def test_bad_config_exits_2(tmp_path: Path, make_jar):
     assert result.exit_code == 2
 
 
+def test_bad_repo_url_exits_2(tmp_path: Path, make_jar):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    cfg = tmp_path / "decaf.toml"
+    cfg.write_text("repositories = []\n")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+                                 "--config", str(cfg), "--repo", "htp://typo.example/m2"])
+    assert result.exit_code == 2
+    assert "http" in result.output
+
+
 def test_decaf_error_exits_2(tmp_path: Path, make_jar, monkeypatch):
     from decaf.pipeline import DecafError
 
