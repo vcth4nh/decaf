@@ -156,3 +156,131 @@ def find_java() -> tuple[str, int] | None:
     proc = subprocess.run([exe, "-version"], capture_output=True, text=True)
     major = parse_java_major(proc.stderr or proc.stdout or "")
     return (exe, major or 0)
+
+
+NATIVE_DIR_ENGINES = {"vineflower", "fernflower", "jd"}
+
+
+@dataclass
+class EngineResult:
+    engine: str
+    returncode: int
+    timed_out: bool
+    java_files: int
+    stderr_tail: str
+
+
+class ProcessRegistry:
+    def __init__(self) -> None:
+        self._procs: dict[int, subprocess.Popen] = {}
+        self._lock = threading.Lock()
+
+    def register(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._procs[proc.pid] = proc
+
+    def unregister(self, proc: subprocess.Popen) -> None:
+        with self._lock:
+            self._procs.pop(proc.pid, None)
+
+    def kill_all(self) -> int:
+        with self._lock:
+            procs = list(self._procs.values())
+            self._procs.clear()
+        for proc in procs:
+            _kill_group(proc)
+        return len(procs)
+
+
+PROCESSES = ProcessRegistry()
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        proc.kill()
+
+
+def build_command(
+    spec: EngineSpec, jar_path: Path, target: Path, dest: Path, java: str = "java"
+) -> list[str]:
+    t, d, jar = str(target), str(dest), str(jar_path)
+    if spec.name == "vineflower":
+        return [java, "-jar", jar, t, d]
+    if spec.name == "cfr":
+        return [java, "-jar", jar, t, "--outputdir", d, "--silent", "true"]
+    if spec.name == "procyon":
+        if target.suffix.lower() in ARCHIVE_EXTS:
+            return [java, "-jar", jar, "-jar", t, "-o", d]
+        return [java, "-jar", jar, "-o", d, t]
+    if spec.name == "fernflower":
+        return [java, "-cp", jar, str(spec.main_class), t, d]
+    if spec.name == "jd":
+        return [java, "-jar", jar, t, "-od", d]
+    raise EngineError(f"unknown engine {spec.name!r}")
+
+
+def run_engine(
+    spec: EngineSpec,
+    jar_path: Path,
+    target: Path,
+    dest: Path,
+    timeout: float,
+    java: str = "java",
+) -> EngineResult:
+    dest.mkdir(parents=True, exist_ok=True)
+    if target.is_dir() and spec.name not in NATIVE_DIR_ENGINES:
+        result = _run_per_class(spec, jar_path, target, dest, timeout, java)
+    else:
+        result = _run_once(spec, jar_path, target, dest, timeout, java)
+    _unpack_emitted_archives(dest)
+    result.java_files = sum(1 for _ in dest.rglob("*.java"))
+    return result
+
+
+def _run_once(
+    spec: EngineSpec, jar_path: Path, target: Path, dest: Path, timeout: float, java: str
+) -> EngineResult:
+    cmd = build_command(spec, jar_path, target, dest, java=java)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
+    )
+    PROCESSES.register(proc)
+    timed_out = False
+    try:
+        _, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_group(proc)
+        _, err = proc.communicate()
+    finally:
+        PROCESSES.unregister(proc)
+    tail = (err or b"").decode(errors="replace")[-2000:]
+    return EngineResult(spec.name, proc.returncode or 0, timed_out, 0, tail)
+
+
+def _run_per_class(
+    spec: EngineSpec, jar_path: Path, root: Path, dest: Path, timeout: float, java: str
+) -> EngineResult:
+    returncode = 0
+    timed_out = False
+    tails: list[str] = []
+    for f in sorted(root.rglob("*.class")):
+        if "$" in f.name:
+            continue  # inner classes ride along with their outer class
+        r = _run_once(spec, jar_path, f, dest, timeout, java)
+        returncode = returncode or r.returncode
+        timed_out = timed_out or r.timed_out
+        if r.stderr_tail:
+            tails.append(r.stderr_tail)
+        if timed_out:
+            break
+    return EngineResult(spec.name, returncode, timed_out, 0, "\n".join(tails)[-2000:])
+
+
+def _unpack_emitted_archives(dest: Path) -> None:
+    """Fernflower-family engines emit dest/<input>.jar full of sources; flatten it."""
+    for arch in list(dest.glob("*.jar")) + list(dest.glob("*.zip")):
+        safe_extract_zip(arch, dest)
+        arch.unlink()
