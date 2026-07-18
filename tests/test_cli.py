@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -8,6 +9,11 @@ from decaf.cli import app
 from decaf.pipeline import ArtifactReport, RunReport
 
 runner = CliRunner(env={"COLUMNS": "200"})
+
+# Typer forces terminal rendering when GITHUB_ACTIONS is set (checked at import
+# time), styling "--" apart from the option word — so ANSI codes land inside
+# flag names and plain substring asserts break. Strip escapes before matching.
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def ok_report(**overrides) -> RunReport:
@@ -32,10 +38,11 @@ def ok_report(**overrides) -> RunReport:
 def test_help_lists_flags():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
     for flag in ["--output", "--engine", "--no-fallback", "--merge", "--no-maven",
                  "--max-depth", "--repo", "--config", "--jobs", "--cpus", "--timeout",
                  "--force", "--version"]:
-        assert flag in result.output
+        assert flag in plain
 
 
 def test_version():
