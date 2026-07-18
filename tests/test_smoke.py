@@ -2,4 +2,4 @@ import decaf
 
 
 def test_version():
-    assert decaf.__version__ == "0.1.0"
+    assert decaf.__version__ == "1.0.0"
