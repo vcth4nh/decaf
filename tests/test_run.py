@@ -332,6 +332,21 @@ def test_run_resets_closed_registry(fake_env, make_jar, tmp_path: Path):
     assert report.totals["ok"] == 1
 
 
+def test_run_default_cpu_budget_leaves_one_core_free(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    import os
+
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+    )
+    assert report.settings["cpus"] == 15  # auto budget = cores - 1
+    assert report.settings["jobs"] == 4
+    assert report.settings["cpu_budget"] == 3
+
+
 def test_run_cpu_budget_and_jobs_clamp(fake_env, make_jar, tmp_path: Path):
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)

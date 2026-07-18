@@ -483,7 +483,7 @@ def run(
     chain: list[str] = []
     tmp_root = Path(tempfile.mkdtemp(prefix="decaf-"))
     client = httpx.Client(follow_redirects=True, timeout=30)
-    total_cpus = settings.cpus or (os.cpu_count() or 1)
+    total_cpus = settings.cpus or max(1, (os.cpu_count() or 1) - 1)  # auto: leave one core free
     jobs = settings.jobs or min(4, os.cpu_count() or 1)
     jobs = max(1, min(jobs, total_cpus))
     cpu_budget = max(1, total_cpus // jobs)
