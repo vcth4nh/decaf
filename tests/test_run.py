@@ -277,6 +277,33 @@ def test_interrupt_during_submission_still_writes_report(fake_env, make_jar, tmp
     assert (out / "decaf-report.json").is_file()
 
 
+def test_second_interrupt_during_teardown_still_writes_report(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    input_dir = tmp_path / "in"
+    for i in range(3):
+        make_jar(f"a{i}.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    real_submit = ThreadPoolExecutor.submit
+    calls = {"n": 0}
+
+    def flaky_submit(self, fn, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt  # first Ctrl-C
+        return real_submit(self, fn, *args, **kwargs)
+
+    def second_interrupt():
+        raise KeyboardInterrupt  # second Ctrl-C while the handler tears down
+
+    monkeypatch.setattr(ThreadPoolExecutor, "submit", flaky_submit)
+    monkeypatch.setattr(engines.PROCESSES, "kill_all", second_interrupt)
+    out = tmp_path / "out"
+    with pytest.raises(KeyboardInterrupt):
+        run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    on_disk = json.loads((out / "decaf-report.json").read_text())
+    assert on_disk["interrupted"] is True
+
+
 def test_run_resets_closed_registry(fake_env, make_jar, tmp_path: Path):
     import decaf.engines as _e
 

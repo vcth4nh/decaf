@@ -496,55 +496,58 @@ def run(
             resolver=resolver,
             cpu_budget=cpu_budget,
         )
-        with ThreadPoolExecutor(max_workers=jobs) as pool:
-            pending: set = set()
-            try:
-                for a in artifacts:
-                    pending.add(pool.submit(process_artifact, a, ctx))
-                while pending:
-                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        report, nested = fut.result()
-                        reports.append(report)
-                        if nested and on_found is not None:
-                            on_found(len(nested))
-                        if on_done is not None:
-                            on_done(report)
-                        for n in nested:
-                            pending.add(pool.submit(process_artifact, n, ctx))
-            except KeyboardInterrupt:
-                interrupted = True
-                engines.PROCESSES.kill_all()
-                for fut in pending:
-                    fut.cancel()
+        try:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                pending: set = set()
+                try:
+                    for a in artifacts:
+                        pending.add(pool.submit(process_artifact, a, ctx))
+                    while pending:
+                        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                        for fut in done:
+                            report, nested = fut.result()
+                            reports.append(report)
+                            if nested and on_found is not None:
+                                on_found(len(nested))
+                            if on_done is not None:
+                                on_done(report)
+                            for n in nested:
+                                pending.add(pool.submit(process_artifact, n, ctx))
+                except KeyboardInterrupt:
+                    interrupted = True
+                    engines.PROCESSES.kill_all()
+                    for fut in pending:
+                        fut.cancel()
+        finally:
+            # Write the report even if a second Ctrl-C lands during teardown,
+            # so partial results survive.
+            reports.sort(key=lambda r: r.rel)
+            run_report = RunReport(
+                settings={
+                    "input": str(settings.input),
+                    "output": str(settings.output),
+                    "engine": settings.engine,
+                    "fallback": settings.fallback,
+                    "mirror": settings.mirror,
+                    "maven": settings.maven,
+                    "max_depth": settings.max_depth,
+                    "jobs": jobs,
+                    "cpus": total_cpus,
+                    "cpu_budget": cpu_budget,
+                    "timeout": settings.timeout,
+                    "repos": list(settings.repos),
+                    "chain": chain,
+                    "java": java_exe,
+                    "java_major": java_major,
+                },
+                artifacts=reports,
+                totals=compute_totals(reports),
+                duration_seconds=round(time.monotonic() - start, 2),
+                interrupted=interrupted,
+            )
+            settings.output.mkdir(parents=True, exist_ok=True)
+            (settings.output / "decaf-report.json").write_text(run_report.to_json())
     finally:
         client.close()
         shutil.rmtree(tmp_root, ignore_errors=True)
-
-    reports.sort(key=lambda r: r.rel)
-    run_report = RunReport(
-        settings={
-            "input": str(settings.input),
-            "output": str(settings.output),
-            "engine": settings.engine,
-            "fallback": settings.fallback,
-            "mirror": settings.mirror,
-            "maven": settings.maven,
-            "max_depth": settings.max_depth,
-            "jobs": jobs,
-            "cpus": total_cpus,
-            "cpu_budget": cpu_budget,
-            "timeout": settings.timeout,
-            "repos": list(settings.repos),
-            "chain": chain,
-            "java": java_exe,
-            "java_major": java_major,
-        },
-        artifacts=reports,
-        totals=compute_totals(reports),
-        duration_seconds=round(time.monotonic() - start, 2),
-        interrupted=interrupted,
-    )
-    settings.output.mkdir(parents=True, exist_ok=True)
-    (settings.output / "decaf-report.json").write_text(run_report.to_json())
     return run_report
