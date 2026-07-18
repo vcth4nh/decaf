@@ -216,6 +216,7 @@ class Ctx:
     runner: Callable
     resolver: Callable
     cpu_budget: int | None = None  # visible cores per engine JVM
+    on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -282,6 +283,13 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
     report.classes = len(expected)
     produced: set[str] = set()
 
+    def _stream_kw(name: str) -> dict:
+        # Only pass the kwarg when streaming, so custom runners without it keep working.
+        if ctx.on_stderr is None:
+            return {}
+        sink, rel = ctx.on_stderr, artifact.rel
+        return {"on_stderr_line": lambda line: sink(f"{name} {rel}: {line}")}
+
     used_index: int | None = None
     for i, name in enumerate(ctx.chain):
         if engines.PROCESSES.closed:
@@ -290,6 +298,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **_stream_kw(name),
         )
         report.attempts.append(
             EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
@@ -322,6 +331,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **_stream_kw(name),
         )
         report.attempts.append(
             EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
@@ -449,6 +459,7 @@ def run(
     *,
     on_done: Callable[[ArtifactReport], None] | None = None,
     on_found: Callable[[int], None] | None = None,
+    on_stderr: Callable[[str], None] | None = None,
     runner: Callable | None = None,
     resolver: Callable | None = None,
 ) -> RunReport:
@@ -495,6 +506,7 @@ def run(
             runner=runner,
             resolver=resolver,
             cpu_budget=cpu_budget,
+            on_stderr=on_stderr,
         )
         try:
             with ThreadPoolExecutor(max_workers=jobs) as pool:

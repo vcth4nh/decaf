@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -254,12 +255,13 @@ def run_engine(
     timeout: float,
     java: str = "java",
     cpu_budget: int | None = None,
+    on_stderr_line: Callable[[str], None] | None = None,
 ) -> EngineResult:
     dest.mkdir(parents=True, exist_ok=True)
     if target.is_dir() and spec.name not in NATIVE_DIR_ENGINES:
-        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget)
+        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget, on_stderr_line)
     else:
-        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget)
+        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, on_stderr_line)
     _unpack_emitted_archives(dest)
     result.java_files = sum(1 for _ in dest.rglob("*.java"))
     return result
@@ -273,6 +275,7 @@ def _run_once(
     timeout: float,
     java: str,
     cpu_budget: int | None = None,
+    on_stderr_line: Callable[[str], None] | None = None,
 ) -> EngineResult:
     if PROCESSES.closed:
         return EngineResult(spec.name, -1, False, 0, "interrupted")
@@ -283,7 +286,26 @@ def _run_once(
     PROCESSES.register(proc)
     timed_out = False
     try:
-        _, err = proc.communicate(timeout=timeout)
+        if on_stderr_line is None:
+            _, err = proc.communicate(timeout=timeout)
+        else:
+            chunks: list[bytes] = []
+
+            def _pump() -> None:
+                for raw in proc.stderr:
+                    chunks.append(raw)
+                    on_stderr_line(raw.decode(errors="replace").rstrip("\n"))
+
+            reader = threading.Thread(target=_pump, daemon=True)
+            reader.start()
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_group(proc)
+                proc.wait()
+            reader.join()
+            err = b"".join(chunks)
     except subprocess.TimeoutExpired:
         timed_out = True
         _kill_group(proc)
@@ -302,6 +324,7 @@ def _run_per_class(
     timeout: float,
     java: str,
     cpu_budget: int | None = None,
+    on_stderr_line: Callable[[str], None] | None = None,
 ) -> EngineResult:
     returncode = 0
     timed_out = False
@@ -309,7 +332,7 @@ def _run_per_class(
     for f in sorted(root.rglob("*.class")):
         if "$" in f.name:
             continue  # inner classes ride along with their outer class
-        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget)
+        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, on_stderr_line)
         returncode = returncode or r.returncode
         timed_out = timed_out or r.timed_out
         if r.stderr_tail:
