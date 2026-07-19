@@ -487,6 +487,12 @@ def run(
     jobs = settings.jobs or min(4, os.cpu_count() or 1)
     jobs = max(1, min(jobs, total_cpus))
     cpu_budget = max(1, total_cpus // jobs)
+    affinity_base: set[int] | None = None
+    if hasattr(os, "sched_setaffinity"):
+        # ActiveProcessorCount only sizes JVM pools — JIT/GC warmup still bursts past
+        # it. Pinning the process enforces the budget; engine JVMs inherit the mask.
+        affinity_base = os.sched_getaffinity(0)
+        os.sched_setaffinity(0, set(sorted(affinity_base)[:total_cpus]))
     try:
         chain, engine_jars = _preflight_engines(settings, java_major, client)
         writer: MergeWriter | MirrorWriter
@@ -562,4 +568,6 @@ def run(
     finally:
         client.close()
         shutil.rmtree(tmp_root, ignore_errors=True)
+        if affinity_base is not None:
+            os.sched_setaffinity(0, affinity_base)
     return run_report

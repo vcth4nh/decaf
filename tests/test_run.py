@@ -332,6 +332,23 @@ def test_run_resets_closed_registry(fake_env, make_jar, tmp_path: Path):
     assert report.totals["ok"] == 1
 
 
+def test_run_enforces_cpu_budget_with_affinity(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    import os
+
+    calls: list[set] = []
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(16)), raising=False)
+    monkeypatch.setattr(os, "sched_setaffinity", lambda pid, mask: calls.append(set(mask)), raising=False)
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, cpus=8),
+        runner=perfect_engine,
+    )
+    assert calls[0] == set(range(8))  # pinned to the first 8 allowed cores; JVMs inherit
+    assert calls[-1] == set(range(16))  # original mask restored on the way out
+    assert len(calls) == 2
+
+
 def test_run_default_cpu_budget_leaves_one_core_free(fake_env, make_jar, tmp_path: Path, monkeypatch):
     import os
 

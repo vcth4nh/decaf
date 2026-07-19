@@ -48,12 +48,14 @@ Archive nesting is capped by `--max-depth` (default 1: jars inside a war or
 fat jar are processed, but not jars inside those). Deeper archives are listed
 in the report as skipped. Folder recursion is never limited.
 
-CPU use is budgeted: each engine JVM is started with
-`-XX:ActiveProcessorCount = cpus ÷ jobs`, so the total never oversubscribes
-the machine (decompilers like Vineflower default to one thread per visible
-core). The default budget is all cores minus one, keeping the machine
-responsive during long runs; `--cpus N` sets it exactly (e.g. your full core
-count to use everything). Workers are clamped so they never exceed the budget.
+CPU use is budgeted. On Linux the budget is enforced with CPU affinity:
+decaf pins itself to the first `cpus` cores and every engine JVM inherits
+the mask, so the rest of the machine stays genuinely free. Each JVM is also
+started with `-XX:ActiveProcessorCount = cpus ÷ jobs` to size its thread
+pools (on other platforms this hint is the only limit). The default budget
+is all cores minus one, keeping the machine responsive during long runs;
+`--cpus N` sets it exactly (e.g. your full core count to use everything).
+Workers are clamped so they never exceed the budget.
 
 ## Output layouts
 
