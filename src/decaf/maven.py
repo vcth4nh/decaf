@@ -136,6 +136,13 @@ def _groups_from_index(artifact: str, client: httpx.Client) -> list[str]:
         return []
 
 
+def _strip_container_root(name: str) -> str:
+    for root in ("WEB-INF/classes/", "BOOT-INF/classes/"):
+        if name.startswith(root):
+            return name[len(root):]
+    return name
+
+
 def _groups_from_packages(jar_path: Path) -> list[str]:
     try:
         with zipfile.ZipFile(jar_path) as zf:
@@ -144,7 +151,7 @@ def _groups_from_packages(jar_path: Path) -> list[str]:
         return []
     packages = [
         name.rpartition("/")[0].split("/")
-        for name in names
+        for name in (_strip_container_root(n) for n in names)
         if name.endswith(".class")
         and "/" in name
         and not name.startswith("META-INF/")

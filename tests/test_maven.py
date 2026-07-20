@@ -363,6 +363,25 @@ def test_candidate_groups_index_error_falls_back_to_packages(make_jar):
     assert groups == ["com.acme.lib", "com.acme"]
 
 
+@pytest.mark.parametrize("root", ["WEB-INF/classes/", "BOOT-INF/classes/"])
+def test_candidate_groups_strips_container_roots(make_jar, root):
+    war = make_jar(
+        "app-1.0.war",
+        {
+            f"{root}com/acme/app/Main.class": b"x",
+            f"{root}com/acme/app/util/Util.class": b"x",
+            "WEB-INF/lib/dep.jar": b"x",
+        },
+    )
+
+    def handler(request):
+        return httpx.Response(200, json={"response": {"docs": []}})
+
+    with make_client(handler) as c:
+        groups = candidate_groups("app", war, c)
+    assert groups == ["com.acme.app", "com.acme"]
+
+
 def test_candidate_groups_no_classes_or_default_package(make_jar):
     jar = make_jar("lib-1.0.jar", {"A.class": b"x", "README": b"x"})
 
