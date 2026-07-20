@@ -20,6 +20,8 @@ into a source tree that mirrors your input, or one merged package tree with
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - Java 11+ on PATH (Java 21+ enables all five engines; Vineflower needs 17+,
   Fernflower 21+)
+- Linux, macOS, or Windows (the CPU budget is hard-enforced on Linux,
+  hint-only elsewhere)
 
 ## Install
 

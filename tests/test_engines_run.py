@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import time
@@ -170,6 +171,21 @@ def test_run_engine_dir_target_iterates_for_non_native(tmp_path: Path, monkeypat
     res = run_engine(ENGINES["procyon"], JAR, tree, tmp_path / "out", timeout=30)
     assert sorted(Path(s).name for s in seen) == ["A.class", "B.class"]  # no A$1
     assert res.returncode == 0
+
+
+def test_kill_group_falls_back_without_killpg(monkeypatch):
+    # Windows has no os.killpg; the fallback must still kill the engine process.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    try:
+        monkeypatch.delattr(os, "killpg")
+        engines._kill_group(proc)
+        proc.wait(timeout=5)
+        assert proc.returncode != 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
 
 
 def test_process_registry_kill_all():

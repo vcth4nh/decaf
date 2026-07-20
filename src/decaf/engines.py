@@ -214,10 +214,14 @@ PROCESSES = ProcessRegistry()
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        proc.kill()
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    # Windows: no process groups; engines spawn no grandchildren, so this suffices.
+    proc.kill()
 
 
 def build_command(
