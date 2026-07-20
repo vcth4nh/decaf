@@ -591,6 +591,20 @@ def test_resolve_sources_nothing_verified(make_jar, tmp_path: Path):
     # deduped with the pkg ancestor) and org.springframework.jdbc (pkg prefix).
 
 
+def test_resolve_sources_no_candidate_groups(make_jar, tmp_path: Path):
+    jar = make_jar("mystery-1.0.jar", {"A.class": b"x"})  # default package: no prefix groups
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        raise AssertionError(f"no probes expected without candidates: {request.url}")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None and res.gav is None
+    assert res.miss == "no pom.properties; sha1 not in Central index; no candidate groups found"
+
+
 def test_resolve_sources_probe_budget_caps_requests(make_jar, tmp_path: Path):
     jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
     probes = []
