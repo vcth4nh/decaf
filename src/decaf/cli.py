@@ -125,6 +125,7 @@ def main(
         repos=cfg.repositories,
         verbose=verbose,
         quiet=quiet,
+        engine_overrides=cfg.engine_overrides,
     )
 
     progress = Progress(

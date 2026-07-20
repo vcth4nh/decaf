@@ -198,3 +198,25 @@ def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):
     assert (out / "app.jar/com/x/A.java").is_file()  # mirror layout is the default
     report = json.loads((out / "decaf-report.json").read_text())
     assert report["totals"]["ok"] == 1
+
+
+def test_engine_overrides_reach_settings(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    cfgf = tmp_path / "decaf.toml"
+    sha = "a" * 64
+    cfgf.write_text(
+        f'[engines.cfr]\nversion = "0.153"\nurl = "https://x.test/cfr.jar"\nsha256 = "{sha}"\n'
+    )
+    captured = {}
+
+    def capture(settings, on_done=None, on_found=None, on_stderr=None):
+        captured["s"] = settings
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+                                 "--config", str(cfgf)])
+    assert result.exit_code == 0
+    assert captured["s"].engine_overrides == {
+        "cfr": {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": sha},
+    }
