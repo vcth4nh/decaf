@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -213,6 +215,23 @@ class ProcessRegistry:
 PROCESSES = ProcessRegistry()
 
 
+if sys.platform == "linux":
+    _LIBC = ctypes.CDLL(None, use_errno=True)
+    _PR_SET_PDEATHSIG = 1  # linux/prctl.h
+
+    def _set_pdeathsig() -> None:
+        # Runs in the child between fork and exec (_LIBC resolved in the parent).
+        # If decaf dies uncatchably (kill -9, OOM), the kernel reaps the JVM
+        # instead of orphaning it mid-decompile. PDEATHSIG fires on death of the
+        # spawning *thread*, which is safe here: the worker thread always blocks
+        # until the engine exits, so it cannot die first.
+        _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
+
+    _SPAWN_KWARGS: dict[str, object] = {"preexec_fn": _set_pdeathsig}
+else:
+    _SPAWN_KWARGS = {}  # Windows rejects preexec_fn; macOS has no prctl
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
     if hasattr(os, "killpg"):
         try:
@@ -285,7 +304,8 @@ def _run_once(
         return EngineResult(spec.name, -1, False, 0, "interrupted")
     cmd = build_command(spec, jar_path, target, dest, java=java, cpu_budget=cpu_budget)
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
+        **_SPAWN_KWARGS,
     )
     PROCESSES.register(proc)
     timed_out = False
