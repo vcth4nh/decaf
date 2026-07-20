@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ import httpx
 
 from .engines import EngineError, EngineSpec, _sha256, fetch_to
 from .maven import sha1_of
+from .scanner import safe_extract_zip
 
 _HEX256 = re.compile(r"[0-9a-f]{64}")
 _HEX1 = re.compile(r"[0-9a-f]{40}")
@@ -115,6 +117,16 @@ def _update_maven(
     )
 
 
+def _github_release(client: httpx.Client, url: str, name: str) -> dict:
+    try:
+        resp = client.get(url, follow_redirects=True, timeout=30,
+                          headers={"Accept": "application/vnd.github+json"})
+        resp.raise_for_status()
+        return resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise EngineError(f"{name}: GitHub release lookup failed: {exc}") from exc
+
+
 def _update_github(
     spec: EngineSpec,
     client: httpx.Client,
@@ -122,4 +134,60 @@ def _update_github(
     version: str | None,
     gh: re.Match[str],
 ) -> UpdateResult | None:
-    raise EngineError(f"{spec.name}: GitHub update not implemented yet")
+    owner, repo, tag, filename = gh.groups()
+    idx = tag.find(spec.version)
+    if idx < 0:
+        raise EngineError(f"{spec.name}: cannot map version into tag {tag!r}")
+    tag_pre, tag_suf = tag[:idx], tag[idx + len(spec.version):]
+    if version is None:
+        rel = _github_release(
+            client, f"https://api.github.com/repos/{owner}/{repo}/releases/latest", spec.name
+        )
+        new_tag = str(rel.get("tag_name") or "")
+        core = new_tag[len(tag_pre): len(new_tag) - len(tag_suf) or None]
+        if not (new_tag.startswith(tag_pre) and new_tag.endswith(tag_suf) and core):
+            raise EngineError(f"{spec.name}: unrecognized release tag {new_tag!r}")
+        target = core
+    else:
+        target = version
+        rel = _github_release(
+            client,
+            f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag_pre}{version}{tag_suf}",
+            spec.name,
+        )
+    if target == spec.version:
+        return None
+    want = filename.replace(spec.version, target)
+    asset = next((a for a in rel.get("assets", []) if a.get("name") == want), None)
+    if asset is None:
+        raise EngineError(f"{spec.name}: release has no asset {want!r}")
+    digest = str(asset.get("digest") or "")
+    if not digest.startswith("sha256:"):
+        raise EngineError(f"{spec.name}: release asset publishes no sha256 digest — not updating")
+    expected = digest.removeprefix("sha256:").lower()
+    url = asset["browser_download_url"]
+    part = cache_dir / f"{spec.name}-{target}.part"
+    fetch_to(client, url, part, spec.name)
+    got = _sha256(part)
+    if got != expected:
+        part.unlink()
+        raise EngineError(f"{spec.name}: checksum mismatch for {url}: expected {expected}, got {got}")
+    jar = cache_dir / f"{spec.name}-{target}.jar"
+    if spec.archive_member:
+        extract_dir = cache_dir / f"{spec.name}-extract"
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        found = safe_extract_zip(part, extract_dir, members=[spec.archive_member])
+        part.unlink()
+        member = extract_dir / spec.archive_member
+        if found != 1:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            raise EngineError(f"{spec.name}: member {spec.archive_member!r} missing from {want}")
+        inner = _sha256(member)
+        member.replace(jar)
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        pin = {"version": target, "url": url, "sha256": inner,
+               "download_sha256": expected, "archive_member": spec.archive_member}
+    else:
+        part.replace(jar)
+        pin = {"version": target, "url": url, "sha256": got}
+    return UpdateResult(spec.name, spec.version, target, pin, "github-digest")
