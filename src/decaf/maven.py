@@ -33,6 +33,12 @@ class Gav:
             f"{self.artifact}-{self.version}-sources.jar"
         )
 
+    def jar_path(self) -> str:
+        return (
+            f"{self.group.replace('.', '/')}/{self.artifact}/{self.version}/"
+            f"{self.artifact}-{self.version}.jar"
+        )
+
 
 def _parse_pom_properties(text: str) -> Gav | None:
     props: dict[str, str] = {}
@@ -160,6 +166,34 @@ def _groups_from_packages(jar_path: Path) -> list[str]:
 def candidate_groups(artifact: str, jar_path: Path, client: httpx.Client) -> list[str]:
     """Ordered groupId guesses: Central index by artifactId, then package prefixes."""
     return list(dict.fromkeys(_groups_from_index(artifact, client) + _groups_from_packages(jar_path)))
+
+
+MAX_PROBES = 8
+
+
+def verify_gav(
+    gav: Gav,
+    sha1: str,
+    repos: Sequence[str],
+    client: httpx.Client,
+    budget: int = MAX_PROBES,
+) -> tuple[str | None, int]:
+    """Probe each repo's .jar.sha1 sidecar for gav. Returns (verifying repo, probes spent)."""
+    used = 0
+    for repo in repos:
+        if used >= budget:
+            break
+        used += 1
+        try:
+            resp = client.get(f"{repo}/{gav.jar_path()}.sha1", follow_redirects=True, timeout=10)
+        except httpx.HTTPError:
+            continue
+        if resp.status_code != 200:
+            continue
+        tokens = resp.text.split()
+        if tokens and tokens[0].lower() == sha1.lower():
+            return repo, used
+    return None, used
 
 
 def sha1_of(path: Path) -> str:

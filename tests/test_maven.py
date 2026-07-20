@@ -7,6 +7,7 @@ import pytest
 from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
+    MAX_PROBES,
     candidate_coords,
     candidate_groups,
     extract_java,
@@ -15,6 +16,7 @@ from decaf.maven import (
     gav_from_pom_properties,
     resolve_sources,
     sha1_of,
+    verify_gav,
 )
 
 POM = "groupId=com.example\nartifactId=lib\nversion=1.2\n"
@@ -360,3 +362,81 @@ def test_candidate_groups_dedups_index_and_packages(make_jar):
 
     with make_client(handler) as c:
         assert candidate_groups("lib", jar, c) == ["com.acme", "com.acme.lib"]
+
+
+SHA = "664fddbf6f727666cfacd2bb058720feab15be62"
+
+
+def test_gav_jar_path():
+    gav = Gav("org.springframework", "spring-jdbc", "6.2.17")
+    assert gav.jar_path() == (
+        "org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar"
+    )
+
+
+def test_verify_gav_match_and_lenient_parse():
+    def handler(request):
+        assert request.url.path.endswith("/spring-jdbc-6.2.17.jar.sha1")
+        return httpx.Response(200, text=f"{SHA.upper()}  spring-jdbc-6.2.17.jar\n")
+
+    gav = Gav("org.springframework", "spring-jdbc", "6.2.17")
+    with make_client(handler) as c:
+        repo, used = verify_gav(gav, SHA, ["https://r.test/m2"], c)
+    assert repo == "https://r.test/m2"
+    assert used == 1
+
+
+def test_verify_gav_mismatch_tries_next_repo():
+    def handler(request):
+        if request.url.host == "one.test":
+            return httpx.Response(200, text="deadbeef" * 5)
+        return httpx.Response(200, text=SHA)
+
+    gav = Gav("g", "a", "1")
+    with make_client(handler) as c:
+        repo, used = verify_gav(gav, SHA, ["https://one.test/m2", "https://two.test/m2"], c)
+    assert repo == "https://two.test/m2"
+    assert used == 2
+
+
+def test_verify_gav_missing_sha1_is_a_miss():
+    def handler(request):
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        repo, used = verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c)
+    assert repo is None
+    assert used == 1
+
+
+def test_verify_gav_empty_body_and_network_error():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "one.test":
+            return httpx.Response(200, text="")
+        raise httpx.ConnectError("boom")
+
+    with make_client(handler) as c:
+        repo, _ = verify_gav(
+            Gav("g", "a", "1"), SHA, ["https://one.test/m2", "https://two.test/m2"], c
+        )
+    assert repo is None
+    assert calls == ["one.test", "two.test"]
+
+
+def test_verify_gav_respects_budget():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        repo, used = verify_gav(
+            Gav("g", "a", "1"), SHA, ["https://one.test/m2", "https://two.test/m2"], c, budget=1
+        )
+    assert repo is None
+    assert used == 1
+    assert len(calls) == 1
