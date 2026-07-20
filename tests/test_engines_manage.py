@@ -1,7 +1,15 @@
 import hashlib
+import re
 from pathlib import Path
 
+import pytest
+from typer.testing import CliRunner
+
+from decaf.cli import app
 from decaf.engines import ENGINES, EngineSpec, active_specs, cache_status
+
+runner = CliRunner(env={"COLUMNS": "200"})
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 SHA = "b" * 64
 
@@ -49,3 +57,58 @@ def test_preflight_uses_override_spec(monkeypatch):
     assert chain == ["cfr"]
     assert seen["cfr"] == "9.9"
     assert jars["cfr"] == Path("/fake/cfr.jar")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_default_config(tmp_path: Path, monkeypatch):
+    """CLI invocations without --config must never read the developer's real user config."""
+    import decaf.config as config
+
+    monkeypatch.setattr(config, "default_config_path", lambda: tmp_path / "no-user-config.toml")
+
+
+def _row(plain: str, name: str) -> str:
+    return next(line for line in plain.splitlines() if name in line)
+
+
+def test_engines_list_shows_pins_cache_and_java(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 17))
+    data = b"vf-jar-bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    cache = tmp_path / "engines"
+    cache.mkdir()
+    (cache / "vineflower-9.9.jar").write_bytes(data)
+    cfgf = tmp_path / "c.toml"
+    cfgf.write_text(
+        f'[engines.vineflower]\nversion = "9.9"\nurl = "https://x.test/vf.jar"\nsha256 = "{digest}"\n'
+    )
+    result = runner.invoke(app, ["engines", "list", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    vf = _row(plain, "vineflower")
+    assert "9.9†" in vf and "yes" in vf          # override marker + cached (real hash match)
+    assert "no" in _row(plain, "cfr")            # not cached
+    assert "needs 21+" in _row(plain, "fernflower")  # java 17 too old
+    assert str(tmp_path / "engines") in plain    # cache dir footer
+
+
+def test_engines_list_without_java(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    monkeypatch.setattr(engines, "find_java", lambda: None)
+    result = runner.invoke(app, ["engines", "list"])
+    assert result.exit_code == 0
+    assert "not found" in ANSI.sub("", result.output)
+
+
+def test_engines_word_hits_subcommand_not_run(tmp_path: Path):
+    # spec edge: `decaf engines` reaches the subcommand group; a folder literally
+    # named engines needs `decaf ./engines`
+    result = runner.invoke(app, ["engines"])
+    plain = ANSI.sub("", result.output)
+    assert "does not exist" not in plain  # never treated as run's INPUT
+    assert "list" in plain               # engines group help/usage

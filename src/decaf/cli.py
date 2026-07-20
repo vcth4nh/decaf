@@ -13,7 +13,7 @@ from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TextColum
 from rich.table import Table
 from typer.core import TyperGroup
 
-from . import __version__
+from . import __version__, engines
 from .config import ConfigError, load_config
 from .pipeline import ArtifactReport, DecafError, RunReport, Settings, run
 from .scanner import ScanError
@@ -64,6 +64,44 @@ def _root(
                                           help="Print version and exit")] = False,
 ) -> None:
     """All-in-one Java decompiler."""
+
+
+engines_app = typer.Typer(name="engines", help="Manage decompiler engines", no_args_is_help=True)
+app.add_typer(engines_app)
+
+
+def _active_specs_from(config: Optional[Path]):
+    try:
+        cfg = load_config(config)
+    except ConfigError as exc:
+        raise _fail(str(exc))
+    return cfg, engines.active_specs(cfg.engine_overrides)
+
+
+@engines_app.command("list")
+def engines_list(
+    config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
+) -> None:
+    """Show engine pins, cache state, and Java compatibility."""
+    cfg, specs = _active_specs_from(config)
+    found = engines.find_java()
+    table = Table("ENGINE", "PIN", "CACHED", "JAVA")
+    for name in engines.ENGINE_ORDER:
+        spec = specs[name]
+        pin = spec.version + ("†" if name in cfg.engine_overrides else "")
+        cached = "yes" if engines.cache_status(spec) else "no"
+        if found is None:
+            java = "no java"
+        elif found[1] >= spec.min_java:
+            java = "ok"
+        else:
+            java = f"needs {spec.min_java}+"
+        table.add_row(name, pin, cached, java)
+    console.print(table)
+    if cfg.engine_overrides:
+        console.print("[dim]† pinned in config[/]")
+    console.print(f"[dim]cache: {engines.cache_root() / 'engines'}[/]")
+    console.print(f"[dim]java: {found[0]} (major {found[1]})[/]" if found else "[dim]java: not found[/]")
 
 
 class Engine(str, Enum):
