@@ -111,8 +111,7 @@ decaf engines update --reset   # back to built-in pins
 ```
 
 `update` verifies downloads against upstream-published checksums (sha256, or
-sha1 with a warning when that's all the repo offers; engines without any
-published checksum are skipped) and records the new pin under `[engines.NAME]`
+sha1 with a warning when that's all the repo offers; an engine publishing no checksum at all fails closed — reported with a red ✗ and exit code 1 — keeping its current pin) and records the new pin under `[engines.NAME]`
 in your config file — note that rewriting drops hand-written comments there.
 Every later run verifies the cached jar against that pin, exactly like the
 built-in ones. Like a folder named `engines`, a folder literally named `run`
