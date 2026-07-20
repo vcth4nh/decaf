@@ -2,6 +2,24 @@
 
 All notable changes to decaf are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Package-prefix groupId guessing now strips war/Spring Boot container roots
+  (`WEB-INF/classes/`, `BOOT-INF/classes/`), so war-layout archives produce
+  real candidates instead of junk like `WEB-INF.classes.…`.
+- Repeated artifactIds in one run no longer re-query the legacy index — the
+  per-artifactId lookup is memoized for the run.
+
+### Fixed
+
+- `engines update` no longer crashes with a traceback when the config file
+  cannot be written (permissions, corrupted TOML): the affected engine is
+  reported as failed and the rest proceed. Pins are validated before being
+  written, and upstream version strings containing path separators are
+  refused before any download.
+
 ## [1.3.0] - 2026-07-21
 
 ### Added
