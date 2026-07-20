@@ -180,6 +180,21 @@ def test_engines_clean_stale_keeps_active_pins(tmp_path: Path, monkeypatch):
     assert "removed" in ANSI.sub("", result.output)
 
 
+def test_engines_clean_stale_keeps_override_version(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    cache = tmp_path / "engines"
+    cache.mkdir(parents=True)
+    (cache / "cfr-9.9.jar").write_bytes(b"override-active")
+    (cache / f"cfr-{ENGINES['cfr'].version}.jar").write_bytes(b"superseded by override")
+    cfgf = tmp_path / "c.toml"
+    cfgf.write_text(f'[engines.cfr]\nversion = "9.9"\nurl = "https://x.test/cfr-9.9.jar"\nsha256 = "{SHA}"\n')
+    result = runner.invoke(app, ["engines", "clean", "--stale", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    assert sorted(p.name for p in cache.iterdir()) == ["cfr-9.9.jar"]
+
+
 def test_engines_clean_removes_everything(tmp_path: Path, monkeypatch):
     import decaf.engines as engines
 

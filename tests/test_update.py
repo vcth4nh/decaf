@@ -236,6 +236,20 @@ def test_github_zip_dist_records_both_hashes(tmp_path: Path):
     assert (tmp_path / "ghzip-2.0.jar").read_bytes() == NEW
 
 
+def test_github_checksum_mismatch_fails_and_cleans_up(tmp_path: Path):
+    routes = {
+        f"{API}/releases/latest": _release(
+            "v2.0",
+            [{"name": "tool-2.0.jar", "digest": f"sha256:{NEW_SHA}", "browser_download_url": DL}],
+        ),
+        DL: httpx.Response(200, content=b"tampered"),
+    }
+    with make_client(routes) as c:
+        with pytest.raises(EngineError, match="checksum mismatch"):
+            update.update_engine(GH_SPEC, c, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_explicit_version_with_path_separator_refused_before_any_request(tmp_path: Path):
     log: list[str] = []
     with make_client({}, log) as c:
