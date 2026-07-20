@@ -2,10 +2,18 @@
 
 All notable changes to decaf are documented here.
 
-## [Unreleased]
+## [1.3.0] - 2026-07-21
 
 ### Added
 
+- Sources resolution no longer depends on the frozen legacy SHA-1 index:
+  when it misses, decaf guesses candidate Maven coordinates from the
+  artifact's filename, manifest, and package prefixes, and verifies each
+  against the repository's `.jar.sha1` before fetching — so artifacts newer
+  than the index freeze (mid-2025) resolve to real sources again, and forks
+  or patched jars are never mismatched. The run report gains `resolved_by`
+  and `sources_miss` fields, and `-v` prints one `maven <artifact>: …` line
+  explaining each hit or miss.
 - `decaf engines` subcommands: `list` (pins, cache state, Java compatibility),
   `fetch` (pre-download for offline/CI), `clean [--stale]`, and `update`
   (checksum-verified pin updates recorded as `[engines.NAME]` config
@@ -80,6 +88,7 @@ First public release.
 - Exit codes: `0` all succeeded · `1` some failed · `2` usage/environment
   error · `130` interrupted.
 
+[1.3.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.3.0
 [1.2.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.2.0
 [1.1.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.1.0
 [1.0.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.0.0
