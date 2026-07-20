@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from decaf.engines import ENGINES, EngineResult
-from decaf.maven import Gav
+from decaf.maven import Gav, Resolution
 from decaf.pipeline import Ctx, MergeWriter, Settings, chain_for, process_artifact
 from decaf.scanner import Artifact, ArtifactKind
 
@@ -162,7 +162,12 @@ def test_maven_first_short_circuits_engines(make_jar, tmp_path: Path):
     sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// real source\nclass A {}"})
 
     def resolver(jar_path, repos, client, cache_dir, **kw):
-        return Gav("com.example", "lib", "1.2"), sources, "https://r.test/m2"
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=sources,
+            repo="https://r.test/m2",
+            resolved_by="pom-properties",
+        )
 
     runner = writing_runner({})
     ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
@@ -173,6 +178,8 @@ def test_maven_first_short_circuits_engines(make_jar, tmp_path: Path):
     assert report.repo == "https://r.test/m2"
     assert runner.calls == []
     assert "real source" in (tmp_path / "out/src/com/x/A.java").read_text()
+    assert report.resolved_by == "pom-properties"
+    assert report.sources_miss is None
 
 
 def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
@@ -180,12 +187,69 @@ def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
     empty_sources = make_jar("empty-sources.jar", {"README": "no java here"})
 
     def resolver(jar_path, repos, client, cache_dir, **kw):
-        return Gav("com.example", "lib", "1.2"), empty_sources, "https://r.test/m2"
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=empty_sources,
+            repo="https://r.test/m2",
+            resolved_by="verified-guess",
+        )
 
     runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
     ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
     report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert report.method == "vineflower"
+    assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no .java files"
+
+
+def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            miss="verified com.example:lib:1.2 via https://r.test/m2 but no -sources.jar published",
+        )
+
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.method == "vineflower"
+    assert report.gav == "com.example:lib:1.2"
+    assert report.resolved_by is None
+    assert report.sources_miss == (
+        "verified com.example:lib:1.2 via https://r.test/m2 but no -sources.jar published"
+    )
+
+
+def test_maven_verbose_line_on_hit_and_miss(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    lines: list[str] = []
+
+    def hit_resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=sources,
+            repo="https://r.test/m2",
+            resolved_by="verified-guess",
+        )
+
+    ctx = make_ctx(tmp_path, writing_runner({}), resolver=hit_resolver, maven=True)
+    ctx.on_stderr = lines.append
+    process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert lines == [
+        "maven lib-1.2.jar: verified-guess com.example:lib:1.2 (https://r.test/m2)"
+    ]
+
+    def miss_resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    lines.clear()
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=miss_resolver, maven=True)
+    ctx.on_stderr = lines.append
+    process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert lines == ["maven lib-1.2.jar: no pom.properties; 0 candidates"]
 
 
 def test_sources_jar_artifact_extracted(make_jar, tmp_path: Path):

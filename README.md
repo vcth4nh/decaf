@@ -7,8 +7,10 @@ into a source tree that mirrors your input, or one merged package tree with
 `--merge`.
 
 - **Sources first:** artifacts that resolve to a Maven GAV (embedded
-  `pom.properties`, or SHA-1 lookup on Maven Central) get their real
-  `-sources.jar` downloaded instead of decompiled.
+  `pom.properties`, SHA-1 lookup on Maven Central, or coordinates guessed
+  from the filename/manifest and proven against the repo's `.jar.sha1`)
+  get their real `-sources.jar` downloaded instead of decompiled. The
+  report records how each artifact resolved — or why it didn't.
 - **Five engines, automatic fallback:** Vineflower → CFR → Procyon →
   Fernflower → JD-CLI. If an engine crashes, times out, or misses classes,
   the next one takes over (whole-archive and per-class retries).

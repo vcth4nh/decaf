@@ -7,12 +7,16 @@ import pytest
 from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
+    MAX_PROBES,
+    candidate_coords,
+    candidate_groups,
     extract_java,
     fetch_sources,
     gav_from_central_sha1,
     gav_from_pom_properties,
     resolve_sources,
     sha1_of,
+    verify_gav,
 )
 
 POM = "groupId=com.example\nartifactId=lib\nversion=1.2\n"
@@ -193,9 +197,10 @@ def test_resolve_sources_pom_path_skips_sha1(make_jar, tmp_path: Path):
 
     with make_client(handler) as c:
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
-    assert res is not None
-    gav, path, repo = res
-    assert str(gav) == "com.example:lib:1.2"
+    assert str(res.gav) == "com.example:lib:1.2"
+    assert res.sources_jar is not None
+    assert res.resolved_by == "pom-properties"
+    assert res.miss is None
 
 
 def test_resolve_sources_sha1_fallback(make_jar, tmp_path: Path):
@@ -211,12 +216,19 @@ def test_resolve_sources_sha1_fallback(make_jar, tmp_path: Path):
 
     with make_client(handler) as c:
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
-    assert res is not None and str(res[0]) == "g:a:1"
+    assert str(res.gav) == "g:a:1"
+    assert res.sources_jar is not None
+    assert res.resolved_by == "sha1-index"
+
     with make_client(handler) as c:
         res2 = resolve_sources(
             jar, ["https://r.test/m2"], c, tmp_path / "cache", allow_sha1=False
         )
-    assert res2 is None
+    assert res2.sources_jar is None
+    assert res2.miss == (
+        "no pom.properties; sha1 lookup skipped; "
+        "no artifact/version hints in filename or manifest"
+    )
 
 
 @pytest.mark.network
@@ -226,8 +238,354 @@ def test_real_sources_roundtrip(tmp_path: Path):
         jar = tmp_path / "slf4j-api-2.0.13.jar"
         jar.write_bytes(client.get(url).content)
         res = resolve_sources(jar, [MAVEN_CENTRAL], client, tmp_path / "cache")
-        assert res is not None
-        gav, sources, repo = res
-        assert str(gav) == "org.slf4j:slf4j-api:2.0.13"
-        assert repo == MAVEN_CENTRAL
-        assert extract_java(sources, tmp_path / "out") > 10
+        assert str(res.gav) == "org.slf4j:slf4j-api:2.0.13"
+        assert res.repo == MAVEN_CENTRAL
+        assert extract_java(res.sources_jar, tmp_path / "out") > 10
+
+
+@pytest.mark.network
+def test_real_verified_guess_post_freeze_artifact(tmp_path: Path):
+    # spring-jdbc 6.2.17 (2026-03): Gradle-built (no pom.properties) and released
+    # after the legacy SHA-1 index froze — only the verified-guess step can find it.
+    url = "https://repo1.maven.org/maven2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar"
+    with httpx.Client(follow_redirects=True, timeout=60) as client:
+        jar = tmp_path / "spring-jdbc-6.2.17.jar"
+        jar.write_bytes(client.get(url).content)
+        res = resolve_sources(jar, [MAVEN_CENTRAL], client, tmp_path / "cache")
+        assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
+        assert res.resolved_by == "verified-guess"
+        assert res.repo == MAVEN_CENTRAL
+        assert extract_java(res.sources_jar, tmp_path / "out") > 10
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("spring-jdbc-6.2.17.jar", [("spring-jdbc", "6.2.17")]),
+        ("commons-lang3-3.12.0.jar", [("commons-lang3", "3.12.0")]),
+        ("guava-33.0.0-jre.jar", [("guava", "33.0.0-jre")]),
+        ("foo-2.jar", [("foo", "2")]),
+        ("mystery.jar", []),  # no dash-followed-by-digit
+        ("lib-abc.jar", []),  # dash but no digit after it
+    ],
+)
+def test_candidate_coords_from_filename(make_jar, filename, expected):
+    jar = make_jar(filename, {"com/x/A.class": b"x"})
+    assert candidate_coords(jar) == expected
+
+
+MANIFEST = (
+    "Manifest-Version: 1.0\r\n"
+    "Implementation-Title: spring-jdbc\r\n"
+    "Implementation-Version: 6.2.17\r\n"
+    "Automatic-Module-Name: spring.jdbc\r\n"
+)
+
+
+def test_candidate_coords_manifest_rescues_renamed_jar(make_jar):
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": MANIFEST})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_dedups_filename_and_manifest(make_jar):
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"META-INF/MANIFEST.MF": MANIFEST})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_rejects_spacey_title(make_jar):
+    manifest = "Implementation-Title: Spring JDBC\r\nImplementation-Version: 6.2.17\r\n"
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": manifest})
+    assert candidate_coords(jar) == []
+
+
+def test_candidate_coords_bundle_symbolic_name(make_jar):
+    manifest = (
+        "Bundle-SymbolicName: org.springframework.spring-jdbc;singleton:=true\r\n"
+        "Bundle-Version: 6.2.17\r\n"
+    )
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": manifest})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_manifest_continuation_line(make_jar):
+    manifest = (
+        "Implementation-Title: spring-\r\n jdbc\r\n"
+        "Implementation-Version: 6.2.17\r\n"
+    )
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": manifest})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_bad_zip(tmp_path: Path):
+    bad = tmp_path / "bad.jar"
+    bad.write_bytes(b"not a zip")
+    assert candidate_coords(bad) == []
+
+
+def test_candidate_groups_index_then_packages(make_jar):
+    jar = make_jar(
+        "spring-jdbc-6.2.17.jar",
+        {
+            "org/springframework/jdbc/core/JdbcTemplate.class": b"x",
+            "org/springframework/jdbc/support/JdbcUtils.class": b"x",
+            "module-info.class": b"x",
+            "META-INF/services/whatever": b"x",
+        },
+    )
+
+    def handler(request):
+        assert request.url.host == "search.maven.org"
+        assert request.url.params["q"] == 'a:"spring-jdbc"'
+        assert request.url.params["rows"] == "5"
+        docs = [
+            {"g": "org.springframework", "a": "spring-jdbc", "v": "6.2.8"},
+            {"g": "net.xdob.springframework", "a": "spring-jdbc", "v": "5.3.41"},
+        ]
+        return httpx.Response(200, json={"response": {"docs": docs}})
+
+    with make_client(handler) as c:
+        groups = candidate_groups("spring-jdbc", jar, c)
+    assert groups == [
+        "org.springframework",
+        "net.xdob.springframework",
+        "org.springframework.jdbc",
+    ]
+
+
+def test_candidate_groups_index_error_falls_back_to_packages(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+
+    def handler(request):
+        return httpx.Response(500)
+
+    with make_client(handler) as c:
+        groups = candidate_groups("lib", jar, c)
+    assert groups == ["com.acme.lib", "com.acme"]
+
+
+def test_candidate_groups_no_classes_or_default_package(make_jar):
+    jar = make_jar("lib-1.0.jar", {"A.class": b"x", "README": b"x"})
+
+    def handler(request):
+        return httpx.Response(200, json={"response": {"docs": []}})
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == []
+
+
+def test_candidate_groups_dedups_index_and_packages(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+
+    def handler(request):
+        return httpx.Response(
+            200, json={"response": {"docs": [{"g": "com.acme", "a": "lib", "v": "1"}]}}
+        )
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == ["com.acme", "com.acme.lib"]
+
+
+def test_candidate_groups_non_dict_docs_entry(make_jar):
+    jar = make_jar("lib-1.0.jar", {"A.class": b"x"})
+
+    def handler(request):
+        return httpx.Response(200, json={"response": {"docs": ["notadict"]}})
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == []
+
+
+SHA = "664fddbf6f727666cfacd2bb058720feab15be62"
+
+
+def test_gav_jar_path():
+    gav = Gav("org.springframework", "spring-jdbc", "6.2.17")
+    assert gav.jar_path() == (
+        "org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar"
+    )
+
+
+def test_verify_gav_match_and_lenient_parse():
+    def handler(request):
+        assert request.url.path.endswith("/spring-jdbc-6.2.17.jar.sha1")
+        return httpx.Response(200, text=f"{SHA.upper()}  spring-jdbc-6.2.17.jar\n")
+
+    gav = Gav("org.springframework", "spring-jdbc", "6.2.17")
+    with make_client(handler) as c:
+        repo, used = verify_gav(gav, SHA, ["https://r.test/m2"], c)
+    assert repo == "https://r.test/m2"
+    assert used == 1
+
+
+def test_verify_gav_mismatch_tries_next_repo():
+    def handler(request):
+        if request.url.host == "one.test":
+            return httpx.Response(200, text="deadbeef" * 5)
+        return httpx.Response(200, text=SHA)
+
+    gav = Gav("g", "a", "1")
+    with make_client(handler) as c:
+        repo, used = verify_gav(gav, SHA, ["https://one.test/m2", "https://two.test/m2"], c)
+    assert repo == "https://two.test/m2"
+    assert used == 2
+
+
+def test_verify_gav_missing_sha1_is_a_miss():
+    def handler(request):
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        repo, used = verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c)
+    assert repo is None
+    assert used == 1
+
+
+def test_verify_gav_empty_body_and_network_error():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        if request.url.host == "one.test":
+            return httpx.Response(200, text="")
+        raise httpx.ConnectError("boom")
+
+    with make_client(handler) as c:
+        repo, _ = verify_gav(
+            Gav("g", "a", "1"), SHA, ["https://one.test/m2", "https://two.test/m2"], c
+        )
+    assert repo is None
+    assert calls == ["one.test", "two.test"]
+
+
+def test_verify_gav_respects_budget():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        repo, used = verify_gav(
+            Gav("g", "a", "1"), SHA, ["https://one.test/m2", "https://two.test/m2"], c, budget=1
+        )
+    assert repo is None
+    assert used == 1
+    assert len(calls) == 1
+
+
+def test_verify_gav_invalid_url_candidate_is_a_miss():
+    def handler(request):
+        return httpx.Response(200, text=SHA)
+
+    with make_client(handler) as c:
+        repo, used = verify_gav(Gav("com.we\x01ird", "a", "1"), SHA, ["https://r.test/m2"], c)
+    assert repo is None
+    assert used == 1
+
+
+def _post_freeze_handler(sources_payload: bytes, probe_hits: set[str], sha: str):
+    """Simulates: sha1 search empty (frozen index), a: query knows the group,
+    .sha1 sidecar verifies, sources jar downloads."""
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            q = request.url.params["q"]
+            if q.startswith('1:"'):
+                return httpx.Response(200, json={"response": {"docs": []}})
+            docs = [{"g": "org.springframework", "a": "spring-jdbc", "v": "6.2.8"}]
+            return httpx.Response(200, json={"response": {"docs": docs}})
+        if request.url.path.endswith(".jar.sha1"):
+            if request.url.path in probe_hits:
+                return httpx.Response(200, text=sha)
+            return httpx.Response(404)
+        if request.url.path.endswith("-sources.jar"):
+            return httpx.Response(200, content=sources_payload)
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_resolve_sources_verified_guess(make_jar, tmp_path: Path):
+    jar = make_jar(
+        "spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/core/A.class": b"x"}
+    )
+    payload = make_jar("p.jar", {"org/springframework/jdbc/core/A.java": "class A {}"}).read_bytes()
+    hit = "/m2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar.sha1"
+    with make_client(_post_freeze_handler(payload, {hit}, sha1_of(jar))) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
+    assert res.resolved_by == "verified-guess"
+    assert res.repo == "https://r.test/m2"
+    assert res.sources_jar is not None and res.miss is None
+
+
+def test_resolve_sources_verified_but_no_sources(make_jar, tmp_path: Path):
+    jar = make_jar(
+        "spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/core/A.class": b"x"}
+    )
+    hit = "/m2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar.sha1"
+    inner = _post_freeze_handler(b"", {hit}, sha1_of(jar))
+
+    def handler(request):
+        if request.url.path.endswith("-sources.jar"):
+            return httpx.Response(404)
+        return inner(request)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
+    assert res.miss == (
+        "verified org.springframework:spring-jdbc:6.2.17 via https://r.test/m2 "
+        "but no -sources.jar published"
+    )
+
+
+def test_resolve_sources_nothing_verified(make_jar, tmp_path: Path):
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/A.class": b"x"})
+    with make_client(_post_freeze_handler(b"", set(), "")) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None and res.gav is None
+    assert res.miss == (
+        "no pom.properties; sha1 not in Central index; 2 candidates, none verified"
+    )
+    # 2 candidates for (spring-jdbc, 6.2.17): group org.springframework (index,
+    # deduped with the pkg ancestor) and org.springframework.jdbc (pkg prefix).
+
+
+def test_resolve_sources_probe_budget_caps_requests(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    probes = []
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            q = request.url.params["q"]
+            if q.startswith('1:"'):
+                return httpx.Response(200, json={"response": {"docs": []}})
+            docs = [{"g": f"g{i}", "a": "lib", "v": "1.0"} for i in range(5)]
+            return httpx.Response(200, json={"response": {"docs": docs}})
+        if request.url.path.endswith(".jar.sha1"):
+            probes.append(request.url.path)
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(
+            jar, ["https://one.test/m2", "https://two.test/m2"], c, tmp_path / "cache"
+        )
+    assert res.sources_jar is None
+    assert len(probes) == 8  # MAX_PROBES, not 7 candidates x 2 repos = 14
+
+
+def test_resolve_sources_survives_poisoned_package_names(make_jar, tmp_path: Path):
+    jar = make_jar("weird-1.0.jar", {"com/we\x01ird/A.class": b"x"})
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert res.miss is not None
