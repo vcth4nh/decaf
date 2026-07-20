@@ -26,6 +26,7 @@ into a source tree that mirrors your input, or one merged package tree with
 ## Install
 
 ```bash
+uv tool install git+https://github.com/vcth4nh/decaf   # no checkout needed
 uv tool install .        # from a checkout → `decaf` on PATH
 # or run without installing:
 uvx --from . decaf --help
@@ -90,13 +91,13 @@ works against any repository.
 
 ## Engines
 
-| Engine | Version | Min Java |
-|---|---|---|
-| [Vineflower](https://github.com/Vineflower/vineflower) | 1.12.0 | 17 |
-| [CFR](https://github.com/leibnitz27/cfr) | 0.152 | 11 |
-| [Procyon](https://github.com/mstrobel/procyon) | 0.6.0 | 11 |
-| Fernflower (JetBrains `java-decompiler-engine`) | 253.33813.25 | 21 |
-| [JD-CLI](https://github.com/intoolswetrust/jd-cli) | 1.2.0 | 11 |
+| Engine | Version | Min Java | License |
+|---|---|---|---|
+| [Vineflower](https://github.com/Vineflower/vineflower) | 1.12.0 | 17 | Apache-2.0 |
+| [CFR](https://github.com/leibnitz27/cfr) | 0.152 | 11 | MIT |
+| [Procyon](https://github.com/mstrobel/procyon) | 0.6.0 | 11 | Apache-2.0 |
+| [Fernflower](https://github.com/JetBrains/intellij-community/tree/master/plugins/java-decompiler/engine) (JetBrains `java-decompiler-engine`) | 253.33813.25 | 21 | Apache-2.0 |
+| [JD-CLI](https://github.com/intoolswetrust/jd-cli) | 1.2.0 | 11 | GPL-3.0 |
 
 ## Development
 
