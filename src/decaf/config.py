@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from collections.abc import Sequence
@@ -9,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import platformdirs
+import tomli_w
 
 MAVEN_CENTRAL = "https://repo1.maven.org/maven2"
 
@@ -100,3 +102,17 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
         if repo not in ordered:
             ordered.append(repo)
     return Config(repositories=tuple(ordered), engine_overrides=engine_overrides)
+
+
+def write_engine_pins(path: Path, overrides: dict[str, dict[str, str]]) -> None:
+    data: dict = {}
+    if path.is_file():
+        data = tomllib.loads(path.read_text())
+    if overrides:
+        data["engines"] = overrides
+    else:
+        data.pop("engines", None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(tomli_w.dumps(data))
+    os.replace(tmp, path)

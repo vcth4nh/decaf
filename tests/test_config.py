@@ -111,3 +111,23 @@ def test_engine_override_schema_errors(tmp_path: Path, content: str, msg: str):
     f.write_text(content + "\n")
     with pytest.raises(ConfigError, match=msg):
         load_config(f)
+
+
+def test_write_engine_pins_round_trip_preserves_repos(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text('repositories = ["https://nexus.example.com/repo"]\n')
+    pins = {"cfr": {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": SHA}}
+    config.write_engine_pins(path, pins)
+    cfg = load_config(path)
+    assert cfg.engine_overrides == pins
+    assert cfg.repositories[0] == "https://nexus.example.com/repo"
+
+
+def test_write_engine_pins_creates_and_clears(tmp_path: Path):
+    path = tmp_path / "sub" / "config.toml"
+    pins = {"cfr": {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": SHA}}
+    config.write_engine_pins(path, pins)
+    assert load_config(path).engine_overrides == pins
+    config.write_engine_pins(path, {})
+    assert load_config(path).engine_overrides == {}
+    assert "engines" not in path.read_text()
