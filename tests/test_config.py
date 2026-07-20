@@ -62,3 +62,52 @@ def test_schema_errors(tmp_path: Path, content: str, msg: str):
 def test_explicit_missing_config_raises(tmp_path: Path):
     with pytest.raises(ConfigError, match="not found"):
         load_config(tmp_path / "typo.toml")
+
+
+SHA = "a" * 64
+
+
+def test_engine_overrides_parsed(tmp_path: Path):
+    f = tmp_path / "config.toml"
+    f.write_text(
+        "[engines.cfr]\n"
+        'version = "0.153"\n'
+        'url = "https://x.test/cfr-0.153.jar"\n'
+        f'sha256 = "{SHA}"\n'
+        "[engines.jd]\n"
+        'version = "1.3.0"\n'
+        'url = "https://x.test/jd-cli-1.3.0-dist.zip"\n'
+        f'sha256 = "{SHA}"\n'
+        f'download_sha256 = "{SHA}"\n'
+        'archive_member = "jd-cli.jar"\n'
+    )
+    cfg = load_config(f)
+    assert cfg.engine_overrides["cfr"] == {
+        "version": "0.153", "url": "https://x.test/cfr-0.153.jar", "sha256": SHA,
+    }
+    assert cfg.engine_overrides["jd"]["archive_member"] == "jd-cli.jar"
+    assert cfg.repositories == (MAVEN_CENTRAL,)
+
+
+def test_no_engines_table_gives_empty_overrides(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "default_config_path", lambda: tmp_path / "nope.toml")
+    assert load_config(None).engine_overrides == {}
+
+
+@pytest.mark.parametrize(
+    "content,msg",
+    [
+        ("engines = 3", "must be a table"),
+        ("[engines.nope]\n" f'version = "1"\nurl = "https://x.test/j.jar"\nsha256 = "{SHA}"', "unknown engine"),
+        ("[engines.cfr]\n" f'url = "https://x.test/j.jar"\nsha256 = "{SHA}"', "missing key 'version'"),
+        ("[engines.cfr]\n" f'version = "1"\nurl = "http://x.test/j.jar"\nsha256 = "{SHA}"', "https"),
+        ('[engines.cfr]\nversion = "1"\nurl = "https://x.test/j.jar"\nsha256 = "ZZ"', "64 hex"),
+        ("[engines.cfr]\n" f'version = "1"\nurl = "https://x.test/j.jar"\nsha256 = "{SHA}"\nbogus = "x"', "unknown key"),
+        ('[engines.cfr]\nversion = 1\nurl = "https://x.test/j.jar"\nsha256 = "' + SHA + '"', "must be a string"),
+    ],
+)
+def test_engine_override_schema_errors(tmp_path: Path, content: str, msg: str):
+    f = tmp_path / "config.toml"
+    f.write_text(content + "\n")
+    with pytest.raises(ConfigError, match=msg):
+        load_config(f)
