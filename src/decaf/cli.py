@@ -6,6 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
+import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -102,6 +103,31 @@ def engines_list(
         console.print("[dim]† pinned in config[/]")
     console.print(f"[dim]cache: {engines.cache_root() / 'engines'}[/]")
     console.print(f"[dim]java: {found[0]} (major {found[1]})[/]" if found else "[dim]java: not found[/]")
+
+
+@engines_app.command("fetch")
+def engines_fetch(
+    names: Annotated[Optional[list[Engine]], typer.Argument(help="Engines to fetch (default: all)")] = None,
+    config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
+) -> None:
+    """Download engines into the cache ahead of time (offline/CI prep)."""
+    cfg, specs = _active_specs_from(config)
+    wanted = [n.value for n in names] if names else list(engines.ENGINE_ORDER)
+    failed = False
+    with httpx.Client() as client:
+        for name in wanted:
+            spec = specs[name]
+            if engines.cache_status(spec):
+                console.print(f"[green]✓[/] {name} {spec.version} already cached")
+                continue
+            try:
+                engines.ensure_engine(spec, client)
+            except engines.EngineError as exc:
+                console.print(f"[red]✗[/] {exc}")
+                failed = True
+                continue
+            console.print(f"[green]✓[/] {name} {spec.version} downloaded")
+    raise typer.Exit(code=1 if failed else 0)
 
 
 class Engine(str, Enum):

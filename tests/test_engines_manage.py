@@ -112,3 +112,46 @@ def test_engines_word_hits_subcommand_not_run(tmp_path: Path):
     plain = ANSI.sub("", result.output)
     assert "does not exist" not in plain  # never treated as run's INPUT
     assert "list" in plain               # engines group help/usage
+
+
+def test_engines_fetch_reports_and_exit_code(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    fetched = []
+
+    def fake_ensure(spec, client, cache_dir=None):
+        if spec.name == "cfr":
+            raise engines.EngineError("cfr: download failed: boom")
+        fetched.append(spec.name)
+        return tmp_path / "engines" / f"{spec.name}-{spec.version}.jar"
+
+    monkeypatch.setattr(engines, "ensure_engine", fake_ensure)
+    result = runner.invoke(app, ["engines", "fetch"])
+    assert result.exit_code == 1
+    plain = ANSI.sub("", result.output)
+    assert "downloaded" in plain and "cfr" in plain and "boom" in plain
+    assert fetched == ["vineflower", "procyon", "fernflower", "jd"]
+
+    fetched.clear()
+    result = runner.invoke(app, ["engines", "fetch", "vineflower"])
+    assert result.exit_code == 0
+    assert fetched == ["vineflower"]
+
+
+def test_engines_fetch_already_cached(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    data = b"vf-jar-bytes"
+    digest = hashlib.sha256(data).hexdigest()
+    (tmp_path / "engines").mkdir()
+    (tmp_path / "engines" / "vineflower-9.9.jar").write_bytes(data)
+    cfgf = tmp_path / "c.toml"
+    cfgf.write_text(
+        f'[engines.vineflower]\nversion = "9.9"\nurl = "https://x.test/vf.jar"\nsha256 = "{digest}"\n'
+    )
+    monkeypatch.setattr(engines, "ensure_engine", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not download")))
+    result = runner.invoke(app, ["engines", "fetch", "vineflower", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    assert "already cached" in ANSI.sub("", result.output)
