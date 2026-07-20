@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 import zipfile
 from collections.abc import Sequence
@@ -64,6 +65,52 @@ def gav_from_pom_properties(jar_path: Path) -> Gav | None:
             if jar_path.stem == f"{gav.artifact}-{gav.version}":
                 return gav
     return None
+
+
+_FILENAME_RE = re.compile(r"^(?P<artifact>.+?)-(?P<version>\d.*)$")
+_ARTIFACT_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _coords_from_filename(stem: str) -> tuple[str, str] | None:
+    m = _FILENAME_RE.match(stem)  # splits at the first '-' followed by a digit
+    if m:
+        return m.group("artifact"), m.group("version")
+    return None
+
+
+def _parse_manifest(jar_path: Path) -> dict[str, str]:
+    try:
+        with zipfile.ZipFile(jar_path) as zf:
+            text = zf.read("META-INF/MANIFEST.MF").decode(errors="replace")
+    except (KeyError, zipfile.BadZipFile, OSError):
+        return {}
+    attrs: dict[str, str] = {}
+    key = None
+    for line in text.splitlines():
+        if key is not None and line.startswith(" "):
+            attrs[key] += line[1:]
+        elif ":" in line:
+            key, _, value = line.partition(":")
+            key = key.strip()
+            attrs[key] = value.strip()
+    return attrs
+
+
+def candidate_coords(jar_path: Path) -> list[tuple[str, str]]:
+    """Ordered (artifact, version) guesses from filename, then manifest."""
+    coords: list[tuple[str, str]] = []
+    from_name = _coords_from_filename(jar_path.stem)
+    if from_name:
+        coords.append(from_name)
+    attrs = _parse_manifest(jar_path)
+    title, impl_version = attrs.get("Implementation-Title", ""), attrs.get("Implementation-Version", "")
+    if _ARTIFACT_RE.fullmatch(title) and impl_version[:1].isdigit():
+        coords.append((title, impl_version))
+    bsn, bundle_version = attrs.get("Bundle-SymbolicName", ""), attrs.get("Bundle-Version", "")
+    bsn_artifact = bsn.partition(";")[0].strip().rpartition(".")[2]
+    if _ARTIFACT_RE.fullmatch(bsn_artifact) and bundle_version[:1].isdigit():
+        coords.append((bsn_artifact, bundle_version))
+    return list(dict.fromkeys(coords))
 
 
 def sha1_of(path: Path) -> str:

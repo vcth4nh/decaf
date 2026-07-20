@@ -7,6 +7,7 @@ import pytest
 from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
+    candidate_coords,
     extract_java,
     fetch_sources,
     gav_from_central_sha1,
@@ -231,3 +232,67 @@ def test_real_sources_roundtrip(tmp_path: Path):
         assert str(gav) == "org.slf4j:slf4j-api:2.0.13"
         assert repo == MAVEN_CENTRAL
         assert extract_java(sources, tmp_path / "out") > 10
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("spring-jdbc-6.2.17.jar", [("spring-jdbc", "6.2.17")]),
+        ("commons-lang3-3.12.0.jar", [("commons-lang3", "3.12.0")]),
+        ("guava-33.0.0-jre.jar", [("guava", "33.0.0-jre")]),
+        ("foo-2.jar", [("foo", "2")]),
+        ("mystery.jar", []),  # no dash-followed-by-digit
+        ("lib-abc.jar", []),  # dash but no digit after it
+    ],
+)
+def test_candidate_coords_from_filename(make_jar, filename, expected):
+    jar = make_jar(filename, {"com/x/A.class": b"x"})
+    assert candidate_coords(jar) == expected
+
+
+MANIFEST = (
+    "Manifest-Version: 1.0\r\n"
+    "Implementation-Title: spring-jdbc\r\n"
+    "Implementation-Version: 6.2.17\r\n"
+    "Automatic-Module-Name: spring.jdbc\r\n"
+)
+
+
+def test_candidate_coords_manifest_rescues_renamed_jar(make_jar):
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": MANIFEST})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_dedups_filename_and_manifest(make_jar):
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"META-INF/MANIFEST.MF": MANIFEST})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_rejects_spacey_title(make_jar):
+    manifest = "Implementation-Title: Spring JDBC\r\nImplementation-Version: 6.2.17\r\n"
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": manifest})
+    assert candidate_coords(jar) == []
+
+
+def test_candidate_coords_bundle_symbolic_name(make_jar):
+    manifest = (
+        "Bundle-SymbolicName: org.springframework.spring-jdbc;singleton:=true\r\n"
+        "Bundle-Version: 6.2.17\r\n"
+    )
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": manifest})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_manifest_continuation_line(make_jar):
+    manifest = (
+        "Implementation-Title: spring-\r\n jdbc\r\n"
+        "Implementation-Version: 6.2.17\r\n"
+    )
+    jar = make_jar("renamed.jar", {"META-INF/MANIFEST.MF": manifest})
+    assert candidate_coords(jar) == [("spring-jdbc", "6.2.17")]
+
+
+def test_candidate_coords_bad_zip(tmp_path: Path):
+    bad = tmp_path / "bad.jar"
+    bad.write_bytes(b"not a zip")
+    assert candidate_coords(bad) == []
