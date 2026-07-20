@@ -16,7 +16,8 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from . import __version__, engines
-from .config import ConfigError, load_config
+from . import update
+from .config import ConfigError, default_config_path, load_config, write_engine_pins
 from .pipeline import ArtifactReport, DecafError, RunReport, Settings, run
 from .scanner import ScanError
 
@@ -295,3 +296,50 @@ def main(
     if report.interrupted:
         raise typer.Exit(code=130)
     raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
+
+
+@engines_app.command("update")
+def engines_update(
+    names: Annotated[Optional[list[Engine]], typer.Argument(help="Engines to update (default: all)")] = None,
+    version: Annotated[Optional[str], typer.Option("--version", help="Pin this exact version (one engine only)")] = None,
+    reset: Annotated[bool, typer.Option("--reset", help="Remove overrides, restoring built-in pins")] = False,
+    config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
+) -> None:
+    """Update engine pins to upstream latest (or --version) and record them in config."""
+    if version is not None and (reset or len(names or []) != 1):
+        raise _fail("--version needs exactly one engine name (and no --reset)")
+    cfg_path = config or default_config_path()
+    cfg, specs = _active_specs_from(config)
+    overrides = dict(cfg.engine_overrides)
+    wanted = [n.value for n in names] if names else list(engines.ENGINE_ORDER)
+
+    if reset:
+        removed = [n for n in wanted if overrides.pop(n, None) is not None]
+        if not removed:
+            console.print("no overrides to reset")
+            return
+        write_engine_pins(cfg_path, overrides)
+        for name in removed:
+            console.print(f"[green]✓[/] {name}: restored built-in pin {engines.ENGINES[name].version}")
+        return
+
+    failed = False
+    with httpx.Client() as client:
+        for name in wanted:
+            spec = specs[name]
+            try:
+                res = update.update_engine(
+                    spec, client, engines.cache_root() / "engines", version=version,
+                    warn=lambda msg: console.print(f"[yellow]{msg}[/]"),
+                )
+            except engines.EngineError as exc:
+                console.print(f"[red]✗[/] {exc}")
+                failed = True
+                continue
+            if res is None:
+                console.print(f"[green]✓[/] {name} {spec.version} already at latest")
+                continue
+            overrides[name] = res.pin
+            write_engine_pins(cfg_path, overrides)
+            console.print(f"[green]✓[/] {name} {res.old_version} → {res.version} (pinned in {cfg_path})")
+    raise typer.Exit(code=1 if failed else 0)

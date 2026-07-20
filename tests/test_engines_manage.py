@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from decaf.cli import app
+from decaf.config import load_config
 from decaf.engines import ENGINES, EngineSpec, active_specs, cache_status
 
 runner = CliRunner(env={"COLUMNS": "200"})
@@ -191,3 +192,82 @@ def test_engines_clean_removes_everything(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["engines", "clean"])  # idempotent on empty
     assert result.exit_code == 0
     assert "nothing to clean" in ANSI.sub("", result.output)
+
+
+def _fake_result(name: str, old: str):
+    import decaf.update as upd
+
+    return upd.UpdateResult(
+        name, old, "9.9",
+        {"version": "9.9", "url": f"https://x.test/{name}-9.9.jar", "sha256": "c" * 64},
+        "sha256",
+    )
+
+
+def test_update_writes_pins_and_reports(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+    import decaf.update as upd
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text("")
+
+    def fake_update(spec, client, cache_dir, version=None, warn=None):
+        return _fake_result("cfr", spec.version) if spec.name == "cfr" else None
+
+    monkeypatch.setattr(upd, "update_engine", fake_update)
+    result = runner.invoke(app, ["engines", "update", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert f"cfr {ENGINES['cfr'].version} → 9.9" in plain
+    assert "already at latest" in plain  # the four None engines
+    assert load_config(cfgf).engine_overrides["cfr"]["version"] == "9.9"
+
+
+def test_update_failure_keeps_config_and_exits_1(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+    import decaf.update as upd
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text("")
+
+    def fake_update(spec, client, cache_dir, version=None, warn=None):
+        if spec.name == "cfr":
+            raise engines.EngineError("cfr: upstream publishes no sha256 or sha1 for 2.0 — not updating")
+        return None
+
+    monkeypatch.setattr(upd, "update_engine", fake_update)
+    result = runner.invoke(app, ["engines", "update", "--config", str(cfgf)])
+    assert result.exit_code == 1
+    assert "not updating" in ANSI.sub("", result.output)
+    assert load_config(cfgf).engine_overrides == {}
+
+
+def test_update_version_requires_exactly_one_engine(tmp_path: Path):
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text("")
+    r1 = runner.invoke(app, ["engines", "update", "--version", "9.9", "--config", str(cfgf)])
+    r2 = runner.invoke(app, ["engines", "update", "cfr", "jd", "--version", "9.9", "--config", str(cfgf)])
+    assert r1.exit_code == 2 and r2.exit_code == 2
+
+
+def test_update_reset_restores_builtin_pins(tmp_path: Path, monkeypatch):
+    sha = "c" * 64
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text(
+        f'[engines.cfr]\nversion = "9.9"\nurl = "https://x.test/cfr.jar"\nsha256 = "{sha}"\n'
+        f'[engines.jd]\nversion = "8.8"\nurl = "https://x.test/jd.jar"\nsha256 = "{sha}"\n'
+    )
+    result = runner.invoke(app, ["engines", "update", "--reset", "cfr", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    assert "cfr" in ANSI.sub("", result.output)
+    assert list(load_config(cfgf).engine_overrides) == ["jd"]
+
+    result = runner.invoke(app, ["engines", "update", "--reset", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    assert load_config(cfgf).engine_overrides == {}
+
+    result = runner.invoke(app, ["engines", "update", "--reset", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    assert "no overrides" in ANSI.sub("", result.output)
