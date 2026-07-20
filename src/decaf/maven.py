@@ -120,7 +120,14 @@ def fetch_sources(
         if not zipfile.is_zipfile(tmp_name):
             os.unlink(tmp_name)
             continue
-        os.replace(tmp_name, cached)
+        try:
+            os.replace(tmp_name, cached)
+        except OSError:
+            # Windows denies replace when another thread races the same GAV;
+            # the winner's copy is identical, so drop ours and use it.
+            os.unlink(tmp_name)
+            if not cached.is_file():
+                continue
         marker.write_text(repo)
         return cached, repo
     return None

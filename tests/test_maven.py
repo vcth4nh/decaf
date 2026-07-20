@@ -110,6 +110,26 @@ def test_fetch_sources_all_miss(tmp_path: Path):
         assert fetch_sources(Gav("g", "a", "1"), ["https://x.test"], c, tmp_path) is None
 
 
+def test_fetch_sources_survives_windows_replace_race(tmp_path: Path, make_jar, monkeypatch):
+    import os as _os
+
+    gav = Gav("com.example", "lib", "1.2")
+    payload = make_jar("payload.jar", {"com/example/A.java": "class A {}"}).read_bytes()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    cached = cache / "com.example_lib_1.2-sources.jar"
+    cached.write_bytes(payload)  # a concurrent winner already put it in place
+
+    def deny(src, dst):
+        raise PermissionError(13, "Access is denied")  # Windows MoveFileEx race
+
+    monkeypatch.setattr(_os, "replace", deny)
+    with make_client(lambda request: httpx.Response(200, content=payload)) as c:
+        result = fetch_sources(gav, ["https://r.test/m2"], c, cache)
+    assert result == (cached, "https://r.test/m2")
+    assert not list(cache.glob("*.part"))  # loser's temp file cleaned up
+
+
 def test_fetch_sources_concurrent_same_gav(tmp_path: Path, make_jar):
     import threading
     import zipfile as _zip

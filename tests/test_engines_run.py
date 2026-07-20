@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import time
@@ -20,43 +21,47 @@ JAR = Path("/cache/engine.jar")
 OUT = Path("/out")
 
 
+APP = Path("/in/app.jar")  # str() so asserts match native path rendering on Windows
+
+
 def test_build_command_vineflower():
-    cmd = build_command(ENGINES["vineflower"], JAR, Path("/in/app.jar"), OUT, java=J)
-    assert cmd == [J, "-jar", str(JAR), "/in/app.jar", "/out"]
+    cmd = build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J)
+    assert cmd == [J, "-jar", str(JAR), str(APP), str(OUT)]
 
 
 def test_build_command_cfr():
-    cmd = build_command(ENGINES["cfr"], JAR, Path("/in/app.jar"), OUT, java=J)
-    assert cmd == [J, "-jar", str(JAR), "/in/app.jar", "--outputdir", "/out", "--silent", "true"]
+    cmd = build_command(ENGINES["cfr"], JAR, APP, OUT, java=J)
+    assert cmd == [J, "-jar", str(JAR), str(APP), "--outputdir", str(OUT), "--silent", "true"]
 
 
 def test_build_command_procyon_archive_and_class():
     spec = ENGINES["procyon"]
-    assert build_command(spec, JAR, Path("/in/app.war"), OUT, java=J) == [
-        J, "-jar", str(JAR), "-jar", "/in/app.war", "-o", "/out",
+    war, cls = Path("/in/app.war"), Path("/in/Foo.class")
+    assert build_command(spec, JAR, war, OUT, java=J) == [
+        J, "-jar", str(JAR), "-jar", str(war), "-o", str(OUT),
     ]
-    assert build_command(spec, JAR, Path("/in/Foo.class"), OUT, java=J) == [
-        J, "-jar", str(JAR), "-o", "/out", "/in/Foo.class",
+    assert build_command(spec, JAR, cls, OUT, java=J) == [
+        J, "-jar", str(JAR), "-o", str(OUT), str(cls),
     ]
 
 
 def test_build_command_fernflower_uses_main_class():
     spec = ENGINES["fernflower"]
-    cmd = build_command(spec, JAR, Path("/in/app.jar"), OUT, java=J)
-    assert cmd == [J, "-cp", str(JAR), spec.main_class, "/in/app.jar", "/out"]
+    cmd = build_command(spec, JAR, APP, OUT, java=J)
+    assert cmd == [J, "-cp", str(JAR), spec.main_class, str(APP), str(OUT)]
 
 
 def test_build_command_jd():
-    cmd = build_command(ENGINES["jd"], JAR, Path("/in/app.jar"), OUT, java=J)
-    assert cmd == [J, "-jar", str(JAR), "/in/app.jar", "-od", "/out"]
+    cmd = build_command(ENGINES["jd"], JAR, APP, OUT, java=J)
+    assert cmd == [J, "-jar", str(JAR), str(APP), "-od", str(OUT)]
 
 
 def test_build_command_cpu_budget():
-    cmd = build_command(ENGINES["vineflower"], JAR, Path("/in/app.jar"), OUT, java=J, cpu_budget=3)
-    assert cmd == [J, "-XX:ActiveProcessorCount=3", "-jar", str(JAR), "/in/app.jar", "/out"]
+    cmd = build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J, cpu_budget=3)
+    assert cmd == [J, "-XX:ActiveProcessorCount=3", "-jar", str(JAR), str(APP), str(OUT)]
     spec = ENGINES["fernflower"]
-    cmd = build_command(spec, JAR, Path("/in/app.jar"), OUT, java=J, cpu_budget=3)
-    assert cmd == [J, "-XX:ActiveProcessorCount=3", "-cp", str(JAR), spec.main_class, "/in/app.jar", "/out"]
+    cmd = build_command(spec, JAR, APP, OUT, java=J, cpu_budget=3)
+    assert cmd == [J, "-XX:ActiveProcessorCount=3", "-cp", str(JAR), spec.main_class, str(APP), str(OUT)]
 
 
 def test_run_engine_forwards_cpu_budget(tmp_path: Path, monkeypatch):
@@ -119,7 +124,16 @@ def test_run_engine_streams_stderr_lines_live(tmp_path: Path, monkeypatch):
                      timeout=30, on_stderr_line=on_line)
     assert time.monotonic() - start < 8  # engine exit was gated on the callback
     assert lines == ["first line", "second line"]
-    assert res.stderr_tail == "first line\nsecond line\n"
+    assert res.stderr_tail.replace("\r\n", "\n") == "first line\nsecond line\n"
+
+
+def test_run_engine_streaming_strips_crlf(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(engines, "build_command",
+                        _fake_build("import sys; sys.stderr.write('warn one\\r\\n')"))
+    lines: list[str] = []
+    run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out",
+               timeout=30, on_stderr_line=lines.append)
+    assert lines == ["warn one"]  # Windows children write \r\n line endings
 
 
 def test_run_engine_streaming_timeout_still_kills(tmp_path: Path, monkeypatch):
@@ -170,6 +184,21 @@ def test_run_engine_dir_target_iterates_for_non_native(tmp_path: Path, monkeypat
     res = run_engine(ENGINES["procyon"], JAR, tree, tmp_path / "out", timeout=30)
     assert sorted(Path(s).name for s in seen) == ["A.class", "B.class"]  # no A$1
     assert res.returncode == 0
+
+
+def test_kill_group_falls_back_without_killpg(monkeypatch):
+    # Windows has no os.killpg; the fallback must still kill the engine process.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    try:
+        monkeypatch.delattr(os, "killpg", raising=False)  # absent on Windows already
+        engines._kill_group(proc)
+        proc.wait(timeout=5)
+        assert proc.returncode != 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
 
 
 def test_process_registry_kill_all():
