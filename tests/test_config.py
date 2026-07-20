@@ -104,6 +104,8 @@ def test_no_engines_table_gives_empty_overrides(tmp_path: Path, monkeypatch):
         ('[engines.cfr]\nversion = "1"\nurl = "https://x.test/j.jar"\nsha256 = "ZZ"', "64 hex"),
         ("[engines.cfr]\n" f'version = "1"\nurl = "https://x.test/j.jar"\nsha256 = "{SHA}"\nbogus = "x"', "unknown key"),
         ('[engines.cfr]\nversion = 1\nurl = "https://x.test/j.jar"\nsha256 = "' + SHA + '"', "must be a string"),
+        ("[engines.cfr]\n" f'version = "1"\nurl = "https://x.test/j.jar"\nsha256 = "{SHA}"\nmin_java = 99', "unknown key"),
+        ("[engines.cfr]\n" f'version = "1"\nurl = "https://x.test/j.jar"\nsha256 = "{SHA}"\nmain_class = "X"', "unknown key"),
     ],
 )
 def test_engine_override_schema_errors(tmp_path: Path, content: str, msg: str):
