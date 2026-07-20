@@ -66,6 +66,8 @@ class ArtifactReport:
     method: str | None = None  # "maven" | "extracted" | engine name | None
     gav: str | None = None
     repo: str | None = None
+    resolved_by: str | None = None  # "pom-properties" | "sha1-index" | "verified-guess"
+    sources_miss: str | None = None  # why the maven path yielded nothing
     classes: int = 0
     java_files: int = 0
     resources_skipped: int = 0
@@ -400,25 +402,38 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
             _decompile(artifact, tmp, ctx, report)
         else:  # ARCHIVE
             nested = _discover_nested(artifact, ctx)
-            resolved = None
+            resolution = None
             if ctx.settings.maven and ctx.client is not None:
-                resolved = ctx.resolver(
+                resolution = ctx.resolver(
                     artifact.path, list(ctx.settings.repos), ctx.client, ctx.sources_cache
                 )
-            if resolved:
-                gav, sources_jar, repo = resolved
+            done = False
+            if resolution is not None and resolution.sources_jar is not None:
                 tmp = _tmp_dir(ctx)
-                if extract_java(sources_jar, tmp) > 0:
+                if extract_java(resolution.sources_jar, tmp) > 0:
                     java, resources, collisions = ctx.writer.add_tree(tmp, artifact.rel)
                     report.method = "maven"
-                    report.gav = str(gav)
-                    report.repo = repo
+                    report.repo = resolution.repo
+                    report.resolved_by = resolution.resolved_by
                     report.java_files = java
                     report.resources_skipped = resources
                     report.collisions = collisions
+                    done = True
                 else:
-                    resolved = None
-            if not resolved:
+                    resolution.miss = f"sources jar for {resolution.gav} contained no .java files"
+            if resolution is not None:
+                if resolution.gav is not None:
+                    report.gav = str(resolution.gav)
+                if not done:
+                    report.sources_miss = resolution.miss
+                if ctx.on_stderr is not None:
+                    msg = (
+                        f"{resolution.resolved_by} {resolution.gav} ({resolution.repo})"
+                        if done
+                        else resolution.miss
+                    )
+                    ctx.on_stderr(f"maven {artifact.rel}: {msg}")
+            if not done:
                 _decompile(artifact, artifact.path, ctx, report)
     except Exception:
         report.outcome = "failed"
