@@ -15,7 +15,7 @@ into a source tree that mirrors your input, or one merged package tree with
   Fernflower → JD-CLI. If an engine crashes, times out, or misses classes,
   the next one takes over (whole-archive and per-class retries).
 - **Engines auto-download** on first use (pinned versions, sha256-verified)
-  into your user cache dir.
+  into your user cache dir. Manage them with `decaf engines list|fetch|clean|update`.
 
 ## Requirements
 
@@ -100,6 +100,24 @@ works against any repository.
 | [Procyon](https://github.com/mstrobel/procyon) | 0.6.0 | 11 | Apache-2.0 |
 | [Fernflower](https://github.com/JetBrains/intellij-community/tree/master/plugins/java-decompiler/engine) (JetBrains `java-decompiler-engine`) | 253.33813.25 | 21 | Apache-2.0 |
 | [JD-CLI](https://github.com/intoolswetrust/jd-cli) | 1.2.0 | 11 | GPL-3.0 |
+
+### Managing engines
+
+```bash
+decaf engines list             # pins, cache state, Java compatibility
+decaf engines fetch            # pre-download all engines (offline/CI prep)
+decaf engines clean --stale    # drop superseded jars (bare: wipe the cache)
+decaf engines update           # update pins to upstream latest
+decaf engines update cfr --version 0.150   # pin an exact version
+decaf engines update --reset   # back to built-in pins
+```
+
+`update` verifies downloads against upstream-published checksums (sha256, or
+sha1 with a warning when that's all the repo offers; an engine publishing no checksum at all fails closed — reported with a red ✗ and exit code 1 — keeping its current pin) and records the new pin under `[engines.NAME]`
+in your config file — note that rewriting drops hand-written comments there.
+Every later run verifies the cached jar against that pin, exactly like the
+built-in ones. Like a folder named `engines`, a folder literally named `run`
+needs an explicit path (`decaf ./run`).
 
 ## Development
 

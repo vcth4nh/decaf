@@ -2,6 +2,16 @@
 
 All notable changes to decaf are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `decaf engines` subcommands: `list` (pins, cache state, Java compatibility),
+  `fetch` (pre-download for offline/CI), `clean [--stale]`, and `update`
+  (checksum-verified pin updates recorded as `[engines.NAME]` config
+  overrides, with `--version` and `--reset`). Plain `decaf INPUT` is
+  unchanged; `decaf run INPUT` also works.
+
 ## [1.2.0] - 2026-07-20
 
 ### Added

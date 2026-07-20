@@ -190,6 +190,7 @@ class Settings:
     repos: tuple[str, ...] = ()
     verbose: bool = False
     quiet: bool = False
+    engine_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def chain_for(
@@ -449,9 +450,10 @@ def _preflight_engines(
     settings: Settings, java_major: int, client: httpx.Client
 ) -> tuple[list[str], dict[str, Path]]:
     wanted = chain_for(settings.engine, settings.fallback)
+    specs = engines.active_specs(settings.engine_overrides)
     jars: dict[str, Path] = {}
     for name in wanted:
-        spec = ENGINES[name]
+        spec = specs[name]
         if spec.min_java > java_major:
             if name == settings.engine:
                 raise DecafError(
