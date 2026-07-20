@@ -36,13 +36,20 @@ def ok_report(**overrides) -> RunReport:
 
 
 def test_help_lists_flags():
-    result = runner.invoke(app, ["--help"])
+    result = runner.invoke(app, ["run", "--help"])
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
     for flag in ["--output", "--engine", "--no-fallback", "--merge", "--no-maven",
                  "--max-depth", "--repo", "--config", "--jobs", "--cpus", "--timeout",
-                 "--force", "--version"]:
+                 "--force"]:
         assert flag in plain
+
+
+def test_group_help_lists_run():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "run" in plain and "--version" in plain
 
 
 def test_version():
@@ -220,3 +227,19 @@ def test_engine_overrides_reach_settings(tmp_path: Path, make_jar, monkeypatch):
     assert captured["s"].engine_overrides == {
         "cfr": {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": sha},
     }
+
+
+def test_routing_positional_and_option_first(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    monkeypatch.setattr(cli, "run",
+                        lambda settings, on_done=None, on_found=None, on_stderr=None: ok_report())
+    assert runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "o1")]).exit_code == 0
+    assert runner.invoke(app, ["-o", str(tmp_path / "o2"), str(tmp_path / "in")]).exit_code == 0
+    assert runner.invoke(app, ["run", str(tmp_path / "in"), "-o", str(tmp_path / "o3")]).exit_code == 0
+
+
+def test_bare_decaf_shows_group_help():
+    result = runner.invoke(app, [])
+    plain = ANSI.sub("", result.output)
+    assert "run" in plain
+    assert result.exit_code in (0, 2)  # click's no_args_is_help exit code varies by version

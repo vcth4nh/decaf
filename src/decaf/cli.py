@@ -6,19 +6,67 @@ from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
+import click
 import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from typer.core import TyperGroup
 
 from . import __version__
 from .config import ConfigError, load_config
 from .pipeline import ArtifactReport, DecafError, RunReport, Settings, run
 from .scanner import ScanError
 
-app = typer.Typer(add_completion=False, context_settings={"help_option_names": ["-h", "--help"]})
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"decaf {__version__}")
+        raise typer.Exit()
+
+
+class DefaultGroup(TyperGroup):
+    """Route unknown first tokens to the run command, so `decaf INPUT` still works.
+
+    Modeled on click-default-group: unknown options are ignored at group level
+    and re-attached in front of the default command's args.
+    """
+
+    default_command = "run"
+    ignore_unknown_options = True
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name not in self.commands:
+            ctx._default_arg0 = cmd_name  # type: ignore[attr-defined]
+            cmd_name = self.default_command
+        return super().get_command(ctx, cmd_name)
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        cmd_name, cmd, rest = super().resolve_command(ctx, args)
+        arg0 = getattr(ctx, "_default_arg0", None)
+        if arg0 is not None:
+            rest = [arg0, *rest]
+        return cmd_name, cmd, rest
+
+
+app = typer.Typer(
+    cls=DefaultGroup,
+    add_completion=False,
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 console = Console()
+
+
+@app.callback()
+def _root(
+    version: Annotated[bool, typer.Option("--version", callback=_version_callback, is_eager=True,
+                                          help="Print version and exit")] = False,
+) -> None:
+    """All-in-one Java decompiler."""
 
 
 class Engine(str, Enum):
@@ -32,12 +80,6 @@ class Engine(str, Enum):
 def _fail(message: str) -> typer.Exit:
     console.print(f"[red]error:[/] {message}")
     return typer.Exit(code=2)
-
-
-def _version_callback(value: bool) -> None:
-    if value:
-        console.print(f"decaf {__version__}")
-        raise typer.Exit()
 
 
 def _status_line(r: ArtifactReport) -> str:
@@ -79,7 +121,7 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
         console.print("[yellow]interrupted — partial results written[/]")
 
 
-@app.command()
+@app.command(name="run")
 def main(
     input: Annotated[Path, typer.Argument(help="Folder to scan recursively, or a single archive", show_default=False)],
     output: Annotated[Path, typer.Option("--output", "-o", help="Output directory")] = Path("decaf-out"),
@@ -96,8 +138,6 @@ def main(
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Only print the final summary")] = False,
-    version: Annotated[bool, typer.Option("--version", callback=_version_callback, is_eager=True,
-                                          help="Print version and exit")] = False,
 ) -> None:
     """Decompile every Java artifact under INPUT, preferring real Maven sources."""
     if not input.exists():
