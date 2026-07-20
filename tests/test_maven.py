@@ -244,6 +244,21 @@ def test_real_sources_roundtrip(tmp_path: Path):
         assert extract_java(res.sources_jar, tmp_path / "out") > 10
 
 
+@pytest.mark.network
+def test_real_verified_guess_post_freeze_artifact(tmp_path: Path):
+    # spring-jdbc 6.2.17 (2026-03): Gradle-built (no pom.properties) and released
+    # after the legacy SHA-1 index froze — only the verified-guess step can find it.
+    url = "https://repo1.maven.org/maven2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar"
+    with httpx.Client(follow_redirects=True, timeout=60) as client:
+        jar = tmp_path / "spring-jdbc-6.2.17.jar"
+        jar.write_bytes(client.get(url).content)
+        res = resolve_sources(jar, [MAVEN_CENTRAL], client, tmp_path / "cache")
+        assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
+        assert res.resolved_by == "verified-guess"
+        assert res.repo == MAVEN_CENTRAL
+        assert extract_java(res.sources_jar, tmp_path / "out") > 10
+
+
 @pytest.mark.parametrize(
     ("filename", "expected"),
     [
