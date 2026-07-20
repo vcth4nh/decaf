@@ -93,6 +93,38 @@ def test_maven_checksum_mismatch_fails(tmp_path: Path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_maven_sha256_transport_error_fails_closed(tmp_path: Path):
+    sha256_url = f"{BASE}/2.0/fake-2.0.jar.sha256"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == sha256_url:
+            raise httpx.ConnectError("boom", request=request)
+        routes = {
+            f"{BASE}/maven-metadata.xml": httpx.Response(200, text=METADATA),
+            f"{BASE}/2.0/fake-2.0.jar": httpx.Response(200, content=NEW),
+            f"{BASE}/2.0/fake-2.0.jar.sha1": httpx.Response(200, text=NEW_SHA1),
+        }
+        return routes.get(url, httpx.Response(404))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(EngineError, match="checksum fetch failed"):
+            update.update_engine(MAVEN_SPEC, c, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_maven_garbage_sidecar_body_fails_closed(tmp_path: Path):
+    routes = {
+        f"{BASE}/maven-metadata.xml": httpx.Response(200, text=METADATA),
+        f"{BASE}/2.0/fake-2.0.jar": httpx.Response(200, content=NEW),
+        f"{BASE}/2.0/fake-2.0.jar.sha256": httpx.Response(200, text="<html>not a hash</html>"),
+    }
+    with make_client(routes) as c:
+        with pytest.raises(EngineError, match="unparseable checksum"):
+            update.update_engine(MAVEN_SPEC, c, tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_maven_explicit_version_skips_metadata(tmp_path: Path):
     log: list[str] = []
     routes = {

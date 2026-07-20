@@ -65,15 +65,21 @@ def _maven_latest(spec: EngineSpec, client: httpx.Client) -> str:
     return version
 
 
-def _fetch_checksum(client: httpx.Client, url: str, pattern: re.Pattern[str]) -> str | None:
+def _fetch_checksum(
+    client: httpx.Client, url: str, pattern: re.Pattern[str], label: str
+) -> str | None:
     try:
         resp = client.get(url, follow_redirects=True, timeout=30)
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
+        raise EngineError(f"{label}: checksum fetch failed for {url}: {exc}") from exc
+    if resp.status_code == 404:
         return None
     if resp.status_code != 200:
-        return None
+        raise EngineError(f"{label}: checksum fetch got HTTP {resp.status_code} for {url}")
     m = pattern.search(resp.text.strip().lower())
-    return m.group(0) if m else None
+    if not m:
+        raise EngineError(f"{label}: unparseable checksum body at {url}")
+    return m.group(0)
 
 
 def _update_maven(
@@ -83,14 +89,16 @@ def _update_maven(
     target: str,
     warn: Callable[[str], None],
 ) -> UpdateResult:
-    url = spec.url.replace(spec.version, target)
+    base = spec.url.rsplit("/", 2)[0]
+    filename = spec.url.rsplit("/", 1)[1]
+    url = f"{base}/{target}/{filename.replace(spec.version, target)}"
     part = cache_dir / f"{spec.name}-{target}.part"
     fetch_to(client, url, part, spec.name)
     try:
-        expected = _fetch_checksum(client, url + ".sha256", _HEX256)
+        expected = _fetch_checksum(client, url + ".sha256", _HEX256, spec.name)
         via = "sha256"
         if expected is None:
-            sha1 = _fetch_checksum(client, url + ".sha1", _HEX1)
+            sha1 = _fetch_checksum(client, url + ".sha1", _HEX1, spec.name)
             if sha1 is None:
                 raise EngineError(
                     f"{spec.name}: upstream publishes no sha256 or sha1 for {target} — not updating"
@@ -165,7 +173,9 @@ def _update_github(
     if not digest.startswith("sha256:"):
         raise EngineError(f"{spec.name}: release asset publishes no sha256 digest — not updating")
     expected = digest.removeprefix("sha256:").lower()
-    url = asset["browser_download_url"]
+    url = asset.get("browser_download_url")
+    if not url:
+        raise EngineError(f"{spec.name}: release asset has no download URL")
     part = cache_dir / f"{spec.name}-{target}.part"
     fetch_to(client, url, part, spec.name)
     got = _sha256(part)
