@@ -155,3 +155,39 @@ def test_engines_fetch_already_cached(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["engines", "fetch", "vineflower", "--config", str(cfgf)])
     assert result.exit_code == 0
     assert "already cached" in ANSI.sub("", result.output)
+
+
+def _seed_cache(tmp_path: Path) -> Path:
+    cache = tmp_path / "engines"
+    cache.mkdir(parents=True)
+    (cache / f"cfr-{ENGINES['cfr'].version}.jar").write_bytes(b"current")
+    (cache / "cfr-0.001.jar").write_bytes(b"superseded")
+    (cache / "vineflower-1.12.0.part").write_bytes(b"debris")
+    (cache / "jd-extract").mkdir()
+    (cache / "jd-extract" / "leftover").write_bytes(b"x")
+    return cache
+
+
+def test_engines_clean_stale_keeps_active_pins(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    cache = _seed_cache(tmp_path)
+    result = runner.invoke(app, ["engines", "clean", "--stale"])
+    assert result.exit_code == 0
+    assert sorted(p.name for p in cache.iterdir()) == [f"cfr-{ENGINES['cfr'].version}.jar"]
+    assert "removed" in ANSI.sub("", result.output)
+
+
+def test_engines_clean_removes_everything(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    cache = _seed_cache(tmp_path)
+    result = runner.invoke(app, ["engines", "clean"])
+    assert result.exit_code == 0
+    assert not cache.exists()
+
+    result = runner.invoke(app, ["engines", "clean"])  # idempotent on empty
+    assert result.exit_code == 0
+    assert "nothing to clean" in ANSI.sub("", result.output)

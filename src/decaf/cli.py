@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -128,6 +129,35 @@ def engines_fetch(
                 continue
             console.print(f"[green]✓[/] {name} {spec.version} downloaded")
     raise typer.Exit(code=1 if failed else 0)
+
+
+def _tree_size(path: Path) -> tuple[int, int]:
+    files = [p for p in path.rglob("*") if p.is_file()] if path.is_dir() else [path]
+    return len(files), sum(p.stat().st_size for p in files)
+
+
+@engines_app.command("clean")
+def engines_clean(
+    stale: Annotated[bool, typer.Option("--stale", help="Only remove files no active pin claims")] = False,
+    config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
+) -> None:
+    """Delete the engine cache (or just superseded files with --stale)."""
+    cfg, specs = _active_specs_from(config)
+    cache = engines.cache_root() / "engines"
+    if not cache.is_dir():
+        console.print("nothing to clean")
+        return
+    keep = {f"{s.name}-{s.version}.jar" for s in specs.values()}
+    victims = [p for p in cache.iterdir() if not (stale and p.name in keep)]
+    files = size = 0
+    for p in victims:
+        n, s = _tree_size(p)
+        files += n
+        size += s
+        shutil.rmtree(p) if p.is_dir() else p.unlink()
+    if not stale:
+        shutil.rmtree(cache, ignore_errors=True)
+    console.print(f"removed {files} files ({size / 1e6:.1f} MB)")
 
 
 class Engine(str, Enum):
