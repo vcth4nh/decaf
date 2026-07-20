@@ -113,6 +113,55 @@ def candidate_coords(jar_path: Path) -> list[tuple[str, str]]:
     return list(dict.fromkeys(coords))
 
 
+MAX_INDEX_GROUPS = 5
+
+
+def _groups_from_index(artifact: str, client: httpx.Client) -> list[str]:
+    try:
+        resp = client.get(
+            SEARCH_URL,
+            params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        docs = resp.json()["response"]["docs"]
+        return [d["g"] for d in docs if isinstance(d.get("g"), str)]
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        return []
+
+
+def _groups_from_packages(jar_path: Path) -> list[str]:
+    try:
+        with zipfile.ZipFile(jar_path) as zf:
+            names = zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return []
+    packages = [
+        name.rpartition("/")[0].split("/")
+        for name in names
+        if name.endswith(".class")
+        and "/" in name
+        and not name.startswith("META-INF/")
+        and name != "module-info.class"
+    ]
+    if not packages:
+        return []
+    prefix = packages[0]
+    for parts in packages[1:]:
+        keep = 0
+        for a, b in zip(prefix, parts):
+            if a != b:
+                break
+            keep += 1
+        prefix = prefix[:keep]
+    return [".".join(prefix[:n]) for n in range(len(prefix), 1, -1)]
+
+
+def candidate_groups(artifact: str, jar_path: Path, client: httpx.Client) -> list[str]:
+    """Ordered groupId guesses: Central index by artifactId, then package prefixes."""
+    return list(dict.fromkeys(_groups_from_index(artifact, client) + _groups_from_packages(jar_path)))
+
+
 def sha1_of(path: Path) -> str:
     h = hashlib.sha1()
     with open(path, "rb") as f:

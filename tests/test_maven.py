@@ -8,6 +8,7 @@ from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
     candidate_coords,
+    candidate_groups,
     extract_java,
     fetch_sources,
     gav_from_central_sha1,
@@ -296,3 +297,66 @@ def test_candidate_coords_bad_zip(tmp_path: Path):
     bad = tmp_path / "bad.jar"
     bad.write_bytes(b"not a zip")
     assert candidate_coords(bad) == []
+
+
+def test_candidate_groups_index_then_packages(make_jar):
+    jar = make_jar(
+        "spring-jdbc-6.2.17.jar",
+        {
+            "org/springframework/jdbc/core/JdbcTemplate.class": b"x",
+            "org/springframework/jdbc/support/JdbcUtils.class": b"x",
+            "module-info.class": b"x",
+            "META-INF/services/whatever": b"x",
+        },
+    )
+
+    def handler(request):
+        assert request.url.host == "search.maven.org"
+        assert request.url.params["q"] == 'a:"spring-jdbc"'
+        assert request.url.params["rows"] == "5"
+        docs = [
+            {"g": "org.springframework", "a": "spring-jdbc", "v": "6.2.8"},
+            {"g": "net.xdob.springframework", "a": "spring-jdbc", "v": "5.3.41"},
+        ]
+        return httpx.Response(200, json={"response": {"docs": docs}})
+
+    with make_client(handler) as c:
+        groups = candidate_groups("spring-jdbc", jar, c)
+    assert groups == [
+        "org.springframework",
+        "net.xdob.springframework",
+        "org.springframework.jdbc",
+    ]
+
+
+def test_candidate_groups_index_error_falls_back_to_packages(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+
+    def handler(request):
+        return httpx.Response(500)
+
+    with make_client(handler) as c:
+        groups = candidate_groups("lib", jar, c)
+    assert groups == ["com.acme.lib", "com.acme"]
+
+
+def test_candidate_groups_no_classes_or_default_package(make_jar):
+    jar = make_jar("lib-1.0.jar", {"A.class": b"x", "README": b"x"})
+
+    def handler(request):
+        return httpx.Response(200, json={"response": {"docs": []}})
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == []
+
+
+def test_candidate_groups_dedups_index_and_packages(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+
+    def handler(request):
+        return httpx.Response(
+            200, json={"response": {"docs": [{"g": "com.acme", "a": "lib", "v": "1"}]}}
+        )
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == ["com.acme", "com.acme.lib"]
