@@ -202,3 +202,14 @@ def test_github_zip_dist_records_both_hashes(tmp_path: Path):
         "download_sha256": dist_sha, "archive_member": "tool.jar",
     }
     assert (tmp_path / "ghzip-2.0.jar").read_bytes() == NEW
+
+
+@pytest.mark.network
+def test_real_cfr_metadata_resolves_a_version():
+    import re as _re
+
+    from decaf.engines import ENGINES
+
+    with httpx.Client() as c:
+        version = update._maven_latest(ENGINES["cfr"], c)
+    assert _re.fullmatch(r"[0-9][0-9.]*", version)
