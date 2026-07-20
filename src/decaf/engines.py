@@ -298,7 +298,7 @@ def _run_once(
             def _pump() -> None:
                 for raw in proc.stderr:
                     chunks.append(raw)
-                    on_stderr_line(raw.decode(errors="replace").rstrip("\n"))
+                    on_stderr_line(raw.decode(errors="replace").rstrip("\r\n"))
 
             reader = threading.Thread(target=_pump, daemon=True)
             reader.start()
