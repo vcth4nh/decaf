@@ -11,8 +11,8 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import httpx
@@ -86,6 +86,13 @@ ENGINES: dict[str, EngineSpec] = {
 ENGINE_ORDER = ["vineflower", "cfr", "procyon", "fernflower", "jd"]
 
 
+def active_specs(overrides: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, EngineSpec]:
+    specs = dict(ENGINES)
+    for name, fields in (overrides or {}).items():
+        specs[name] = replace(ENGINES[name], **fields)
+    return specs
+
+
 def cache_root() -> Path:
     return platformdirs.user_cache_path("decaf")
 
@@ -98,23 +105,32 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def cache_status(spec: EngineSpec, cache_dir: Path | None = None) -> bool:
+    jar = (cache_dir or cache_root() / "engines") / f"{spec.name}-{spec.version}.jar"
+    return jar.is_file() and _sha256(jar) == spec.sha256
+
+
+def fetch_to(client: httpx.Client, url: str, dest: Path, label: str) -> None:
+    try:
+        with client.stream("GET", url, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            with open(dest, "wb") as out:
+                for chunk in resp.iter_bytes():
+                    out.write(chunk)
+    except httpx.HTTPError as exc:
+        dest.unlink(missing_ok=True)
+        raise EngineError(f"{label}: download failed: {exc}") from exc
+
+
 def ensure_engine(spec: EngineSpec, client: httpx.Client, cache_dir: Path | None = None) -> Path:
     cache = cache_dir or cache_root() / "engines"
     cache.mkdir(parents=True, exist_ok=True)
     jar = cache / f"{spec.name}-{spec.version}.jar"
-    if jar.is_file() and _sha256(jar) == spec.sha256:
+    if cache_status(spec, cache):
         return jar
 
     part = jar.with_suffix(".part")
-    try:
-        with client.stream("GET", spec.url, follow_redirects=True) as resp:
-            resp.raise_for_status()
-            with open(part, "wb") as out:
-                for chunk in resp.iter_bytes():
-                    out.write(chunk)
-    except httpx.HTTPError as exc:
-        part.unlink(missing_ok=True)
-        raise EngineError(f"{spec.name}: download failed: {exc}") from exc
+    fetch_to(client, spec.url, part, spec.name)
 
     expected = spec.download_sha256 or spec.sha256
     got = _sha256(part)
