@@ -6,7 +6,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
 
-import click
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -36,15 +35,13 @@ class DefaultGroup(TyperGroup):
     default_command = "run"
     ignore_unknown_options = True
 
-    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+    def get_command(self, ctx, cmd_name):
         if cmd_name not in self.commands:
             ctx._default_arg0 = cmd_name  # type: ignore[attr-defined]
             cmd_name = self.default_command
         return super().get_command(ctx, cmd_name)
 
-    def resolve_command(
-        self, ctx: click.Context, args: list[str]
-    ) -> tuple[str | None, click.Command | None, list[str]]:
+    def resolve_command(self, ctx, args):
         cmd_name, cmd, rest = super().resolve_command(ctx, args)
         arg0 = getattr(ctx, "_default_arg0", None)
         if arg0 is not None:
