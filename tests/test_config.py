@@ -131,3 +131,10 @@ def test_write_engine_pins_creates_and_clears(tmp_path: Path):
     config.write_engine_pins(path, {})
     assert load_config(path).engine_overrides == {}
     assert "engines" not in path.read_text()
+
+
+def test_write_engine_pins_bad_existing_toml_raises(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("repositories = [unclosed\n")
+    with pytest.raises(ConfigError, match="invalid TOML"):
+        config.write_engine_pins(path, {})

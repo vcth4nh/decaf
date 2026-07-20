@@ -107,7 +107,14 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
 def write_engine_pins(path: Path, overrides: dict[str, dict[str, str]]) -> None:
     data: dict = {}
     if path.is_file():
-        data = tomllib.loads(path.read_text())
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            raise ConfigError(f"{path}: cannot read config: {exc}") from exc
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     if overrides:
         data["engines"] = overrides
     else:
