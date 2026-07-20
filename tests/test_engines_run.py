@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -184,6 +185,58 @@ def test_run_engine_dir_target_iterates_for_non_native(tmp_path: Path, monkeypat
     res = run_engine(ENGINES["procyon"], JAR, tree, tmp_path / "out", timeout=30)
     assert sorted(Path(s).name for s in seen) == ["A.class", "B.class"]  # no A$1
     assert res.returncode == 0
+
+
+def test_run_engine_spawns_with_pdeathsig_hook(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(engines, "build_command", _fake_build("pass"))
+    seen = {}
+    real_popen = subprocess.Popen
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    if sys.platform == "linux":
+        assert seen["preexec_fn"] is engines._set_pdeathsig
+    else:
+        assert "preexec_fn" not in seen  # Windows rejects it; macOS has no prctl
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="PR_SET_PDEATHSIG is Linux-only")
+def test_pdeathsig_reaps_child_when_spawner_hard_killed(tmp_path: Path):
+    # Issue #18: SIGKILL the spawning process (decaf) and the kernel must reap
+    # the engine child — no orphaned JVM decompiling at full tilt.
+    script = (
+        "import subprocess, sys, time\n"
+        "import decaf.engines as engines\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "                         start_new_session=True, **engines._SPAWN_KWARGS)\n"
+        "print(child.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+    child_pid = None
+    try:
+        child_pid = int(parent.stdout.readline())
+        os.kill(parent.pid, signal.SIGKILL)
+        parent.wait(timeout=5)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                return  # kernel reaped it
+            time.sleep(0.05)
+        pytest.fail("child survived SIGKILL of its spawner")
+    finally:
+        for pid in (parent.pid, child_pid):
+            if pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
 
 
 def test_kill_group_falls_back_without_killpg(monkeypatch):
