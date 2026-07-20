@@ -363,6 +363,25 @@ def test_candidate_groups_index_error_falls_back_to_packages(make_jar):
     assert groups == ["com.acme.lib", "com.acme"]
 
 
+def test_groups_from_index_memoized_per_client(make_jar):
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"response": {"docs": [{"g": "com.acme", "a": "lib", "v": "1"}]}})
+
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    with make_client(handler) as c:
+        first = candidate_groups("lib", jar, c)
+        second = candidate_groups("lib", jar, c)
+    assert first == second
+    assert len(calls) == 1  # repeated artifactId served from the per-run cache
+
+    with make_client(handler) as c2:  # a new client (new run) queries afresh
+        candidate_groups("lib", jar, c2)
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("root", ["WEB-INF/classes/", "BOOT-INF/classes/"])
 def test_candidate_groups_strips_container_roots(make_jar, root):
     war = make_jar(

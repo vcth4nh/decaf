@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import tempfile
+import weakref
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -121,19 +122,29 @@ def candidate_coords(jar_path: Path) -> list[tuple[str, str]]:
 
 MAX_INDEX_GROUPS = 5
 
+# Per-client (i.e. per-run) memo of index lookups: repeated artifactIds in one
+# batch would otherwise re-issue identical queries. Weak keys, so no client
+# outlives its run because of the cache.
+_INDEX_CACHE: weakref.WeakKeyDictionary[httpx.Client, dict[str, list[str]]] = (
+    weakref.WeakKeyDictionary()
+)
+
 
 def _groups_from_index(artifact: str, client: httpx.Client) -> list[str]:
-    try:
-        resp = client.get(
-            SEARCH_URL,
-            params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        docs = resp.json()["response"]["docs"]
-        return [d["g"] for d in docs if isinstance(d.get("g"), str)]
-    except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError):
-        return []
+    cache = _INDEX_CACHE.setdefault(client, {})
+    if artifact not in cache:
+        try:
+            resp = client.get(
+                SEARCH_URL,
+                params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            docs = resp.json()["response"]["docs"]
+            cache[artifact] = [d["g"] for d in docs if isinstance(d.get("g"), str)]
+        except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError):
+            cache[artifact] = []
+    return cache[artifact]
 
 
 def _strip_container_root(name: str) -> str:
