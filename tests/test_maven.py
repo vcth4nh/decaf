@@ -8,6 +8,7 @@ from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
     MAX_PROBES,
+    Resolution,
     candidate_coords,
     candidate_groups,
     extract_java,
@@ -197,9 +198,10 @@ def test_resolve_sources_pom_path_skips_sha1(make_jar, tmp_path: Path):
 
     with make_client(handler) as c:
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
-    assert res is not None
-    gav, path, repo = res
-    assert str(gav) == "com.example:lib:1.2"
+    assert str(res.gav) == "com.example:lib:1.2"
+    assert res.sources_jar is not None
+    assert res.resolved_by == "pom-properties"
+    assert res.miss is None
 
 
 def test_resolve_sources_sha1_fallback(make_jar, tmp_path: Path):
@@ -215,12 +217,19 @@ def test_resolve_sources_sha1_fallback(make_jar, tmp_path: Path):
 
     with make_client(handler) as c:
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
-    assert res is not None and str(res[0]) == "g:a:1"
+    assert str(res.gav) == "g:a:1"
+    assert res.sources_jar is not None
+    assert res.resolved_by == "sha1-index"
+
     with make_client(handler) as c:
         res2 = resolve_sources(
             jar, ["https://r.test/m2"], c, tmp_path / "cache", allow_sha1=False
         )
-    assert res2 is None
+    assert res2.sources_jar is None
+    assert res2.miss == (
+        "no pom.properties; sha1 lookup skipped; "
+        "no artifact/version hints in filename or manifest"
+    )
 
 
 @pytest.mark.network
@@ -230,11 +239,9 @@ def test_real_sources_roundtrip(tmp_path: Path):
         jar = tmp_path / "slf4j-api-2.0.13.jar"
         jar.write_bytes(client.get(url).content)
         res = resolve_sources(jar, [MAVEN_CENTRAL], client, tmp_path / "cache")
-        assert res is not None
-        gav, sources, repo = res
-        assert str(gav) == "org.slf4j:slf4j-api:2.0.13"
-        assert repo == MAVEN_CENTRAL
-        assert extract_java(sources, tmp_path / "out") > 10
+        assert str(res.gav) == "org.slf4j:slf4j-api:2.0.13"
+        assert res.repo == MAVEN_CENTRAL
+        assert extract_java(res.sources_jar, tmp_path / "out") > 10
 
 
 @pytest.mark.parametrize(
@@ -440,3 +447,97 @@ def test_verify_gav_respects_budget():
     assert repo is None
     assert used == 1
     assert len(calls) == 1
+
+
+def _post_freeze_handler(sources_payload: bytes, probe_hits: set[str], sha: str):
+    """Simulates: sha1 search empty (frozen index), a: query knows the group,
+    .sha1 sidecar verifies, sources jar downloads."""
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            q = request.url.params["q"]
+            if q.startswith('1:"'):
+                return httpx.Response(200, json={"response": {"docs": []}})
+            docs = [{"g": "org.springframework", "a": "spring-jdbc", "v": "6.2.8"}]
+            return httpx.Response(200, json={"response": {"docs": docs}})
+        if request.url.path.endswith(".jar.sha1"):
+            if request.url.path in probe_hits:
+                return httpx.Response(200, text=sha)
+            return httpx.Response(404)
+        if request.url.path.endswith("-sources.jar"):
+            return httpx.Response(200, content=sources_payload)
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_resolve_sources_verified_guess(make_jar, tmp_path: Path):
+    jar = make_jar(
+        "spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/core/A.class": b"x"}
+    )
+    payload = make_jar("p.jar", {"org/springframework/jdbc/core/A.java": "class A {}"}).read_bytes()
+    hit = "/m2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar.sha1"
+    with make_client(_post_freeze_handler(payload, {hit}, sha1_of(jar))) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
+    assert res.resolved_by == "verified-guess"
+    assert res.repo == "https://r.test/m2"
+    assert res.sources_jar is not None and res.miss is None
+
+
+def test_resolve_sources_verified_but_no_sources(make_jar, tmp_path: Path):
+    jar = make_jar(
+        "spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/core/A.class": b"x"}
+    )
+    hit = "/m2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar.sha1"
+    inner = _post_freeze_handler(b"", {hit}, sha1_of(jar))
+
+    def handler(request):
+        if request.url.path.endswith("-sources.jar"):
+            return httpx.Response(404)
+        return inner(request)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
+    assert res.miss == (
+        "verified org.springframework:spring-jdbc:6.2.17 via https://r.test/m2 "
+        "but no -sources.jar published"
+    )
+
+
+def test_resolve_sources_nothing_verified(make_jar, tmp_path: Path):
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/A.class": b"x"})
+    with make_client(_post_freeze_handler(b"", set(), "")) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None and res.gav is None
+    assert res.miss == (
+        "no pom.properties; sha1 not in Central index; 2 candidates, none verified"
+    )
+    # 2 candidates for (spring-jdbc, 6.2.17): group org.springframework (index,
+    # deduped with the pkg ancestor) and org.springframework.jdbc (pkg prefix).
+
+
+def test_resolve_sources_probe_budget_caps_requests(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    probes = []
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            q = request.url.params["q"]
+            if q.startswith('1:"'):
+                return httpx.Response(200, json={"response": {"docs": []}})
+            docs = [{"g": f"g{i}", "a": "lib", "v": "1.0"} for i in range(5)]
+            return httpx.Response(200, json={"response": {"docs": docs}})
+        if request.url.path.endswith(".jar.sha1"):
+            probes.append(request.url.path)
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(
+            jar, ["https://one.test/m2", "https://two.test/m2"], c, tmp_path / "cache"
+        )
+    assert res.sources_jar is None
+    assert len(probes) == 8  # MAX_PROBES, not 7 candidates x 2 repos = 14

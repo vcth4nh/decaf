@@ -270,6 +270,23 @@ def extract_java(sources_jar: Path, dest: Path) -> int:
         return 0
 
 
+@dataclass
+class Resolution:
+    """Outcome of the sources-first chain: a hit, or a miss with the reason."""
+
+    gav: Gav | None = None
+    sources_jar: Path | None = None
+    repo: str | None = None
+    resolved_by: str | None = None  # "pom-properties" | "sha1-index" | "verified-guess"
+    miss: str | None = None
+
+
+def _fetched(gav: Gav, fetched: tuple[Path, str] | None, resolved_by: str, no_sources: str) -> Resolution:
+    if fetched is None:
+        return Resolution(gav=gav, miss=no_sources)
+    return Resolution(gav=gav, sources_jar=fetched[0], repo=fetched[1], resolved_by=resolved_by)
+
+
 def resolve_sources(
     jar_path: Path,
     repos: Sequence[str],
@@ -277,14 +294,58 @@ def resolve_sources(
     cache_dir: Path,
     *,
     allow_sha1: bool = True,
-) -> tuple[Gav, Path, str] | None:
+) -> Resolution:
     gav = gav_from_pom_properties(jar_path)
-    if gav is None and allow_sha1:
-        gav = gav_from_central_sha1(sha1_of(jar_path), client)
-    if gav is None:
-        return None
-    fetched = fetch_sources(gav, repos, client, cache_dir)
-    if fetched is None:
-        return None
-    sources_jar, repo = fetched
-    return gav, sources_jar, repo
+    if gav is not None:
+        return _fetched(
+            gav,
+            fetch_sources(gav, repos, client, cache_dir),
+            "pom-properties",
+            f"found {gav} in pom.properties but no -sources.jar in any repo",
+        )
+
+    trail = ["no pom.properties"]
+    sha1 = sha1_of(jar_path)
+    if allow_sha1:
+        gav = gav_from_central_sha1(sha1, client)
+        if gav is not None:
+            return _fetched(
+                gav,
+                fetch_sources(gav, repos, client, cache_dir),
+                "sha1-index",
+                f"sha1 matched {gav} in Central index but no -sources.jar in any repo",
+            )
+        trail.append("sha1 not in Central index")
+    else:
+        trail.append("sha1 lookup skipped")
+
+    coords = candidate_coords(jar_path)
+    if not coords:
+        trail.append("no artifact/version hints in filename or manifest")
+        return Resolution(miss="; ".join(trail))
+
+    budget = MAX_PROBES
+    tried: set[Gav] = set()
+    for artifact, version in coords:
+        if budget <= 0:
+            break
+        for group in candidate_groups(artifact, jar_path, client):
+            if budget <= 0:
+                break
+            candidate = Gav(group, artifact, version)
+            if candidate in tried:
+                continue
+            tried.add(candidate)
+            repo, used = verify_gav(candidate, sha1, repos, client, budget)
+            budget -= used
+            if repo is None:
+                continue
+            ordered = [repo, *[r for r in repos if r != repo]]
+            return _fetched(
+                candidate,
+                fetch_sources(candidate, ordered, client, cache_dir),
+                "verified-guess",
+                f"verified {candidate} via {repo} but no -sources.jar published",
+            )
+    trail.append(f"{len(tried)} candidates, none verified" if tried else "no candidate groups found")
+    return Resolution(miss="; ".join(trail))
