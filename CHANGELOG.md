@@ -2,6 +2,30 @@
 
 All notable changes to decaf are documented here.
 
+## [1.2.0] - 2026-07-20
+
+### Added
+
+- Windows support: engine cleanup no longer relies on POSIX process groups,
+  CRLF stderr from engine children is handled, and concurrent sources-jar
+  downloads survive Windows rename semantics. CI now tests Linux, macOS, and
+  Windows.
+
+### Changed
+
+- The default CPU budget is now all cores minus one, so an unflagged run
+  leaves the machine responsive. Pass `--cpus` explicitly to use every core.
+
+### Fixed
+
+- `--cpus` is now actually enforced on Linux: decaf pins itself — and thus
+  every engine JVM — to that many cores via CPU affinity. Previously
+  `-XX:ActiveProcessorCount` only sized JVM thread pools, and JIT/GC warmup
+  burst well past the budget. On macOS/Windows the budget stays hint-only.
+- If decaf itself dies uncatchably (`kill -9`, OOM-kill), the kernel now
+  reaps the engine JVMs via `PR_SET_PDEATHSIG` on Linux; previously they were
+  orphaned and kept decompiling at full tilt.
+
 ## [1.1.0] - 2026-07-19
 
 ### Added
@@ -46,5 +70,6 @@ First public release.
 - Exit codes: `0` all succeeded · `1` some failed · `2` usage/environment
   error · `130` interrupted.
 
+[1.2.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.2.0
 [1.1.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.1.0
 [1.0.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.0.0
