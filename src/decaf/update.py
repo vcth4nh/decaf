@@ -29,6 +29,11 @@ class UpdateResult:
     verified_via: str  # "sha256" | "sha1" | "github-digest"
 
 
+def _check_version(name: str, target: str) -> None:
+    if not target or "/" in target or "\\" in target or ".." in target:
+        raise EngineError(f"{name}: refusing upstream version {target!r} — not updating")
+
+
 def update_engine(
     spec: EngineSpec,
     client: httpx.Client,
@@ -39,12 +44,15 @@ def update_engine(
     cache_dir.mkdir(parents=True, exist_ok=True)
     if version == spec.version:
         return None
+    if version is not None:
+        _check_version(spec.name, version)
     gh = _GITHUB.match(spec.url)
     if gh:
         return _update_github(spec, client, cache_dir, version, gh)
     target = version or _maven_latest(spec, client)
     if target == spec.version:
         return None
+    _check_version(spec.name, target)
     return _update_maven(spec, client, cache_dir, target, warn)
 
 
@@ -165,6 +173,7 @@ def _update_github(
         )
     if target == spec.version:
         return None
+    _check_version(spec.name, target)
     want = filename.replace(spec.version, target)
     asset = next((a for a in rel.get("assets", []) if a.get("name") == want), None)
     if asset is None:

@@ -236,6 +236,30 @@ def test_github_zip_dist_records_both_hashes(tmp_path: Path):
     assert (tmp_path / "ghzip-2.0.jar").read_bytes() == NEW
 
 
+def test_explicit_version_with_path_separator_refused_before_any_request(tmp_path: Path):
+    log: list[str] = []
+    with make_client({}, log) as c:
+        with pytest.raises(EngineError, match="refusing"):
+            update.update_engine(MAVEN_SPEC, c, tmp_path, version="2.0/../evil")
+    assert log == []
+
+
+def test_maven_metadata_release_with_path_separator_refused(tmp_path: Path):
+    meta = "<metadata><versioning><release>../evil</release></versioning></metadata>"
+    log: list[str] = []
+    with make_client({f"{BASE}/maven-metadata.xml": httpx.Response(200, text=meta)}, log) as c:
+        with pytest.raises(EngineError, match="refusing"):
+            update.update_engine(MAVEN_SPEC, c, tmp_path)
+    assert log == [f"{BASE}/maven-metadata.xml"]
+
+
+def test_github_tag_with_path_separator_refused(tmp_path: Path):
+    routes = {f"{API}/releases/latest": _release("v2.0/../evil", [])}
+    with make_client(routes) as c:
+        with pytest.raises(EngineError, match="refusing"):
+            update.update_engine(GH_SPEC, c, tmp_path)
+
+
 @pytest.mark.network
 def test_real_cfr_metadata_resolves_a_version():
     import re as _re

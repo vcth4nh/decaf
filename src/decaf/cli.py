@@ -318,7 +318,10 @@ def engines_update(
         if not removed:
             console.print("no overrides to reset")
             return
-        write_engine_pins(cfg_path, overrides)
+        try:
+            write_engine_pins(cfg_path, overrides)
+        except (ConfigError, OSError) as exc:
+            raise _fail(f"config write failed: {exc}")
         for name in removed:
             console.print(f"[green]✓[/] {name}: restored built-in pin {engines.ENGINES[name].version}")
         return
@@ -340,6 +343,12 @@ def engines_update(
                 console.print(f"[green]✓[/] {name} {spec.version} already at latest")
                 continue
             overrides[name] = res.pin
-            write_engine_pins(cfg_path, overrides)
+            try:
+                write_engine_pins(cfg_path, overrides)
+            except (ConfigError, OSError) as exc:
+                overrides.pop(name, None)
+                console.print(f"[red]✗[/] {name}: config write failed: {exc}")
+                failed = True
+                continue
             console.print(f"[green]✓[/] {name} {res.old_version} → {res.version} (pinned in {cfg_path})")
     raise typer.Exit(code=1 if failed else 0)
