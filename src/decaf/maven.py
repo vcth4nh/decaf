@@ -132,7 +132,7 @@ def _groups_from_index(artifact: str, client: httpx.Client) -> list[str]:
         resp.raise_for_status()
         docs = resp.json()["response"]["docs"]
         return [d["g"] for d in docs if isinstance(d.get("g"), str)]
-    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+    except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError):
         return []
 
 
@@ -186,7 +186,7 @@ def verify_gav(
         used += 1
         try:
             resp = client.get(f"{repo}/{gav.jar_path()}.sha1", follow_redirects=True, timeout=10)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx.InvalidURL):
             continue
         if resp.status_code != 200:
             continue

@@ -8,7 +8,6 @@ from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
     MAX_PROBES,
-    Resolution,
     candidate_coords,
     candidate_groups,
     extract_java,
@@ -386,6 +385,16 @@ def test_candidate_groups_dedups_index_and_packages(make_jar):
         assert candidate_groups("lib", jar, c) == ["com.acme", "com.acme.lib"]
 
 
+def test_candidate_groups_non_dict_docs_entry(make_jar):
+    jar = make_jar("lib-1.0.jar", {"A.class": b"x"})
+
+    def handler(request):
+        return httpx.Response(200, json={"response": {"docs": ["notadict"]}})
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == []
+
+
 SHA = "664fddbf6f727666cfacd2bb058720feab15be62"
 
 
@@ -462,6 +471,16 @@ def test_verify_gav_respects_budget():
     assert repo is None
     assert used == 1
     assert len(calls) == 1
+
+
+def test_verify_gav_invalid_url_candidate_is_a_miss():
+    def handler(request):
+        return httpx.Response(200, text=SHA)
+
+    with make_client(handler) as c:
+        repo, used = verify_gav(Gav("com.we\x01ird", "a", "1"), SHA, ["https://r.test/m2"], c)
+    assert repo is None
+    assert used == 1
 
 
 def _post_freeze_handler(sources_payload: bytes, probe_hits: set[str], sha: str):
@@ -556,3 +575,17 @@ def test_resolve_sources_probe_budget_caps_requests(make_jar, tmp_path: Path):
         )
     assert res.sources_jar is None
     assert len(probes) == 8  # MAX_PROBES, not 7 candidates x 2 repos = 14
+
+
+def test_resolve_sources_survives_poisoned_package_names(make_jar, tmp_path: Path):
+    jar = make_jar("weird-1.0.jar", {"com/we\x01ird/A.class": b"x"})
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert res.miss is not None
