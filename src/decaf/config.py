@@ -34,33 +34,34 @@ _OVERRIDE_REQUIRED = ("version", "url", "sha256")
 _OVERRIDE_OPTIONAL = ("download_sha256", "archive_member")
 
 
-def _parse_engines(cfg_path: Path, raw: object) -> dict[str, dict[str, str]]:
+def _validate_override(cfg_path: Path, name: str, entry: object) -> dict[str, str]:
     from .engines import ENGINES
 
+    if name not in ENGINES:
+        raise ConfigError(f"{cfg_path}: unknown engine {name!r}")
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{cfg_path}: engines.{name} must be a table")
+    for key in entry:
+        if key not in _OVERRIDE_REQUIRED + _OVERRIDE_OPTIONAL:
+            raise ConfigError(f"{cfg_path}: engines.{name}: unknown key {key!r}")
+    for key in _OVERRIDE_REQUIRED:
+        if key not in entry:
+            raise ConfigError(f"{cfg_path}: engines.{name}: missing key {key!r}")
+    for key, value in entry.items():
+        if not isinstance(value, str):
+            raise ConfigError(f"{cfg_path}: engines.{name}: {key} must be a string")
+    if not entry["url"].startswith("https://"):
+        raise ConfigError(f"{cfg_path}: engines.{name}: url must be an https URL")
+    for key in ("sha256", "download_sha256"):
+        if key in entry and not _SHA256_RE.fullmatch(entry[key]):
+            raise ConfigError(f"{cfg_path}: engines.{name}: {key} must be 64 hex chars")
+    return dict(entry)
+
+
+def _parse_engines(cfg_path: Path, raw: object) -> dict[str, dict[str, str]]:
     if not isinstance(raw, dict):
         raise ConfigError(f"{cfg_path}: engines must be a table")
-    overrides: dict[str, dict[str, str]] = {}
-    for name, entry in raw.items():
-        if name not in ENGINES:
-            raise ConfigError(f"{cfg_path}: unknown engine {name!r}")
-        if not isinstance(entry, dict):
-            raise ConfigError(f"{cfg_path}: engines.{name} must be a table")
-        for key in entry:
-            if key not in _OVERRIDE_REQUIRED + _OVERRIDE_OPTIONAL:
-                raise ConfigError(f"{cfg_path}: engines.{name}: unknown key {key!r}")
-        for key in _OVERRIDE_REQUIRED:
-            if key not in entry:
-                raise ConfigError(f"{cfg_path}: engines.{name}: missing key {key!r}")
-        for key, value in entry.items():
-            if not isinstance(value, str):
-                raise ConfigError(f"{cfg_path}: engines.{name}: {key} must be a string")
-        if not entry["url"].startswith("https://"):
-            raise ConfigError(f"{cfg_path}: engines.{name}: url must be an https URL")
-        for key in ("sha256", "download_sha256"):
-            if key in entry and not _SHA256_RE.fullmatch(entry[key]):
-                raise ConfigError(f"{cfg_path}: engines.{name}: {key} must be 64 hex chars")
-        overrides[name] = dict(entry)
-    return overrides
+    return {name: _validate_override(cfg_path, name, entry) for name, entry in raw.items()}
 
 
 def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Config:
@@ -105,6 +106,8 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
 
 
 def write_engine_pins(path: Path, overrides: dict[str, dict[str, str]]) -> None:
+    for name, entry in overrides.items():
+        _validate_override(path, name, entry)
     data: dict = {}
     if path.is_file():
         try:

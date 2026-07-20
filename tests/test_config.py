@@ -140,3 +140,19 @@ def test_write_engine_pins_bad_existing_toml_raises(tmp_path: Path):
     path.write_text("repositories = [unclosed\n")
     with pytest.raises(ConfigError, match="invalid TOML"):
         config.write_engine_pins(path, {})
+
+
+def test_write_engine_pins_rejects_malformed_pin(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    bad = {"cfr": {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": "nothex"}}
+    with pytest.raises(ConfigError, match="64 hex"):
+        config.write_engine_pins(path, bad)
+    assert not path.exists()
+
+
+def test_write_engine_pins_rejects_unknown_engine(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    bad = {"nope": {"version": "1.0", "url": "https://x.test/n.jar", "sha256": SHA}}
+    with pytest.raises(ConfigError, match="unknown engine"):
+        config.write_engine_pins(path, bad)
+    assert not path.exists()

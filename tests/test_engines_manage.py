@@ -271,3 +271,36 @@ def test_update_reset_restores_builtin_pins(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["engines", "update", "--reset", "--config", str(cfgf)])
     assert result.exit_code == 0
     assert "no overrides" in ANSI.sub("", result.output)
+
+
+def test_update_config_write_failure_fails_engine_cleanly(tmp_path: Path, monkeypatch):
+    import decaf.engines as engines
+    import decaf.update as upd
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text("")
+    (tmp_path / "config.toml.tmp").mkdir()  # blocks the atomic-write temp file
+
+    def fake_update(spec, client, cache_dir, version=None, warn=None):
+        return _fake_result("cfr", spec.version) if spec.name == "cfr" else None
+
+    monkeypatch.setattr(upd, "update_engine", fake_update)
+    result = runner.invoke(app, ["engines", "update", "--config", str(cfgf)])
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)  # no traceback escaped
+    plain = ANSI.sub("", result.output)
+    assert "cfr: config write failed" in plain
+    assert load_config(cfgf).engine_overrides == {}
+
+
+def test_reset_config_write_failure_is_clean_error(tmp_path: Path):
+    sha = "c" * 64
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text(f'[engines.cfr]\nversion = "9.9"\nurl = "https://x.test/cfr.jar"\nsha256 = "{sha}"\n')
+    (tmp_path / "config.toml.tmp").mkdir()
+    result = runner.invoke(app, ["engines", "update", "--reset", "cfr", "--config", str(cfgf)])
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    assert "error: config write failed" in ANSI.sub("", result.output)
+    assert load_config(cfgf).engine_overrides["cfr"]["version"] == "9.9"  # override intact
