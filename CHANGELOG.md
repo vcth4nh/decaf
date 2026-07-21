@@ -2,7 +2,7 @@
 
 All notable changes to decaf are documented here.
 
-## [Unreleased]
+## [1.4.1] - 2026-07-21
 
 ### Fixed
 
@@ -152,6 +152,7 @@ First public release.
 - Exit codes: `0` all succeeded · `1` some failed · `2` usage/environment
   error · `130` interrupted.
 
+[1.4.1]: https://github.com/vcth4nh/decaf/releases/tag/v1.4.1
 [1.4.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.4.0
 [1.3.1]: https://github.com/vcth4nh/decaf/releases/tag/v1.3.1
 [1.3.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.3.0
