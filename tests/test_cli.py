@@ -290,3 +290,31 @@ def test_warn_sink_renders_message_body(tmp_path: Path, make_jar, monkeypatch):
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
     assert "maven: r.test: [boom] persisted <odd>" in plain  # escape(): markup-like text renders verbatim
+
+
+def test_status_line_cached_suffix():
+    r = ArtifactReport(
+        rel="a.jar", kind="archive", outcome="ok", method="maven",
+        gav="com.example:lib:1.2", sources_cached=True,
+    )
+    assert cli._status_line(r) == "[green]✓[/] a.jar (maven sources, com.example:lib:1.2, cached)"
+    r.sources_cached = False
+    assert "cached" not in cli._status_line(r)
+
+
+def test_summary_counts_cached_sources(tmp_path: Path, make_jar, monkeypatch):
+    rep = ok_report()
+    rep.artifacts[0].sources_cached = True
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "maven 1 (1 cached), decompiled 1, extracted 0" in plain
+
+
+def test_summary_wording_unchanged_without_cache_hits(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "maven 1, decompiled 1, extracted 0" in plain

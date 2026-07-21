@@ -178,6 +178,8 @@ def _status_line(r: ArtifactReport) -> str:
     if r.outcome == "ok":
         if r.method == "maven":
             detail = f"maven sources, {r.gav}"
+            if r.sources_cached:
+                detail += ", cached"
         elif r.method == "extracted":
             detail = "extracted sources jar"
         else:
@@ -195,7 +197,11 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
     t = report.totals
     table = Table(title="decaf summary", show_header=False)
     table.add_row("Artifacts", str(t["artifacts"]))
-    table.add_row("OK", f"{t['ok']} (maven {t['maven_sources']}, decompiled {t['decompiled']}, extracted {t['extracted']})")
+    cached = sum(1 for r in report.artifacts if r.sources_cached)
+    maven_part = f"maven {t['maven_sources']}"
+    if cached:
+        maven_part += f" ({cached} cached)"
+    table.add_row("OK", f"{t['ok']} ({maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']})")
     table.add_row("Skipped", str(t["skipped"]))
     table.add_row("Failed", str(t["failed"]))
     table.add_row("Java files", str(t["java_files"]))
