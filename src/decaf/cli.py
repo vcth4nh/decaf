@@ -13,7 +13,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
-from rich.table import Table
+from rich.table import Column, Table
 from typer.core import TyperGroup
 
 from . import __version__, engines
@@ -402,7 +402,7 @@ def main(
 
     progress = Progress(
         SpinnerColumn(),
-        TextColumn("{task.description}"),
+        TextColumn("{task.description}", table_column=Column(no_wrap=True)),
         console=console,
         transient=True,
         disable=quiet,
