@@ -27,7 +27,7 @@ from .scanner import (
     ARCHIVE_EXTS,
     Artifact,
     ArtifactKind,
-    classify_zip,
+    classify_counted,
     copy_class_tree,
     find_nested_archives,
     safe_extract_zip,
@@ -379,7 +379,8 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     for name in names:
         p = extract_dir / name
         if p.is_file():
-            nested.append(Artifact(p, f"{artifact.rel}!/{name}", classify_zip(p)))
+            kind, classes = classify_counted(p)
+            nested.append(Artifact(p, f"{artifact.rel}!/{name}", kind, classes))
     return nested
 
 

@@ -6,6 +6,7 @@ from decaf.scanner import (
     Artifact,
     ArtifactKind,
     ScanError,
+    classify_counted,
     classify_zip,
     copy_class_tree,
     find_nested_archives,
@@ -151,3 +152,25 @@ def test_scan_counted_single_file(make_jar):
 def test_scan_input_delegates_to_scan_counted(make_jar, tmp_path: Path):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     assert scan_input(tmp_path / "in") == scan_counted(tmp_path / "in")[0]
+
+
+def test_classify_counted_counts_class_entries(make_jar):
+    jar = make_jar("a.jar", {"com/A.class": b"x", "com/B$1.class": b"y", "r.txt": b"z"})
+    assert classify_counted(jar) == (ArtifactKind.ARCHIVE, 2)
+
+
+def test_classify_counted_corrupt_is_zero(tmp_path):
+    bad = tmp_path / "bad.jar"
+    bad.write_bytes(b"not a zip")
+    assert classify_counted(bad) == (ArtifactKind.CORRUPT, 0)
+
+
+def test_scan_counted_populates_artifact_classes(make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/A.class": b"x", "com/B.class": b"y"}, base=input_dir)
+    (input_dir / "C.class").write_bytes(b"c")
+    artifacts, _ = scan_counted(input_dir)
+    by_rel = {a.rel: a for a in artifacts}
+    assert by_rel["a.jar"].classes == 2
+    assert by_rel["_classes"].kind is ArtifactKind.CLASS_TREE
+    assert by_rel["_classes"].classes == 1

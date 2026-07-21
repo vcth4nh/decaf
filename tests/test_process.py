@@ -4,7 +4,7 @@ import pytest
 
 from decaf.engines import ENGINES, EngineResult
 from decaf.maven import Gav, Resolution
-from decaf.pipeline import Ctx, MergeWriter, Settings, chain_for, process_artifact
+from decaf.pipeline import Ctx, MergeWriter, Settings, _discover_nested, chain_for, process_artifact
 from decaf.scanner import Artifact, ArtifactKind
 
 
@@ -341,3 +341,18 @@ def test_resolver_exception_becomes_failed_report_with_nested(make_jar, tmp_path
     assert "index server melted" in (report.failure or "")
     assert runner.calls == []  # engines never run after a resolution crash
     assert [n.rel for n in nested] == ["app.war!/WEB-INF/lib/dep.jar"]
+
+
+def test_discover_nested_carries_class_counts(make_jar, tmp_path):
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d", "com/d/E.class": b"e"})
+    war = make_jar("app.war", {"WEB-INF/lib/dep.jar": inner.read_bytes()})
+    tmp_root = tmp_path / "t"
+    tmp_root.mkdir()
+    ctx = Ctx(
+        settings=Settings(input=war, output=tmp_path / "o"),
+        writer=None, chain=[], engine_jars={}, java="java",
+        tmp_root=tmp_root, client=None, sources_cache=tmp_path / "s",
+        runner=None, resolver=None,
+    )
+    nested = _discover_nested(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    assert [(n.rel, n.classes) for n in nested] == [("app.war!/WEB-INF/lib/dep.jar", 2)]
