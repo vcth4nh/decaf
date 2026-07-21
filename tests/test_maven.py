@@ -12,6 +12,7 @@ from decaf.maven import (
     NetState,
     NetworkFailure,
     ResolutionLog,
+    _fetched,
     candidate_coords,
     candidate_groups,
     extract_java,
@@ -102,8 +103,9 @@ def test_fetch_sources_tries_repos_in_order_and_caches(tmp_path: Path, make_jar)
     with make_client(handler) as c:
         got = fetch_sources(gav, repos, c, tmp_path / "cache")
         assert got is not None
-        path, repo = got
+        path, repo, cached = got
         assert repo == "https://second.test/m2"
+        assert cached is False
         assert path.read_bytes() == payload
     assert calls == [
         "https://first.test/m2/com/example/lib/1.2/lib-1.2-sources.jar",
@@ -115,7 +117,7 @@ def test_fetch_sources_tries_repos_in_order_and_caches(tmp_path: Path, make_jar)
 
     with make_client(explode) as c:
         again = fetch_sources(gav, repos, c, tmp_path / "cache")
-        assert again == (path, "https://second.test/m2")
+        assert again == (path, "https://second.test/m2", True)
 
 
 def test_fetch_sources_all_miss(tmp_path: Path):
@@ -139,7 +141,7 @@ def test_fetch_sources_survives_windows_replace_race(tmp_path: Path, make_jar, m
     monkeypatch.setattr(_os, "replace", deny)
     with make_client(lambda request: httpx.Response(200, content=payload)) as c:
         result = fetch_sources(gav, ["https://r.test/m2"], c, cache)
-    assert result == (cached, "https://r.test/m2")
+    assert result == (cached, "https://r.test/m2", False)
     assert not list(cache.glob("*.part"))  # loser's temp file cleaned up
 
 
@@ -946,6 +948,19 @@ def test_fetch_sources_retries_mid_stream_failure(make_jar, tmp_path: Path):
     assert got is not None and got[0].read_bytes() == payload
     assert state["n"] == 2
     assert not list(cache.glob("*.part"))  # failed attempt's temp file cleaned up
+
+
+def test_fetched_threads_cached_flag(tmp_path: Path):
+    gav = Gav("g", "a", "1")
+    hit = _fetched(gav, (tmp_path / "a-sources.jar", "https://r.test/m2", True),
+                   "pom-properties", "unused miss")
+    assert hit.cached is True
+    assert hit.resolved_by == "pom-properties"
+    fresh = _fetched(gav, (tmp_path / "a-sources.jar", "https://r.test/m2", False),
+                     "sha1-index", "unused miss")
+    assert fresh.cached is False
+    miss = _fetched(gav, None, "pom-properties", "no -sources.jar anywhere")
+    assert miss.cached is False and miss.miss == "no -sources.jar anywhere"
 
 
 def test_breaker_gives_up_on_host_after_three_artifacts(make_jar, tmp_path: Path):

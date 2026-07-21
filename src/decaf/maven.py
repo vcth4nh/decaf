@@ -469,7 +469,7 @@ def fetch_sources(
     cache_dir: Path,
     net: NetState | None = None,
     log: ResolutionLog | None = None,
-) -> tuple[Path, str] | None:
+) -> tuple[Path, str, bool] | None:
     if net is None:
         net = NetState()
     if log is None:
@@ -478,7 +478,7 @@ def fetch_sources(
     cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar"
     marker = cached.with_suffix(".repo")
     if cached.is_file() and marker.is_file():
-        return cached, marker.read_text().strip()
+        return cached, marker.read_text().strip(), True
     for repo in repos:
         url = f"{repo}/{gav.sources_path()}"
         try:
@@ -492,7 +492,7 @@ def fetch_sources(
         if got is None:
             continue
         marker.write_text(repo)
-        return cached, repo
+        return cached, repo, False
     return None
 
 
@@ -567,13 +567,17 @@ class Resolution:
     sources_jar: Path | None = None
     repo: str | None = None
     resolved_by: str | None = None  # "pom-properties" | "sha1-index" | "verified-guess"
+    cached: bool = False  # sources jar served from the on-disk cache, no download
     miss: str | None = None
 
 
-def _fetched(gav: Gav, fetched: tuple[Path, str] | None, resolved_by: str, no_sources: str) -> Resolution:
+def _fetched(gav: Gav, fetched: tuple[Path, str, bool] | None, resolved_by: str, no_sources: str) -> Resolution:
     if fetched is None:
         return Resolution(gav=gav, miss=no_sources)
-    return Resolution(gav=gav, sources_jar=fetched[0], repo=fetched[1], resolved_by=resolved_by)
+    return Resolution(
+        gav=gav, sources_jar=fetched[0], repo=fetched[1],
+        resolved_by=resolved_by, cached=fetched[2],
+    )
 
 
 def _no_sources(prefix: str, absent: str, log: ResolutionLog) -> str:
