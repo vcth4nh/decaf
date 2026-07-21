@@ -39,3 +39,12 @@ body:
       placeholder: Optional details.
     validations:
       required: false
+  - type: checkboxes
+    id: required-checks
+    attributes:
+      label: Please confirm the following
+      options:
+        - label: I have already searched for relevant existing issues and feature requests before opening this one.
+          required: true
+        - label: I have updated the title field above with a concise description.
+          required: true
