@@ -60,7 +60,10 @@ started with `-XX:ActiveProcessorCount = cpus ÷ jobs` to size its thread
 pools (on other platforms this hint is the only limit). The default budget
 is all cores minus one, keeping the machine responsive during long runs;
 `--cpus N` sets it exactly (e.g. your full core count to use everything).
-Workers are clamped so they never exceed the budget.
+Workers are clamped so they never exceed the budget. Maven resolution and
+sources downloads run on a separate IO-sized fetch stage feeding the
+decompile workers through a bounded queue, so network waits don't idle
+decompile slots.
 
 ## Output layouts
 

@@ -224,7 +224,7 @@ def main(
     max_depth: Annotated[int, typer.Option("--max-depth", min=0, help="Archive-in-archive levels to unpack (0 = none; folders are always fully scanned)")] = 1,
     repo: Annotated[Optional[list[str]], typer.Option("--repo", help="Extra Maven repository URL (repeatable)")] = None,
     config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
-    jobs: Annotated[int, typer.Option("--jobs", "-j", min=0, help="Parallel workers (0 = min(4, cpus))")] = 0,
+    jobs: Annotated[int, typer.Option("--jobs", "-j", min=0, help="Parallel decompile workers (0 = min(4, cpus))")] = 0,
     cpus: Annotated[int, typer.Option("--cpus", min=0, help="Total CPU budget across all workers (0 = all cores minus one)")] = 0,
     timeout: Annotated[float, typer.Option("--timeout", help="Per-archive engine timeout, seconds")] = 600.0,
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,

@@ -11,6 +11,7 @@ import threading
 import time
 import traceback
 import zipfile
+from collections import deque
 from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
@@ -372,7 +373,14 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     return nested
 
 
-def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
+def _fetch_stage(
+    artifact: Artifact, ctx: Ctx
+) -> tuple[ArtifactReport, list[Artifact], Path | None]:
+    """Stage 1 (IO): discovery, classification, maven resolution, sources extraction.
+
+    Returns the report, nested artifacts to feed back into stage 1, and the
+    decompile target for stage 2 — None when the artifact completed here.
+    """
     report = ArtifactReport(rel=artifact.rel, kind=artifact.kind.value, outcome="ok")
     nested: list[Artifact] = []
     try:
@@ -400,7 +408,7 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
         elif artifact.kind is ArtifactKind.CLASS_TREE:
             tmp = _tmp_dir(ctx)
             copy_class_tree(artifact.path, tmp)
-            _decompile(artifact, tmp, ctx, report)
+            return report, nested, tmp
         else:  # ARCHIVE
             nested = _discover_nested(artifact, ctx)
             resolution = None
@@ -435,10 +443,30 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
                     )
                     ctx.on_stderr(f"maven {artifact.rel}: {msg}")
             if not done:
-                _decompile(artifact, artifact.path, ctx, report)
+                return report, nested, artifact.path
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
+    return report, nested, None
+
+
+def _decompile_stage(
+    artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport
+) -> ArtifactReport:
+    """Stage 2 (CPU): engine chain + per-class retries on a stage-1 hand-off."""
+    try:
+        _decompile(artifact, target, ctx, report)
+    except Exception:
+        report.outcome = "failed"
+        report.failure = traceback.format_exc()[-2000:]
+    return report
+
+
+def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
+    """Run both stages synchronously; the parallel runner splits them across pools."""
+    report, nested, target = _fetch_stage(artifact, ctx)
+    if target is not None:
+        _decompile_stage(artifact, target, ctx, report)
     return report, nested
 
 
@@ -504,6 +532,8 @@ def run(
     jobs = settings.jobs or min(4, os.cpu_count() or 1)
     jobs = max(1, min(jobs, total_cpus))
     cpu_budget = max(1, total_cpus // jobs)
+    fetch_jobs = min(8, 2 * jobs)  # IO-sized: stage 1 waits on the network, not cores
+    queue_bound = 2 * jobs  # decompiles queued beyond the running `jobs` before stage 1 stalls
     affinity_base: set[int] | None = None
     if hasattr(os, "sched_setaffinity"):
         # ActiveProcessorCount only sizes JVM pools — JIT/GC warmup still bursts past
@@ -532,26 +562,49 @@ def run(
             on_stderr=on_stderr,
         )
         try:
-            with ThreadPoolExecutor(max_workers=jobs) as pool:
-                pending: set = set()
+            with (
+                ThreadPoolExecutor(max_workers=fetch_jobs) as fetch_pool,
+                ThreadPoolExecutor(max_workers=jobs) as dec_pool,
+            ):
+                todo = deque(artifacts)
+                fetch_futs: dict = {}  # Future -> Artifact, kept for the stage-2 hand-off
+                dec_futs: set = set()
                 try:
-                    for a in artifacts:
-                        pending.add(pool.submit(process_artifact, a, ctx))
-                    while pending:
-                        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    while todo or fetch_futs or dec_futs:
+                        # Admission gate: every fetch future is a potential decompile,
+                        # so capping in-flight futures bounds the stage-2 backlog and
+                        # stalls downloads when decompilation falls behind.
+                        while (
+                            todo
+                            and len(fetch_futs) < fetch_jobs
+                            and len(fetch_futs) + len(dec_futs) < jobs + queue_bound
+                        ):
+                            a = todo.popleft()
+                            fetch_futs[fetch_pool.submit(_fetch_stage, a, ctx)] = a
+                        done, _ = wait(fetch_futs.keys() | dec_futs, return_when=FIRST_COMPLETED)
                         for fut in done:
-                            report, nested = fut.result()
+                            if fut in dec_futs:
+                                dec_futs.discard(fut)
+                                report = fut.result()
+                            else:
+                                a = fetch_futs.pop(fut)
+                                report, nested, target = fut.result()
+                                if nested:
+                                    todo.extend(nested)
+                                    if on_found is not None:
+                                        on_found(len(nested))
+                                if target is not None:
+                                    dec_futs.add(
+                                        dec_pool.submit(_decompile_stage, a, target, ctx, report)
+                                    )
+                                    continue
                             reports.append(report)
-                            if nested and on_found is not None:
-                                on_found(len(nested))
                             if on_done is not None:
                                 on_done(report)
-                            for n in nested:
-                                pending.add(pool.submit(process_artifact, n, ctx))
                 except KeyboardInterrupt:
                     interrupted = True
                     engines.PROCESSES.kill_all()
-                    for fut in pending:
+                    for fut in [*fetch_futs, *dec_futs]:
                         fut.cancel()
         finally:
             # Write the report even if a second Ctrl-C lands during teardown,
@@ -567,6 +620,7 @@ def run(
                     "maven": settings.maven,
                     "max_depth": settings.max_depth,
                     "jobs": jobs,
+                    "fetch_jobs": fetch_jobs,
                     "cpus": total_cpus,
                     "cpu_budget": cpu_budget,
                     "timeout": settings.timeout,

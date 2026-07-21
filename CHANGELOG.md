@@ -2,6 +2,21 @@
 
 All notable changes to decaf are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- The run pipeline is now two stages with independently sized pools: an
+  IO-sized resolve/fetch stage (Maven lookups, sources downloads, nested
+  discovery) feeds the CPU-sized decompile stage, so network waits no longer
+  idle decompile slots and decompile bursts no longer oversubscribe the CPU.
+  `--jobs` still sizes the decompile stage; the fetch pool is auto-sized
+  (`min(8, 2×jobs)`, reported as `fetch_jobs` in the run report), and a bounded
+  hand-off keeps downloads from running unbounded ahead of decompilation.
+  Outputs and per-artifact reports are unchanged; the progress bar's total now
+  grows as soon as nested archives are discovered, slightly earlier than
+  before.
+
 ## [1.3.1] - 2026-07-21
 
 ### Changed
