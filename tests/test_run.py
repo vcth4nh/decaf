@@ -1,4 +1,5 @@
 import json
+import threading
 import zipfile
 from pathlib import Path
 
@@ -414,3 +415,96 @@ def test_run_maven_hit_never_touches_engines(fake_env, make_jar, tmp_path: Path)
     assert rels["lib-1.2.jar"].method == "maven"
     assert report.totals["maven_sources"] == 1
     assert "real source" in (tmp_path / "out/src/com/x/A.java").read_text()
+
+
+def test_fetch_stage_overlaps_blocked_decompile(fake_env, make_jar, tmp_path: Path):
+    """With jobs=1, resolution keeps flowing on the fetch pool while the single
+    decompile worker is busy. The old fused loop fails this: its one worker
+    resolved and decompiled serially, so the gate below never opened."""
+    input_dir = tmp_path / "in"
+    for i in range(3):
+        make_jar(f"a{i}.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    resolved: list[str] = []
+    all_resolved = threading.Event()
+    violations: list[str] = []  # asserted from the test thread; an assert inside the
+    # fake engine would be swallowed by the stage's except-Exception handler
+
+    def counting_resolver(jar_path, repos, client, cache_dir, **kw):
+        resolved.append(Path(jar_path).name)
+        if len(resolved) == 3:
+            all_resolved.set()
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    def gated_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if not all_resolved.wait(timeout=30):
+            violations.append(
+                f"decompile ran with only {len(resolved)} artifacts resolved"
+            )
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", jobs=1),
+        runner=gated_engine,
+        resolver=counting_resolver,
+    )
+    assert violations == []  # stage 1 must not be serialized behind stage 2
+    assert report.totals["ok"] == 3
+    assert sorted(resolved) == ["a0.jar", "a1.jar", "a2.jar"]
+
+
+def test_run_reports_fetch_pool_size(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1),
+        runner=perfect_engine,
+    )
+    assert report.settings["jobs"] == 1
+    assert report.settings["fetch_jobs"] == 2  # min(8, 2 * jobs)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out2", maven=False, jobs=16, cpus=16),
+        runner=perfect_engine,
+    )
+    assert report.settings["fetch_jobs"] == 8  # capped, from the clamped jobs
+
+
+def test_fetch_admission_bounded_by_decompile_backlog(fake_env, make_jar, tmp_path: Path):
+    """Stage 1 must not run unbounded ahead: with jobs=1 the in-flight cap is
+    jobs + 2*jobs = 3, so a 4th resolution cannot start while the first
+    decompile is still running. The negative wait is an upper bound for the
+    unwanted event, not a synchronization point — it never flakes a pass."""
+    input_dir = tmp_path / "in"
+    for i in range(12):
+        make_jar(f"a{i:02d}.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    resolver_calls: list[str] = []
+    overflow = threading.Event()  # set if a 4th resolution starts too early
+    first_decompile_done = threading.Event()
+    violations: list[str] = []  # asserted from the test thread, not inside the fake
+
+    def counting_resolver(jar_path, repos, client, cache_dir, **kw):
+        resolver_calls.append(Path(jar_path).name)
+        if len(resolver_calls) > 3 and not first_decompile_done.is_set():
+            overflow.set()
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    def slow_first_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if not first_decompile_done.is_set():
+            # Give stage 1 a generous window to overrun the bound if it can.
+            if overflow.wait(timeout=0.5):
+                violations.append(
+                    f"stage 1 started {len(resolver_calls)} resolutions while the "
+                    "first decompile was still running (in-flight cap is 3)"
+                )
+            first_decompile_done.set()
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", jobs=1),
+        runner=slow_first_engine,
+        resolver=counting_resolver,
+    )
+    assert violations == []
+    assert report.totals["ok"] == 12
+    assert len(resolver_calls) == 12
