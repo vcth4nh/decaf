@@ -195,8 +195,10 @@ def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):
         return EngineResult(spec.name, 0, False, 1, "")
 
     monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
-    monkeypatch.setattr(engines, "ensure_engine",
-                        lambda spec, client, cache_dir=None: Path(f"/fake/{spec.name}.jar"))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
+    )
     monkeypatch.setattr(engines, "run_engine", fake_engine)
 
     make_jar("app.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
@@ -318,3 +320,116 @@ def test_summary_wording_unchanged_without_cache_hits(tmp_path: Path, make_jar, 
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
     assert "maven 1, decompiled 1, extracted 0" in plain
+
+
+def make_display():
+    import io
+
+    from rich.console import Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    console = Console(file=io.StringIO(), force_terminal=True, width=120)
+    progress = Progress(
+        SpinnerColumn(), TextColumn("{task.description}"),
+        console=console, transient=True,
+    )
+    return progress, cli._RunDisplay(progress)
+
+
+def descriptions(progress):
+    return [t.description for t in progress.tasks]
+
+
+def test_display_row_lifecycle():
+    progress, disp = make_display()
+    disp.on_found(3)
+    assert descriptions(progress) == ["scanning…"]  # header only, until the scan event
+    disp.on_event("scan", "", "2 top-level + 1 nested")
+    assert descriptions(progress)[0] == "decompiling 0/3 · 0 active · 3 queued"
+    # Console(force_terminal=True) highlights bare numbers/parens even with no markup
+    # in the string — strip ANSI before matching (same idiom as the module-level ANSI
+    # regex used for CliRunner output elsewhere in this file).
+    plain = ANSI.sub("", progress.console.file.getvalue())
+    assert "found 3 artifacts (2 top-level + 1 nested)" in plain
+    disp.on_event("fetch", "a.jar", "")
+    assert any("fetching" in d and "a.jar" in d for d in descriptions(progress))
+    disp.on_event("queued", "a.jar", "")
+    assert not any("a.jar" in d for d in descriptions(progress))  # between stages: queued only
+    disp.on_event("decompile", "a.jar", "vineflower")
+    # "decompiling" is exactly 11 chars, so :<11 adds no padding — single space
+    assert any(d.strip() == "decompiling a.jar (vineflower)" for d in descriptions(progress))
+    disp.on_done(ArtifactReport(rel="a.jar", kind="archive", outcome="ok"))
+    assert not any("a.jar" in d for d in descriptions(progress))
+    assert descriptions(progress)[0] == "decompiling 1/3 · 0 active · 2 queued"
+
+
+def test_display_overflow_row():
+    progress, disp = make_display()
+    disp.on_found(20)
+    disp.on_event("scan", "", "20 top-level + 0 nested")
+    for i in range(10):
+        disp.on_event("fetch", f"j{i:02d}.jar", "")
+    descs = descriptions(progress)
+    assert sum("fetching" in d for d in descs) == 8
+    assert "… and 2 more active" in descs
+    assert "10 active" in descs[0]
+    disp.on_event("queued", "j00.jar", "")  # frees a row; one waiting jar is promoted
+    descs = descriptions(progress)
+    assert sum("fetching" in d for d in descs) == 8
+    assert "… and 1 more active" in descs
+    assert "9 active" in descs[0]
+
+
+def test_display_engine_rows():
+    progress, disp = make_display()
+    disp.on_event("engines", "", "verifying")
+    assert "engines: verifying…" in descriptions(progress)
+    disp.on_event("engines", "vineflower", "downloading 1.11.1")
+    assert "engines: downloading vineflower 1.11.1…" in descriptions(progress)
+    disp.on_event("engines", "vineflower", "downloaded 1.11.1")
+    assert "engines: verifying…" in descriptions(progress)
+    plain = ANSI.sub("", progress.console.file.getvalue())
+    assert "vineflower 1.11.1 downloaded" in plain
+    disp.on_event("engines", "", "ready")
+    assert not any(d.startswith("engines:") for d in descriptions(progress))
+
+
+def test_shorten_keeps_leaf():
+    rel = "app.war!/WEB-INF/lib/some-very-long-artifact-name-2.11.0.jar"
+    out = cli._shorten(rel, 50)
+    assert len(out) <= 50
+    assert out.endswith("some-very-long-artifact-name-2.11.0.jar")
+    assert "…" in out
+    assert cli._shorten("a.jar", 50) == "a.jar"
+
+
+def test_on_event_wired_unless_quiet(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    captured = {}
+
+    def capture(settings, **kw):
+        captured.update(kw)
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert callable(captured["on_event"])
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2"), "--quiet"])
+    assert captured["on_event"] is None
+    assert "found" not in ANSI.sub("", result.output)  # -q: no mid-run lines at all
+
+
+def test_run_output_shows_found_and_download_lines(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+
+    def fake_run(settings, **kw):
+        kw["on_found"](3)
+        kw["on_event"]("scan", "", "2 top-level + 1 nested")
+        kw["on_event"]("engines", "cfr", "downloaded 0.152")
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "found 3 artifacts (2 top-level + 1 nested)" in plain
+    assert "cfr 0.152 downloaded" in plain

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -11,7 +12,7 @@ import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
 from rich.table import Table
 from typer.core import TyperGroup
 
@@ -174,6 +175,134 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(code=2)
 
 
+_STAGE_VERBS = {"fetch": "fetching", "decompile": "decompiling"}
+_MAX_ROWS = 8
+
+
+def _shorten(rel: str, limit: int = 60) -> str:
+    """Middle-elide a long artifact rel, always keeping the leaf name."""
+    if len(rel) <= limit:
+        return rel
+    leaf = rel.rsplit("/", 1)[-1]
+    if leaf == rel or len(leaf) + 2 >= limit:
+        return "…" + leaf[-(limit - 1):]
+    prefix = rel[: limit - len(leaf) - 3]
+    if "/" in prefix:
+        prefix = prefix.rsplit("/", 1)[0]
+    return f"{prefix}/…/{leaf}" if prefix else f"…/{leaf}"
+
+
+class _RunDisplay:
+    """Routes pipeline events onto transient rich Progress rows.
+
+    Runs under one lock: events arrive from the scheduler and worker threads,
+    and the rel→row map must mutate atomically with the rich task list. rich
+    never calls back into this class, so the single-lock order is safe.
+    """
+
+    def __init__(self, progress: Progress) -> None:
+        self._p = progress
+        self._lock = threading.Lock()
+        self._header = progress.add_task("scanning…", total=None)
+        self._scanned = False
+        self._total = 0
+        self._done = 0
+        self._rows: dict[str, TaskID] = {}
+        self._waiting: dict[str, str] = {}  # active beyond the row cap: rel -> row text
+        self._overflow: TaskID | None = None
+        self._engines: TaskID | None = None
+
+    def on_found(self, count: int) -> None:
+        with self._lock:
+            self._total += count
+            self._refresh_header()
+
+    def on_done(self, report: ArtifactReport) -> None:
+        with self._lock:
+            self._done += 1
+            self._drop(report.rel)
+            self._refresh_header()
+
+    def on_event(self, kind: str, subject: str, detail: str) -> None:
+        with self._lock:
+            if kind == "scan":
+                self._scanned = True
+                self._p.console.print(f"found {self._total} artifacts ({detail})")
+            elif kind == "engines":
+                self._engines_event(subject, detail)
+            elif kind == "queued":
+                self._drop(subject)
+            elif kind in _STAGE_VERBS:
+                text = f"{_STAGE_VERBS[kind]:<11} {_shorten(subject)}"
+                if kind == "decompile" and detail:
+                    text += f" ({detail})"
+                self._upsert(subject, text)
+            self._refresh_header()
+
+    # -- internals; every method below expects the lock to be held --
+
+    def _engines_event(self, subject: str, detail: str) -> None:
+        if detail == "ready":
+            if self._engines is not None:
+                self._p.remove_task(self._engines)
+                self._engines = None
+            return
+        if detail.startswith("downloaded "):
+            ver = detail.split(" ", 1)[1]
+            self._p.console.print(f"[green]✓[/] {subject} {ver} downloaded")
+            text = "engines: verifying…"
+        elif detail.startswith("downloading "):
+            ver = detail.split(" ", 1)[1]
+            text = f"engines: downloading {subject} {ver}…"
+        else:  # "verifying"
+            text = "engines: verifying…"
+        if self._engines is None:
+            self._engines = self._p.add_task(text, total=None)
+        else:
+            self._p.update(self._engines, description=text)
+
+    def _upsert(self, rel: str, text: str) -> None:
+        if rel in self._rows:
+            self._p.update(self._rows[rel], description=text)
+        elif rel in self._waiting or len(self._rows) >= _MAX_ROWS:
+            self._waiting[rel] = text
+            self._refresh_overflow()
+        else:
+            self._rows[rel] = self._p.add_task(text, total=None)
+
+    def _drop(self, rel: str) -> None:
+        row = self._rows.pop(rel, None)
+        if row is not None:
+            self._p.remove_task(row)
+            if self._waiting:
+                promoted = next(iter(self._waiting))
+                self._rows[promoted] = self._p.add_task(self._waiting.pop(promoted), total=None)
+        else:
+            self._waiting.pop(rel, None)
+        self._refresh_overflow()
+
+    def _refresh_overflow(self) -> None:
+        if self._waiting:
+            text = f"… and {len(self._waiting)} more active"
+            if self._overflow is None:
+                self._overflow = self._p.add_task(text, total=None)
+            else:
+                self._p.update(self._overflow, description=text)
+        elif self._overflow is not None:
+            self._p.remove_task(self._overflow)
+            self._overflow = None
+
+    def _refresh_header(self) -> None:
+        if not self._scanned:
+            return
+        active = len(self._rows) + len(self._waiting)
+        queued = max(0, self._total - self._done - active)
+        self._p.update(
+            self._header,
+            description=f"decompiling {self._done}/{self._total} · {active} active · {queued} queued",
+        )
+
+
 def _status_line(r: ArtifactReport) -> str:
     if r.outcome == "ok":
         if r.method == "maven":
@@ -273,22 +402,15 @@ def main(
 
     progress = Progress(
         SpinnerColumn(),
-        TextColumn("decompiling"),
-        MofNCompleteColumn(),
+        TextColumn("{task.description}"),
         console=console,
         transient=True,
         disable=quiet,
     )
-
-    found_total = 0
-
-    def on_found(count: int) -> None:
-        nonlocal found_total
-        found_total += count
-        progress.update(task, total=found_total)
+    display = _RunDisplay(progress)
 
     def on_done(r: ArtifactReport) -> None:
-        progress.advance(task)
+        display.on_done(r)
         if not quiet:
             progress.console.print(_status_line(r))
 
@@ -300,8 +422,8 @@ def main(
 
     try:
         with progress:
-            task = progress.add_task("decompiling", total=None)
-            report = run(settings, on_done=on_done, on_found=on_found,
+            report = run(settings, on_done=on_done, on_found=display.on_found,
+                         on_event=None if quiet else display.on_event,
                          on_stderr=on_stderr if verbose else None,
                          on_warn=on_warn if not quiet else None)
     except (DecafError, ScanError) as exc:
