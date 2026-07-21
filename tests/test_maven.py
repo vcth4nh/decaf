@@ -998,3 +998,57 @@ def test_sha1_lookup_follows_redirects():
 
     with make_client(handler) as c:
         assert gav_from_central_sha1("feedface", c) == Gav("g", "a", "1")
+
+
+def test_index_lookup_bad_status_labeled_and_not_cached():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    net, log = NetState(), ResolutionLog()
+    with make_client(handler) as c:
+        assert maven._groups_from_index("lib", c, net, log) is None
+        assert maven._groups_from_index("lib", c, net, log) is None  # not memoized
+    assert calls["n"] == 2
+    assert log.events == ["search.maven.org: index HTTP 404 during index lookup"] * 2
+
+
+def test_sha1_lookup_bad_status_and_malformed_taint():
+    responses = iter([httpx.Response(404), httpx.Response(200, text="not json")])
+    net, log = NetState(), ResolutionLog()
+    with make_client(lambda r: next(responses)) as c:
+        assert gav_from_central_sha1("feedface", c, net, log) is None
+        assert gav_from_central_sha1("feedface", c, net, log) is None
+    assert log.events == [
+        "search.maven.org: index HTTP 404 during sha1 lookup",
+        "search.maven.org: malformed index response during sha1 lookup",
+    ]
+
+
+def test_resolve_sources_sha1_bad_status_tags_miss(make_jar, tmp_path: Path):
+    jar = make_jar("mystery.jar", {"A.class": b"x"})  # no filename/manifest coords
+
+    def handler(request):
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert res.miss == (
+        "network: search.maven.org: index HTTP 404 during sha1 lookup; "
+        "no pom.properties; sha1 lookup errored (network); "
+        "no artifact/version hints in filename or manifest"
+    )
+
+
+def test_retry_after_ignores_superscript_digits():
+    # Mock response with superscript (httpx won't accept non-ASCII headers)
+    class MockResp:
+        status_code = 503
+        headers = {"Retry-After": "²"}
+
+    assert maven._retry_after_seconds(MockResp()) is None  # isdigit-true, float() would raise
+    resp = httpx.Response(429, headers={"Retry-After": "3"})
+    assert maven._retry_after_seconds(resp) == 3.0
