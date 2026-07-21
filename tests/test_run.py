@@ -182,8 +182,50 @@ def test_run_reports_found_counts(fake_env, make_jar, tmp_path: Path):
         on_found=found.append,
         runner=perfect_engine,
     )
-    assert found == [2, 1]  # initial scan, then the war's nested jar mid-run
+    assert found == [3]  # 2 top-level + 1 pre-counted nested: seeded upfront, no growth
     assert sum(found) == len(report.artifacts)
+
+
+def test_run_beyond_depth_discovery_still_ticks_totals(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_deep_inputs(make_jar, tmp_path)
+    found: list[int] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False),
+        on_found=found.append,
+        runner=perfect_engine,
+    )
+    assert found == [2, 1]  # seed: war + its dep.jar; +1 when inner.jar surfaces beyond depth
+    assert sum(found) == len(report.artifacts)
+
+
+def test_run_corrects_total_when_precounted_member_unextractable(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar(
+        "app.war",
+        {"WEB-INF/classes/com/w/W.class": b"w", "../evil.jar": b"junk"},
+        base=input_dir,
+    )
+    found: list[int] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False),
+        on_found=found.append,
+        runner=perfect_engine,
+    )
+    assert found == [2, -1]  # pre-counted ../evil.jar never extracts; total self-corrects
+    assert sum(found) == len(report.artifacts) == 1
+
+
+def test_run_emits_scan_event_after_seeding(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_inputs(make_jar, tmp_path)
+    log: list = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_found=lambda n: log.append(("found", n)),
+        on_event=lambda k, s, d: log.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    assert ("scan", "", "2 top-level + 1 nested") in log
+    assert log.index(("found", 3)) < log.index(("scan", "", "2 top-level + 1 nested"))
 
 
 def test_run_resource_only_war_nested_jars_reached(fake_env, make_jar, tmp_path: Path):

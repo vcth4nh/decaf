@@ -31,7 +31,7 @@ from .scanner import (
     copy_class_tree,
     find_nested_archives,
     safe_extract_zip,
-    scan_input,
+    scan_counted,
 )
 
 _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
@@ -225,6 +225,7 @@ class Ctx:
     resolver: Callable
     cpu_budget: int | None = None  # visible cores per engine JVM
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
+    on_event: Callable[[str, str, str], None] | None = None  # live progress events
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -510,6 +511,7 @@ def run(
     on_found: Callable[[int], None] | None = None,
     on_stderr: Callable[[str], None] | None = None,
     on_warn: Callable[[str], None] | None = None,
+    on_event: Callable[[str, str, str], None] | None = None,
     runner: Callable | None = None,
     resolver: Callable | None = None,
 ) -> RunReport:
@@ -522,9 +524,14 @@ def run(
     if java_major < engines.JAVA_MIN:
         raise DecafError(f"Java {java_major} is too old (Java {engines.JAVA_MIN}+ required)")
 
-    artifacts = scan_input(settings.input)
+    artifacts, nested_counts = scan_counted(settings.input)
     if on_found is not None:
-        on_found(len(artifacts))
+        on_found(len(artifacts) + sum(nested_counts.values()))
+    if on_event is not None:
+        on_event(
+            "scan", "",
+            f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
+        )
     runner = runner or engines.run_engine
     net = maven.NetState(warn=on_warn)
     resolver = resolver or partial(maven.resolve_sources, net=net)
@@ -566,6 +573,7 @@ def run(
             resolver=resolver,
             cpu_budget=cpu_budget,
             on_stderr=on_stderr,
+            on_event=on_event,
         )
         try:
             with (
@@ -597,8 +605,9 @@ def run(
                                 report, nested, target = fut.result()
                                 if nested:
                                     todo.extend(nested)
-                                    if on_found is not None:
-                                        on_found(len(nested))
+                                delta = len(nested) - nested_counts.pop(a.rel, 0)
+                                if delta and on_found is not None:
+                                    on_found(delta)
                                 if target is not None:
                                     dec_futs.add(
                                         dec_pool.submit(_decompile_stage, a, target, ctx, report)
