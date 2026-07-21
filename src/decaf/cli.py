@@ -211,8 +211,8 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
                     console.print(f"    [dim]{a.engine} ({a.level}): {a.stderr_tail[-300:]}[/]")
     if t["network_misses"]:
         console.print(
-            f"[yellow]{t['network_misses']} artifact(s) decompiled without sources "
-            "due to network failures[/]"
+            f"[yellow]{t['network_misses']} artifact(s) fell back to decompilation "
+            "without sources due to network failures[/]"
         )
     if report.interrupted:
         console.print("[yellow]interrupted — partial results written[/]")

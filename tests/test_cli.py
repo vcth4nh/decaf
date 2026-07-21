@@ -253,7 +253,7 @@ def test_summary_warns_on_network_misses(tmp_path: Path, make_jar, monkeypatch):
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
-    assert "2 artifact(s) decompiled without sources due to network failures" in plain
+    assert "2 artifact(s) fell back to decompilation without sources due to network failures" in plain
 
 
 def test_summary_silent_when_no_network_misses(tmp_path: Path, make_jar, monkeypatch):
@@ -276,3 +276,17 @@ def test_on_warn_wired_unless_quiet(tmp_path: Path, make_jar, monkeypatch):
     assert callable(captured["on_warn"])
     runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2"), "--quiet"])
     assert captured["on_warn"] is None
+
+
+def test_warn_sink_renders_message_body(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+
+    def capture(settings, **kw):
+        kw["on_warn"]("maven: r.test: [boom] persisted <odd>")
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "maven: r.test: [boom] persisted <odd>" in plain  # escape(): markup-like text renders verbatim
