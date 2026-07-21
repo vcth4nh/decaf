@@ -501,7 +501,7 @@ def test_verify_gav_empty_body_and_network_error():
             Gav("g", "a", "1"), SHA, ["https://one.test/m2", "https://two.test/m2"], c
         )
     assert repo is None
-    assert calls == ["one.test", "two.test"]
+    assert calls == ["one.test", "two.test", "two.test", "two.test"]  # retried, then miss
 
 
 def test_verify_gav_respects_budget():
@@ -828,3 +828,148 @@ def test_get_retry_skips_dead_host_without_request():
             maven._get_retry(c, "https://r.test/x", net=net, log=log)
     assert exc.value.kind == "skipped"
     assert exc.value.detail == "r.test skipped (unreachable this run)"
+
+
+def test_index_network_error_not_cached_but_empty_success_is(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    calls = {"n": 0}
+    mode = {"fail": True}
+
+    def handler(request):
+        assert request.url.host == "search.maven.org"
+        calls["n"] += 1
+        if mode["fail"]:
+            raise httpx.ConnectError("down")
+        return httpx.Response(200, json={"response": {"docs": []}})
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == ["com.acme.lib", "com.acme"]
+        candidate_groups("lib", jar, c)  # errored lookup stayed uncached: re-queries
+        assert calls["n"] == 6  # 2 lookups x RETRY_ATTEMPTS
+        mode["fail"] = False
+        candidate_groups("lib", jar, c)  # success (empty) is cached...
+        candidate_groups("lib", jar, c)  # ...so this one is served from the memo
+        assert calls["n"] == 7
+
+
+def test_resolve_sources_sha1_network_error_tags_miss(make_jar, tmp_path: Path):
+    jar = make_jar("mystery.jar", {"A.class": b"x"})  # no filename/manifest coords
+
+    def handler(request):
+        raise httpx.TimeoutException("slow")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert res.miss == (
+        "network: search.maven.org: timeout during sha1 lookup; "
+        "no pom.properties; sha1 lookup errored (network); "
+        "no artifact/version hints in filename or manifest"
+    )
+
+
+def test_resolve_sources_hit_despite_index_down(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    payload = make_jar("p.jar", {"com/acme/lib/A.java": "class A {}"}).read_bytes()
+    sha = sha1_of(jar)
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            raise httpx.ConnectError("index down")
+        if request.url.path.endswith(".jar.sha1"):
+            return httpx.Response(200, text=sha)
+        if request.url.path.endswith("-sources.jar"):
+            return httpx.Response(200, content=payload)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.miss is None
+    assert res.resolved_by == "verified-guess"
+    assert str(res.gav) == "com.acme.lib:lib:1.0"
+
+
+def test_resolve_sources_probe_network_failures_noted_in_miss(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        raise httpx.ConnectError("repo down")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", net=net)
+    assert res.sources_jar is None
+    assert res.miss == (
+        "network: r.test: connection error during candidate probe; "
+        "no pom.properties; sha1 not in Central index; "
+        "2 candidates, none verified (2 probe(s) errored)"
+    )
+    assert len([w for w in warnings if "persisted after 3 attempts" in w]) == 1
+
+
+def test_resolve_sources_download_network_failure_reachable_wording(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+
+    def handler(request):
+        raise httpx.ReadTimeout("stalled")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.miss == (
+        "network: r.test: timeout during sources download; "
+        "found com.example:lib:1.2 in pom.properties "
+        "but no -sources.jar in any reachable repo"
+    )
+
+
+def test_fetch_sources_retries_mid_stream_failure(make_jar, tmp_path: Path):
+    payload = make_jar("p.jar", {"A.java": "class A {}"}).read_bytes()
+    state = {"n": 0}
+
+    class FlakyStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield payload[:10]
+            raise httpx.ReadError("dropped")
+
+    def handler(request):
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(200, stream=FlakyStream())
+        return httpx.Response(200, content=payload)
+
+    cache = tmp_path / "cache"
+    with make_client(handler) as c:
+        got = fetch_sources(Gav("g", "a", "1"), ["https://r.test/m2"], c, cache)
+    assert got is not None and got[0].read_bytes() == payload
+    assert state["n"] == 2
+    assert not list(cache.glob("*.part"))  # failed attempt's temp file cleaned up
+
+
+def test_breaker_gives_up_on_host_after_three_artifacts(make_jar, tmp_path: Path):
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    jars = [
+        make_jar(f"mystery{i}.jar", {"A.class": bytes(str(i), "ascii")}) for i in range(4)
+    ]
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("down")
+
+    with make_client(handler) as c:
+        for jar in jars[:3]:
+            resolve_sources(jar, [], c, tmp_path / "cache", net=net)
+        assert calls["n"] == 9  # 3 artifacts x 1 sha1 lookup x 3 attempts
+        res = resolve_sources(jars[3], [], c, tmp_path / "cache", net=net)
+    assert calls["n"] == 9  # dead host: the 4th artifact makes no HTTP calls
+    assert res.miss.startswith(
+        "network: search.maven.org skipped (unreachable this run) during sha1 lookup; "
+    )
+    assert [w for w in warnings if w.startswith("maven: giving up")] == [
+        "maven: giving up on search.maven.org for the rest of the run "
+        "(3 artifacts hit network failures in a row)"
+    ]

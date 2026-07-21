@@ -290,21 +290,33 @@ def _get_retry(
     raise _exhausted(net, log, host, kind)
 
 
-def _groups_from_index(artifact: str, client: httpx.Client) -> list[str]:
+def _groups_from_index(
+    artifact: str, client: httpx.Client, net: NetState, log: ResolutionLog
+) -> list[str] | None:
+    """GroupIds indexed for artifact, [] if none, None if the lookup couldn't run."""
     cache = _INDEX_CACHE.setdefault(client, {})
-    if artifact not in cache:
-        try:
-            resp = client.get(
-                SEARCH_URL,
-                params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            docs = resp.json()["response"]["docs"]
-            cache[artifact] = [d["g"] for d in docs if isinstance(d.get("g"), str)]
-        except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError):
-            cache[artifact] = []
-    return cache[artifact]
+    if artifact in cache:
+        return cache[artifact]
+    try:
+        resp = _get_retry(
+            client,
+            SEARCH_URL,
+            net=net,
+            log=log,
+            params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
+        )
+        resp.raise_for_status()
+        docs = resp.json()["response"]["docs"]
+        groups = [d["g"] for d in docs if isinstance(d.get("g"), str)]
+    except NetworkFailure as nf:
+        log.events.append(f"{nf.detail} during index lookup")
+        return None
+    except (httpx.HTTPError, KeyError, ValueError, TypeError, AttributeError):
+        host = httpx.URL(SEARCH_URL).host
+        log.events.append(f"{host}: malformed index response during index lookup")
+        return None
+    cache[artifact] = groups  # only successful lookups are memoized (incl. empty)
+    return groups
 
 
 def _strip_container_root(name: str) -> str:
@@ -341,9 +353,20 @@ def _groups_from_packages(jar_path: Path) -> list[str]:
     return [".".join(prefix[:n]) for n in range(len(prefix), 1, -1)]
 
 
-def candidate_groups(artifact: str, jar_path: Path, client: httpx.Client) -> list[str]:
+def candidate_groups(
+    artifact: str,
+    jar_path: Path,
+    client: httpx.Client,
+    net: NetState | None = None,
+    log: ResolutionLog | None = None,
+) -> list[str]:
     """Ordered groupId guesses: Central index by artifactId, then package prefixes."""
-    return list(dict.fromkeys(_groups_from_index(artifact, client) + _groups_from_packages(jar_path)))
+    if net is None:
+        net = NetState()
+    if log is None:
+        log = ResolutionLog()
+    from_index = _groups_from_index(artifact, client, net, log) or []
+    return list(dict.fromkeys(from_index + _groups_from_packages(jar_path)))
 
 
 MAX_PROBES = 8
@@ -355,15 +378,31 @@ def verify_gav(
     repos: Sequence[str],
     client: httpx.Client,
     budget: int = MAX_PROBES,
+    net: NetState | None = None,
+    log: ResolutionLog | None = None,
 ) -> tuple[str | None, int]:
     """Probe each repo's .jar.sha1 sidecar for gav. Returns (verifying repo, probes spent)."""
+    if net is None:
+        net = NetState()
+    if log is None:
+        log = ResolutionLog()
     used = 0
     for repo in repos:
         if used >= budget:
             break
         used += 1
         try:
-            resp = client.get(f"{repo}/{gav.jar_path()}.sha1", follow_redirects=True, timeout=10)
+            resp = _get_retry(
+                client,
+                f"{repo}/{gav.jar_path()}.sha1",
+                net=net,
+                log=log,
+                follow_redirects=True,
+            )
+        except NetworkFailure as nf:
+            log.events.append(f"{nf.detail} during candidate probe")
+            log.probe_failures += 1
+            continue
         except (httpx.HTTPError, httpx.InvalidURL):
             continue
         if resp.status_code != 200:
@@ -382,10 +421,23 @@ def sha1_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def gav_from_central_sha1(sha1: str, client: httpx.Client) -> Gav | None:
+def gav_from_central_sha1(
+    sha1: str,
+    client: httpx.Client,
+    net: NetState | None = None,
+    log: ResolutionLog | None = None,
+) -> Gav | None:
+    if net is None:
+        net = NetState()
+    if log is None:
+        log = ResolutionLog()
     try:
-        resp = client.get(
-            SEARCH_URL, params={"q": f'1:"{sha1}"', "rows": "1", "wt": "json"}, timeout=10
+        resp = _get_retry(
+            client,
+            SEARCH_URL,
+            net=net,
+            log=log,
+            params={"q": f'1:"{sha1}"', "rows": "1", "wt": "json"},
         )
         resp.raise_for_status()
         docs = resp.json()["response"]["docs"]
@@ -393,13 +445,25 @@ def gav_from_central_sha1(sha1: str, client: httpx.Client) -> Gav | None:
             return None
         doc = docs[0]
         return Gav(doc["g"], doc["a"], doc["v"])
+    except NetworkFailure as nf:
+        log.events.append(f"{nf.detail} during sha1 lookup")
+        return None
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
         return None
 
 
 def fetch_sources(
-    gav: Gav, repos: Sequence[str], client: httpx.Client, cache_dir: Path
+    gav: Gav,
+    repos: Sequence[str],
+    client: httpx.Client,
+    cache_dir: Path,
+    net: NetState | None = None,
+    log: ResolutionLog | None = None,
 ) -> tuple[Path, str] | None:
+    if net is None:
+        net = NetState()
+    if log is None:
+        log = ResolutionLog()
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar"
     marker = cached.with_suffix(".repo")
@@ -407,38 +471,75 @@ def fetch_sources(
         return cached, marker.read_text().strip()
     for repo in repos:
         url = f"{repo}/{gav.sources_path()}"
+        try:
+            got = _download(client, url, cached, net, log)
+        except NetworkFailure as nf:
+            log.events.append(f"{nf.detail} during sources download")
+            log.download_failures += 1
+            continue
+        except httpx.HTTPError:
+            continue
+        if got is None:
+            continue
+        marker.write_text(repo)
+        return cached, repo
+    return None
+
+
+def _download(
+    client: httpx.Client, url: str, cached: Path, net: NetState, log: ResolutionLog
+) -> Path | None:
+    """One repo's sources download with transient retries.
+
+    Returns the cached path on success, None for a verified miss (non-200 or
+    not a zip); raises NetworkFailure after exhausted or aborted retries.
+    """
+    host = httpx.URL(url).host
+    _check_alive(net, host)
+    kind = ""
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        retry_after = None
         tmp = tempfile.NamedTemporaryFile(
-            dir=cache_dir, prefix=cached.name + ".", suffix=".part", delete=False
+            dir=cached.parent, prefix=cached.name + ".", suffix=".part", delete=False
         )
         tmp_name = Path(tmp.name)
         ok = False
         try:
             with client.stream("GET", url, follow_redirects=True, timeout=30) as resp:
-                if resp.status_code != 200:
-                    continue
-                for chunk in resp.iter_bytes():
-                    tmp.write(chunk)
-                ok = True
-        except httpx.HTTPError:
-            continue
+                status_kind = _status_kind(resp.status_code)
+                if status_kind is not None:
+                    kind = status_kind
+                    retry_after = _retry_after_seconds(resp)
+                elif resp.status_code != 200:
+                    log.ok_hosts.add(host)
+                    return None
+                else:
+                    for chunk in resp.iter_bytes():
+                        tmp.write(chunk)
+                    ok = True
+        except httpx.TransportError as exc:
+            kind = _exc_kind(exc)
         finally:
             tmp.close()
             if not ok:
                 os.unlink(tmp_name)
-        if not zipfile.is_zipfile(tmp_name):
-            os.unlink(tmp_name)
-            continue
-        try:
-            os.replace(tmp_name, cached)
-        except OSError:
-            # Windows denies replace when another thread races the same GAV;
-            # the winner's copy is identical, so drop ours and use it.
-            os.unlink(tmp_name)
-            if not cached.is_file():
-                continue
-        marker.write_text(repo)
-        return cached, repo
-    return None
+        if ok:
+            log.ok_hosts.add(host)
+            if not zipfile.is_zipfile(tmp_name):
+                os.unlink(tmp_name)
+                return None
+            try:
+                os.replace(tmp_name, cached)
+            except OSError:
+                # Windows denies replace when another thread races the same GAV;
+                # the winner's copy is identical, so drop ours and use it.
+                os.unlink(tmp_name)
+                if not cached.is_file():
+                    return None
+            return cached
+        if attempt < RETRY_ATTEMPTS and _wait_before_retry(net, attempt, retry_after):
+            raise NetworkFailure(host, kind, f"{host}: {kind}")  # aborted: quiet give-up
+    raise _exhausted(net, log, host, kind)
 
 
 def extract_java(sources_jar: Path, dest: Path) -> int:
@@ -465,6 +566,20 @@ def _fetched(gav: Gav, fetched: tuple[Path, str] | None, resolved_by: str, no_so
     return Resolution(gav=gav, sources_jar=fetched[0], repo=fetched[1], resolved_by=resolved_by)
 
 
+def _no_sources(prefix: str, absent: str, log: ResolutionLog) -> str:
+    if log.download_failures:
+        return f"{prefix} but no -sources.jar in any reachable repo"
+    return f"{prefix} but {absent}"
+
+
+def _finish(res: Resolution, log: ResolutionLog, net: NetState) -> Resolution:
+    net.record_artifact(log.failed_hosts, log.ok_hosts)
+    if res.miss is not None and log.events:
+        seen = "; ".join(dict.fromkeys(log.events))
+        res.miss = f"network: {seen}; {res.miss}"
+    return res
+
+
 def resolve_sources(
     jar_path: Path,
     repos: Sequence[str],
@@ -472,58 +587,71 @@ def resolve_sources(
     cache_dir: Path,
     *,
     allow_sha1: bool = True,
+    net: NetState | None = None,
 ) -> Resolution:
+    if net is None:
+        net = NetState()
+    log = ResolutionLog()
+
     gav = gav_from_pom_properties(jar_path)
     if gav is not None:
-        return _fetched(
-            gav,
-            fetch_sources(gav, repos, client, cache_dir),
-            "pom-properties",
-            f"found {gav} in pom.properties but no -sources.jar in any repo",
+        fetched = fetch_sources(gav, repos, client, cache_dir, net, log)
+        msg = _no_sources(
+            f"found {gav} in pom.properties", "no -sources.jar in any repo", log
         )
+        return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
 
     trail = ["no pom.properties"]
     sha1 = sha1_of(jar_path)
     if allow_sha1:
-        gav = gav_from_central_sha1(sha1, client)
+        before = len(log.events)
+        gav = gav_from_central_sha1(sha1, client, net, log)
         if gav is not None:
-            return _fetched(
-                gav,
-                fetch_sources(gav, repos, client, cache_dir),
-                "sha1-index",
-                f"sha1 matched {gav} in Central index but no -sources.jar in any repo",
+            fetched = fetch_sources(gav, repos, client, cache_dir, net, log)
+            msg = _no_sources(
+                f"sha1 matched {gav} in Central index", "no -sources.jar in any repo", log
             )
-        trail.append("sha1 not in Central index")
+            return _finish(_fetched(gav, fetched, "sha1-index", msg), log, net)
+        trail.append(
+            "sha1 lookup errored (network)"
+            if len(log.events) > before
+            else "sha1 not in Central index"
+        )
     else:
         trail.append("sha1 lookup skipped")
 
     coords = candidate_coords(jar_path)
     if not coords:
         trail.append("no artifact/version hints in filename or manifest")
-        return Resolution(miss="; ".join(trail))
+        return _finish(Resolution(miss="; ".join(trail)), log, net)
 
     budget = MAX_PROBES
     tried: set[Gav] = set()
     for artifact, version in coords:
         if budget <= 0:
             break
-        for group in candidate_groups(artifact, jar_path, client):
+        for group in candidate_groups(artifact, jar_path, client, net, log):
             if budget <= 0:
                 break
             candidate = Gav(group, artifact, version)
             if candidate in tried:
                 continue
             tried.add(candidate)
-            repo, used = verify_gav(candidate, sha1, repos, client, budget)
+            repo, used = verify_gav(candidate, sha1, repos, client, budget, net, log)
             budget -= used
             if repo is None:
                 continue
             ordered = [repo, *[r for r in repos if r != repo]]
-            return _fetched(
-                candidate,
-                fetch_sources(candidate, ordered, client, cache_dir),
-                "verified-guess",
-                f"verified {candidate} via {repo} but no -sources.jar published",
+            fetched = fetch_sources(candidate, ordered, client, cache_dir, net, log)
+            msg = _no_sources(
+                f"verified {candidate} via {repo}", "no -sources.jar published", log
             )
-    trail.append(f"{len(tried)} candidates, none verified" if tried else "no candidate groups found")
-    return Resolution(miss="; ".join(trail))
+            return _finish(_fetched(candidate, fetched, "verified-guess", msg), log, net)
+    if tried:
+        errs = f" ({log.probe_failures} probe(s) errored)" if log.probe_failures else ""
+        trail.append(f"{len(tried)} candidates, none verified{errs}")
+    elif any(e.endswith("during index lookup") for e in log.events):
+        trail.append("no candidate groups found (index unavailable)")
+    else:
+        trail.append("no candidate groups found")
+    return _finish(Resolution(miss="; ".join(trail)), log, net)
