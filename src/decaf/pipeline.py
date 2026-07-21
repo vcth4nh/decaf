@@ -31,7 +31,7 @@ from .scanner import (
     copy_class_tree,
     find_nested_archives,
     safe_extract_zip,
-    scan_input,
+    scan_counted,
 )
 
 _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
@@ -70,6 +70,7 @@ class ArtifactReport:
     repo: str | None = None
     resolved_by: str | None = None  # "pom-properties" | "sha1-index" | "verified-guess"
     sources_miss: str | None = None  # why the maven path yielded nothing
+    sources_cached: bool = False  # sources jar came from the on-disk cache
     classes: int = 0
     java_files: int = 0
     resources_skipped: int = 0
@@ -225,6 +226,7 @@ class Ctx:
     resolver: Callable
     cpu_budget: int | None = None  # visible cores per engine JVM
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
+    on_event: Callable[[str, str, str], None] | None = None  # live progress events
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -303,6 +305,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         if engines.PROCESSES.closed:
             break
         dest = _tmp_dir(ctx)
+        if ctx.on_event is not None:
+            ctx.on_event("decompile", artifact.rel, name)
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
@@ -336,6 +340,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         if retry_tree is None:
             break
         dest = _tmp_dir(ctx)
+        if ctx.on_event is not None:
+            ctx.on_event("decompile", artifact.rel, name)
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
@@ -386,6 +392,8 @@ def _fetch_stage(
     decompile target for stage 2 — None when the artifact completed here.
     """
     report = ArtifactReport(rel=artifact.rel, kind=artifact.kind.value, outcome="ok")
+    if ctx.on_event is not None:
+        ctx.on_event("fetch", artifact.rel, "")
     nested: list[Artifact] = []
     try:
         if artifact.kind is ArtifactKind.CORRUPT:
@@ -428,6 +436,7 @@ def _fetch_stage(
                     report.method = "maven"
                     report.repo = resolution.repo
                     report.resolved_by = resolution.resolved_by
+                    report.sources_cached = resolution.cached
                     report.java_files = java
                     report.resources_skipped = resources
                     report.collisions = collisions
@@ -479,8 +488,13 @@ class DecafError(Exception):
 
 
 def _preflight_engines(
-    settings: Settings, java_major: int, client: httpx.Client
+    settings: Settings,
+    java_major: int,
+    client: httpx.Client,
+    on_event: Callable[[str, str, str], None] | None = None,
 ) -> tuple[list[str], dict[str, Path]]:
+    if on_event is not None:
+        on_event("engines", "", "verifying")
     wanted = chain_for(settings.engine, settings.fallback)
     specs = engines.active_specs(settings.engine_overrides)
     jars: dict[str, Path] = {}
@@ -492,14 +506,29 @@ def _preflight_engines(
                     f"engine {name} needs Java {spec.min_java}+, found Java {java_major}"
                 )
             continue
+        downloaded = False
+        kwargs: dict = {}
+        if on_event is not None:
+
+            def _hook(name: str = name, version: str = spec.version) -> None:
+                nonlocal downloaded
+                downloaded = True
+                on_event("engines", name, f"downloading {version}")
+
+            kwargs["on_download"] = _hook
         try:
-            jars[name] = engines.ensure_engine(spec, client)
+            jars[name] = engines.ensure_engine(spec, client, **kwargs)
         except engines.EngineError as exc:
             if name == settings.engine:
                 raise DecafError(str(exc)) from exc
+        else:
+            if downloaded:
+                on_event("engines", name, f"downloaded {spec.version}")
     chain = chain_for(settings.engine, settings.fallback, available=set(jars))
     if not chain:
         raise DecafError(f"primary engine {settings.engine!r} unavailable")
+    if on_event is not None:
+        on_event("engines", "", "ready")
     return chain, jars
 
 
@@ -510,6 +539,7 @@ def run(
     on_found: Callable[[int], None] | None = None,
     on_stderr: Callable[[str], None] | None = None,
     on_warn: Callable[[str], None] | None = None,
+    on_event: Callable[[str, str, str], None] | None = None,
     runner: Callable | None = None,
     resolver: Callable | None = None,
 ) -> RunReport:
@@ -522,9 +552,14 @@ def run(
     if java_major < engines.JAVA_MIN:
         raise DecafError(f"Java {java_major} is too old (Java {engines.JAVA_MIN}+ required)")
 
-    artifacts = scan_input(settings.input)
+    artifacts, nested_counts = scan_counted(settings.input)
     if on_found is not None:
-        on_found(len(artifacts))
+        on_found(len(artifacts) + sum(nested_counts.values()))
+    if on_event is not None:
+        on_event(
+            "scan", "",
+            f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
+        )
     runner = runner or engines.run_engine
     net = maven.NetState(warn=on_warn)
     resolver = resolver or partial(maven.resolve_sources, net=net)
@@ -547,7 +582,7 @@ def run(
         affinity_base = os.sched_getaffinity(0)
         os.sched_setaffinity(0, set(sorted(affinity_base)[:total_cpus]))
     try:
-        chain, engine_jars = _preflight_engines(settings, java_major, client)
+        chain, engine_jars = _preflight_engines(settings, java_major, client, on_event)
         writer: MergeWriter | MirrorWriter
         if settings.mirror:
             writer = MirrorWriter(settings.output)
@@ -566,6 +601,7 @@ def run(
             resolver=resolver,
             cpu_budget=cpu_budget,
             on_stderr=on_stderr,
+            on_event=on_event,
         )
         try:
             with (
@@ -597,9 +633,12 @@ def run(
                                 report, nested, target = fut.result()
                                 if nested:
                                     todo.extend(nested)
-                                    if on_found is not None:
-                                        on_found(len(nested))
+                                delta = len(nested) - nested_counts.pop(a.rel, 0)
+                                if delta and on_found is not None:
+                                    on_found(delta)
                                 if target is not None:
+                                    if on_event is not None:
+                                        on_event("queued", a.rel, "")
                                     dec_futs.add(
                                         dec_pool.submit(_decompile_stage, a, target, ctx, report)
                                     )

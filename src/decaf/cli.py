@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Optional
@@ -11,8 +12,8 @@ import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
-from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
+from rich.table import Column, Table
 from typer.core import TyperGroup
 
 from . import __version__, engines
@@ -174,10 +175,140 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(code=2)
 
 
+_STAGE_VERBS = {"fetch": "fetching", "decompile": "decompiling"}
+_STAGE_RANK = {"header": 0, "engines": 1, "fetch": 2, "decompile": 3}
+
+
+def _shorten(rel: str, limit: int = 60) -> str:
+    """Middle-elide a long artifact rel, always keeping the leaf name."""
+    if len(rel) <= limit:
+        return rel
+    leaf = rel.rsplit("/", 1)[-1]
+    if leaf == rel or len(leaf) + 2 >= limit:
+        return "…" + leaf[-(limit - 1):]
+    prefix = rel[: limit - len(leaf) - 3]
+    if "/" in prefix:
+        prefix = prefix.rsplit("/", 1)[0]
+    return f"{prefix}/…/{leaf}" if prefix else f"…/{leaf}"
+
+
+class _GroupedProgress(Progress):
+    """Progress that renders tasks grouped by their `stage` field.
+
+    Stable sort: header, then the engines row, then fetching rows, then
+    decompiling rows — insertion order preserved within each group, and
+    TaskIDs never churn (no remove/re-add on stage transitions).
+    """
+
+    def _ordered_tasks(self) -> list:
+        return sorted(self.tasks, key=lambda t: _STAGE_RANK.get(t.fields.get("stage"), 4))
+
+    def get_renderables(self):
+        yield self.make_tasks_table(self._ordered_tasks())
+
+
+class _RunDisplay:
+    """Routes pipeline events onto transient rich Progress rows.
+
+    Runs under one lock: events arrive from the scheduler and worker threads,
+    and the rel→row map must mutate atomically with the rich task list. rich
+    never calls back into this class, so the single-lock order is safe.
+    """
+
+    def __init__(self, progress: Progress) -> None:
+        self._p = progress
+        self._lock = threading.Lock()
+        self._header = progress.add_task("scanning…", total=None, stage="header")
+        self._scanned = False
+        self._total = 0
+        self._done = 0
+        self._rows: dict[str, TaskID] = {}
+        self._stage: dict[str, str] = {}  # rel -> "fetch" | "decompile", rows only
+        self._engines: TaskID | None = None
+
+    def on_found(self, count: int) -> None:
+        with self._lock:
+            self._total += count
+            self._refresh_header()
+
+    def on_done(self, report: ArtifactReport) -> None:
+        with self._lock:
+            self._done += 1
+            self._drop(report.rel)
+            self._refresh_header()
+
+    def on_event(self, kind: str, subject: str, detail: str) -> None:
+        with self._lock:
+            if kind == "scan":
+                self._scanned = True
+                self._p.console.print(f"found {self._total} artifacts ({detail})")
+            elif kind == "engines":
+                self._engines_event(subject, detail)
+            elif kind == "queued":
+                self._drop(subject)
+            elif kind in _STAGE_VERBS:
+                text = f"{_STAGE_VERBS[kind]:<11} {_shorten(subject)}"
+                if kind == "decompile" and detail:
+                    text += f" ({detail})"
+                self._upsert(subject, text, kind)
+            self._refresh_header()
+
+    # -- internals; every method below expects the lock to be held --
+
+    def _engines_event(self, subject: str, detail: str) -> None:
+        if detail == "ready":
+            if self._engines is not None:
+                self._p.remove_task(self._engines)
+                self._engines = None
+            return
+        if detail.startswith("downloaded "):
+            ver = detail.split(" ", 1)[1]
+            self._p.console.print(f"[green]✓[/] {subject} {ver} downloaded")
+            text = "engines: verifying…"
+        elif detail.startswith("downloading "):
+            ver = detail.split(" ", 1)[1]
+            text = f"engines: downloading {subject} {ver}…"
+        else:  # "verifying"
+            text = "engines: verifying…"
+        if self._engines is None:
+            self._engines = self._p.add_task(text, total=None, stage="engines")
+        else:
+            self._p.update(self._engines, description=text)
+
+    def _upsert(self, rel: str, text: str, stage: str) -> None:
+        self._stage[rel] = stage
+        if rel in self._rows:
+            self._p.update(self._rows[rel], description=text, stage=stage)
+        else:
+            self._rows[rel] = self._p.add_task(text, total=None, stage=stage)
+
+    def _drop(self, rel: str) -> None:
+        self._stage.pop(rel, None)
+        row = self._rows.pop(rel, None)
+        if row is not None:
+            self._p.remove_task(row)
+
+    def _refresh_header(self) -> None:
+        if not self._scanned:
+            return
+        fetching = sum(1 for s in self._stage.values() if s == "fetch")
+        decompiling = len(self._stage) - fetching
+        queued = max(0, self._total - self._done - len(self._stage))
+        self._p.update(
+            self._header,
+            description=(
+                f"{self._done}/{self._total} done · {fetching} fetching"
+                f" · {decompiling} decompiling · {queued} queued"
+            ),
+        )
+
+
 def _status_line(r: ArtifactReport) -> str:
     if r.outcome == "ok":
         if r.method == "maven":
             detail = f"maven sources, {r.gav}"
+            if r.sources_cached:
+                detail += ", cached"
         elif r.method == "extracted":
             detail = "extracted sources jar"
         else:
@@ -195,7 +326,11 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
     t = report.totals
     table = Table(title="decaf summary", show_header=False)
     table.add_row("Artifacts", str(t["artifacts"]))
-    table.add_row("OK", f"{t['ok']} (maven {t['maven_sources']}, decompiled {t['decompiled']}, extracted {t['extracted']})")
+    cached = sum(1 for r in report.artifacts if r.sources_cached)
+    maven_part = f"maven {t['maven_sources']}"
+    if cached:
+        maven_part += f" ({cached} cached)"
+    table.add_row("OK", f"{t['ok']} ({maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']})")
     table.add_row("Skipped", str(t["skipped"]))
     table.add_row("Failed", str(t["failed"]))
     table.add_row("Java files", str(t["java_files"]))
@@ -265,24 +400,17 @@ def main(
         engine_overrides=cfg.engine_overrides,
     )
 
-    progress = Progress(
+    progress = _GroupedProgress(
         SpinnerColumn(),
-        TextColumn("decompiling"),
-        MofNCompleteColumn(),
+        TextColumn("{task.description}", table_column=Column(no_wrap=True)),
         console=console,
         transient=True,
         disable=quiet,
     )
-
-    found_total = 0
-
-    def on_found(count: int) -> None:
-        nonlocal found_total
-        found_total += count
-        progress.update(task, total=found_total)
+    display = _RunDisplay(progress)
 
     def on_done(r: ArtifactReport) -> None:
-        progress.advance(task)
+        display.on_done(r)
         if not quiet:
             progress.console.print(_status_line(r))
 
@@ -294,8 +422,8 @@ def main(
 
     try:
         with progress:
-            task = progress.add_task("decompiling", total=None)
-            report = run(settings, on_done=on_done, on_found=on_found,
+            report = run(settings, on_done=on_done, on_found=display.on_found,
+                         on_event=None if quiet else display.on_event,
                          on_stderr=on_stderr if verbose else None,
                          on_warn=on_warn if not quiet else None)
     except (DecafError, ScanError) as exc:

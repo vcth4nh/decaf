@@ -118,6 +118,16 @@ def test_parse_java_major(text: str, major: int | None):
     assert parse_java_major(text) == major
 
 
+def test_ensure_engine_download_hook_fires_only_on_download(tmp_path: Path):
+    data = b"jarbytes"
+    fired: list[int] = []
+    spec = spec_for(data)
+    with make_client(lambda r: httpx.Response(200, content=data)) as c:
+        ensure_engine(spec, c, cache_dir=tmp_path, on_download=lambda: fired.append(1))
+        ensure_engine(spec, c, cache_dir=tmp_path, on_download=lambda: fired.append(2))
+    assert fired == [1]  # second call served from cache, hook not fired
+
+
 @pytest.mark.network
 def test_real_engine_downloads(tmp_path: Path):
     with httpx.Client(follow_redirects=True, timeout=120) as c:

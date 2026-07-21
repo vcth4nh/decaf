@@ -35,7 +35,9 @@ def perfect_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budge
 def fake_env(monkeypatch):
     monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
     monkeypatch.setattr(
-        engines, "ensure_engine", lambda spec, client, cache_dir=None: Path(f"/fake/{spec.name}.jar")
+        engines,
+        "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
     )
 
 
@@ -182,8 +184,50 @@ def test_run_reports_found_counts(fake_env, make_jar, tmp_path: Path):
         on_found=found.append,
         runner=perfect_engine,
     )
-    assert found == [2, 1]  # initial scan, then the war's nested jar mid-run
+    assert found == [3]  # 2 top-level + 1 pre-counted nested: seeded upfront, no growth
     assert sum(found) == len(report.artifacts)
+
+
+def test_run_beyond_depth_discovery_still_ticks_totals(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_deep_inputs(make_jar, tmp_path)
+    found: list[int] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False),
+        on_found=found.append,
+        runner=perfect_engine,
+    )
+    assert found == [2, 1]  # seed: war + its dep.jar; +1 when inner.jar surfaces beyond depth
+    assert sum(found) == len(report.artifacts)
+
+
+def test_run_corrects_total_when_precounted_member_unextractable(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar(
+        "app.war",
+        {"WEB-INF/classes/com/w/W.class": b"w", "../evil.jar": b"junk"},
+        base=input_dir,
+    )
+    found: list[int] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False),
+        on_found=found.append,
+        runner=perfect_engine,
+    )
+    assert found == [2, -1]  # pre-counted ../evil.jar never extracts; total self-corrects
+    assert sum(found) == len(report.artifacts) == 1
+
+
+def test_run_emits_scan_event_after_seeding(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_inputs(make_jar, tmp_path)
+    log: list = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_found=lambda n: log.append(("found", n)),
+        on_event=lambda k, s, d: log.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    assert ("scan", "", "2 top-level + 1 nested") in log
+    assert log.index(("found", 3)) < log.index(("scan", "", "2 top-level + 1 nested"))
 
 
 def test_run_resource_only_war_nested_jars_reached(fake_env, make_jar, tmp_path: Path):
@@ -649,3 +693,130 @@ def test_interrupt_sets_resolver_abort_event(fake_env, make_jar, tmp_path: Path,
     assert report.interrupted is True
     assert len(created) == 1
     assert created[0].abort.is_set()
+
+
+def test_run_emits_artifact_stage_events(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    assert [e for e in events if e[1] == "a.jar"] == [
+        ("fetch", "a.jar", ""),
+        ("queued", "a.jar", ""),
+        ("decompile", "a.jar", "vineflower"),
+    ]
+
+
+def test_run_maven_hit_emits_no_decompile_events_and_carries_cached(
+    fake_env, make_jar, tmp_path: Path
+):
+    input_dir = tmp_path / "in"
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+
+    def hit_resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=sources,
+            repo="https://r.test/m2",
+            resolved_by="pom-properties",
+            cached=True,
+        )
+
+    events: list[tuple[str, str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", mirror=False),
+        runner=perfect_engine,
+        resolver=hit_resolver,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    assert [e[0] for e in events if e[1] == "lib-1.2.jar"] == ["fetch"]
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["lib-1.2.jar"].sources_cached is True
+
+
+def test_run_fallback_refires_decompile_event(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    def flaky_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name == "vineflower":
+            return EngineResult(spec.name, 1, False, 0, "boom")
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=flaky_engine,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    assert [e[2] for e in events if e[0] == "decompile"] == ["vineflower", "cfr"]
+
+
+def test_report_json_carries_sources_cached(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    out = tmp_path / "out"
+    run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    on_disk = json.loads((out / "decaf-report.json").read_text())
+    assert on_disk["artifacts"][0]["sources_cached"] is False
+
+
+def test_run_emits_engine_preflight_events(monkeypatch, make_jar, tmp_path: Path):
+    from decaf.engines import ENGINES
+
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+
+    def fake_ensure(spec, client, cache_dir=None, on_download=None):
+        if spec.name == "cfr" and on_download is not None:
+            on_download()
+        return Path(f"/fake/{spec.name}.jar")
+
+    monkeypatch.setattr(engines, "ensure_engine", fake_ensure)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    eng = [e for e in events if e[0] == "engines"]
+    ver = ENGINES["cfr"].version
+    assert eng[0] == ("engines", "", "verifying")
+    assert ("engines", "cfr", f"downloading {ver}") in eng
+    assert ("engines", "cfr", f"downloaded {ver}") in eng
+    assert eng[-1] == ("engines", "", "ready")
+    assert eng.index(("engines", "cfr", f"downloading {ver}")) < eng.index(
+        ("engines", "cfr", f"downloaded {ver}")
+    )
+
+
+def test_run_cached_engines_emit_no_download_events(fake_env, make_jar, tmp_path: Path):
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    eng = [e for e in events if e[0] == "engines"]
+    assert eng == [("engines", "", "verifying"), ("engines", "", "ready")]
+
+
+def test_preflight_omits_hook_without_on_event(monkeypatch, make_jar, tmp_path: Path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(
+        engines,
+        "ensure_engine",
+        lambda spec, client, cache_dir=None: Path(f"/fake/{spec.name}.jar"),
+    )  # strict 3-arg fake: run() without on_event must never pass on_download
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    report = run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+    )
+    assert report.totals["ok"] == 1

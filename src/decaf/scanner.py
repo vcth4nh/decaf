@@ -32,12 +32,15 @@ class Artifact:
     kind: ArtifactKind
 
 
-def classify_zip(path: Path) -> ArtifactKind:
+def _read_names(path: Path) -> list[str] | None:
     try:
         with zipfile.ZipFile(path) as zf:
-            names = zf.namelist()
+            return zf.namelist()
     except (zipfile.BadZipFile, OSError):
-        return ArtifactKind.CORRUPT
+        return None
+
+
+def _classify_names(names: list[str]) -> ArtifactKind:
     if any(n.endswith(".class") for n in names):
         return ArtifactKind.ARCHIVE
     if any(n.endswith(".java") for n in names):
@@ -45,26 +48,9 @@ def classify_zip(path: Path) -> ArtifactKind:
     return ArtifactKind.RESOURCE_ONLY
 
 
-def scan_input(root: Path) -> list[Artifact]:
-    if root.is_file():
-        if root.suffix.lower() not in ARCHIVE_EXTS:
-            raise ScanError(
-                f"{root}: unsupported file type (expected one of {sorted(ARCHIVE_EXTS)})"
-            )
-        return [Artifact(root, root.name, classify_zip(root))]
-
-    artifacts: list[Artifact] = []
-    has_loose_classes = False
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
-            continue
-        if p.suffix.lower() in ARCHIVE_EXTS:
-            artifacts.append(Artifact(p, p.relative_to(root).as_posix(), classify_zip(p)))
-        elif p.suffix == ".class":
-            has_loose_classes = True
-    if has_loose_classes:
-        artifacts.append(Artifact(root, "_classes", ArtifactKind.CLASS_TREE))
-    return artifacts
+def classify_zip(path: Path) -> ArtifactKind:
+    names = _read_names(path)
+    return ArtifactKind.CORRUPT if names is None else _classify_names(names)
 
 
 def find_nested_archives(names: Iterable[str]) -> list[str]:
@@ -73,6 +59,46 @@ def find_nested_archives(names: Iterable[str]) -> list[str]:
         for n in names
         if not n.endswith("/") and PurePosixPath(n).suffix.lower() in ARCHIVE_EXTS
     ]
+
+
+def scan_counted(root: Path) -> tuple[list[Artifact], dict[str, int]]:
+    """Scan plus, from the same zip read, each archive's nested-archive count.
+
+    Counts exist only for ARCHIVE/RESOURCE_ONLY artifacts — the kinds nested
+    discovery later runs on — so the pipeline can seed display totals upfront.
+    """
+    counts: dict[str, int] = {}
+
+    def _artifact(path: Path, rel: str) -> Artifact:
+        names = _read_names(path)
+        kind = ArtifactKind.CORRUPT if names is None else _classify_names(names)
+        if kind in (ArtifactKind.ARCHIVE, ArtifactKind.RESOURCE_ONLY):
+            counts[rel] = len(find_nested_archives(names))
+        return Artifact(path, rel, kind)
+
+    if root.is_file():
+        if root.suffix.lower() not in ARCHIVE_EXTS:
+            raise ScanError(
+                f"{root}: unsupported file type (expected one of {sorted(ARCHIVE_EXTS)})"
+            )
+        return [_artifact(root, root.name)], counts
+
+    artifacts: list[Artifact] = []
+    has_loose_classes = False
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() in ARCHIVE_EXTS:
+            artifacts.append(_artifact(p, p.relative_to(root).as_posix()))
+        elif p.suffix == ".class":
+            has_loose_classes = True
+    if has_loose_classes:
+        artifacts.append(Artifact(root, "_classes", ArtifactKind.CLASS_TREE))
+    return artifacts, counts
+
+
+def scan_input(root: Path) -> list[Artifact]:
+    return scan_counted(root)[0]
 
 
 def safe_extract_zip(

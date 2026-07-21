@@ -2,6 +2,25 @@
 
 All notable changes to decaf are documented here.
 
+## [Unreleased]
+
+### Added
+
+- Live per-jar progress: each executing jar shows a transient row with its
+  stage (`fetching` / `decompiling`) and engine, grouped by stage under a
+  `M/N done · F fetching · D decompiling · Q queued` header; scrollback
+  still gets exactly one line per jar (#50).
+- Stable totals: nested jars are pre-counted during the scan
+  (`found N artifacts (T top-level + K nested)`), so the total no longer
+  grows mid-run and self-corrects if a pre-counted entry cannot be
+  extracted (#50).
+- Engine preflight visibility: `engines: verifying…` /
+  `engines: downloading <name> <version>…` live rows and a persistent
+  `✓ <name> <version> downloaded` line on first-run downloads (#50).
+- Maven sources-cache hits are now visible: `, cached` on the artifact
+  status line, `maven N (K cached)` in the summary, and an additive
+  `sources_cached` field in decaf-report.json (#50).
+
 ## [1.4.1] - 2026-07-21
 
 ### Fixed

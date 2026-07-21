@@ -10,6 +10,7 @@ from decaf.scanner import (
     copy_class_tree,
     find_nested_archives,
     safe_extract_zip,
+    scan_counted,
     scan_input,
 )
 
@@ -95,3 +96,58 @@ def test_copy_class_tree(tmp_path: Path):
     assert copy_class_tree(src, dest) == 1
     assert (dest / "com/x/A.class").read_bytes() == b"a"
     assert not (dest / "com/x/notes.txt").exists()
+
+
+def test_scan_counted_nested_names(make_jar, tmp_path: Path):
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    make_jar(
+        "app.war",
+        {
+            "WEB-INF/classes/W.class": b"w",
+            "WEB-INF/lib/dep.jar": inner.read_bytes(),
+            "WEB-INF/web.xml": b"<web/>",
+        },
+        base=tmp_path / "in",
+    )
+    make_jar("libs/plain.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    arts, counts = scan_counted(tmp_path / "in")
+    assert [(a.rel, a.kind) for a in arts] == [
+        ("app.war", ArtifactKind.ARCHIVE),
+        ("libs/plain.jar", ArtifactKind.ARCHIVE),
+    ]
+    assert counts == {"app.war": 1, "libs/plain.jar": 0}
+
+
+def test_scan_counted_resource_only_war_counted(make_jar, tmp_path: Path):
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    make_jar("only-libs.war", {"WEB-INF/lib/dep.jar": inner.read_bytes()}, base=tmp_path / "in")
+    arts, counts = scan_counted(tmp_path / "in")
+    assert [(a.rel, a.kind) for a in arts] == [("only-libs.war", ArtifactKind.RESOURCE_ONLY)]
+    assert counts == {"only-libs.war": 1}
+
+
+def test_scan_counted_skips_sources_and_corrupt(make_jar, tmp_path: Path):
+    make_jar(
+        "lib-sources.jar",
+        {"A.java": "class A {}", "vendor/tool.jar": b"z"},
+        base=tmp_path / "in",
+    )
+    (tmp_path / "in" / "bad.jar").write_bytes(b"not a zip")
+    arts, counts = scan_counted(tmp_path / "in")
+    kinds = {a.rel: a.kind for a in arts}
+    assert kinds["bad.jar"] == ArtifactKind.CORRUPT
+    assert kinds["lib-sources.jar"] == ArtifactKind.SOURCES_JAR
+    assert counts == {}
+
+
+def test_scan_counted_single_file(make_jar):
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    war = make_jar("one.war", {"WEB-INF/lib/dep.jar": inner.read_bytes()})
+    arts, counts = scan_counted(war)
+    assert [(a.rel, a.kind) for a in arts] == [("one.war", ArtifactKind.RESOURCE_ONLY)]
+    assert counts == {"one.war": 1}
+
+
+def test_scan_input_delegates_to_scan_counted(make_jar, tmp_path: Path):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    assert scan_input(tmp_path / "in") == scan_counted(tmp_path / "in")[0]
