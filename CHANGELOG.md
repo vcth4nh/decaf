@@ -2,6 +2,20 @@
 
 All notable changes to decaf are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- A broken search endpoint (e.g. an HTTP 404) is now reported honestly in
+  network-tainted miss reasons as `index HTTP <code>` instead of "malformed
+  index response", and the same condition during the SHA-1 lookup is no
+  longer silently misreported as "sha1 not in Central index".
+- A pathological `Retry-After` header whose value passes `isdigit()` but not
+  `float()` (e.g. "²") no longer crashes the artifact with a traceback.
+- The run summary's network line now says artifacts "fell back to
+  decompilation" instead of claiming they were all decompiled — the count
+  includes artifacts whose fallback decompilation then failed.
+
 ## [1.4.0] - 2026-07-21
 
 ### Added

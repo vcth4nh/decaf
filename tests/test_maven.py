@@ -33,7 +33,7 @@ def make_client(handler) -> httpx.Client:
 
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
-    monkeypatch.setattr(maven, "RETRY_BACKOFF", (0.0, 0.0))
+    monkeypatch.setattr(maven, "RETRY_BACKOFF", tuple(0.0 for _ in maven.RETRY_BACKOFF))
 
 
 def test_gav_from_single_pom_properties(make_jar):
@@ -998,3 +998,127 @@ def test_sha1_lookup_follows_redirects():
 
     with make_client(handler) as c:
         assert gav_from_central_sha1("feedface", c) == Gav("g", "a", "1")
+
+
+def test_index_lookup_bad_status_labeled_and_not_cached():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    net, log = NetState(), ResolutionLog()
+    with make_client(handler) as c:
+        assert maven._groups_from_index("lib", c, net, log) is None
+        assert maven._groups_from_index("lib", c, net, log) is None  # not memoized
+    assert calls["n"] == 2
+    assert log.events == ["search.maven.org: index HTTP 404 during index lookup"] * 2
+
+
+def test_sha1_lookup_bad_status_and_malformed_taint():
+    responses = iter([httpx.Response(404), httpx.Response(200, text="not json")])
+    net, log = NetState(), ResolutionLog()
+    with make_client(lambda r: next(responses)) as c:
+        assert gav_from_central_sha1("feedface", c, net, log) is None
+        assert gav_from_central_sha1("feedface", c, net, log) is None
+    assert log.events == [
+        "search.maven.org: index HTTP 404 during sha1 lookup",
+        "search.maven.org: malformed index response during sha1 lookup",
+    ]
+
+
+def test_resolve_sources_sha1_bad_status_tags_miss(make_jar, tmp_path: Path):
+    jar = make_jar("mystery.jar", {"A.class": b"x"})  # no filename/manifest coords
+
+    def handler(request):
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert res.miss == (
+        "network: search.maven.org: index HTTP 404 during sha1 lookup; "
+        "no pom.properties; sha1 lookup errored (network); "
+        "no artifact/version hints in filename or manifest"
+    )
+
+
+def test_retry_after_ignores_superscript_digits():
+    # Mock response with superscript (httpx won't accept non-ASCII headers)
+    class MockResp:
+        status_code = 503
+        headers = {"Retry-After": "²"}
+
+    assert maven._retry_after_seconds(MockResp()) is None  # isdigit-true, float() would raise
+    resp = httpx.Response(429, headers={"Retry-After": "3"})
+    assert maven._retry_after_seconds(resp) == 3.0
+
+
+def test_backoff_covers_every_retry():
+    assert len(maven.RETRY_BACKOFF) == maven.RETRY_ATTEMPTS - 1
+
+
+def test_index_lookup_malformed_still_labeled_malformed():
+    net, log = NetState(), ResolutionLog()
+    with make_client(lambda r: httpx.Response(200, text="not json")) as c:
+        assert maven._groups_from_index("lib", c, net, log) is None
+    assert log.events == ["search.maven.org: malformed index response during index lookup"]
+
+
+def test_exhausted_5xx_folds_to_one_warning():
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    log = ResolutionLog()
+    codes = iter([500, 500, 500, 502, 502, 502])
+
+    def handler(request):
+        return httpx.Response(next(codes))
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert len(warnings) == 1  # HTTP 500 and HTTP 502 fold to the "HTTP 5xx" class
+    assert "r.test: HTTP 5xx persisted after 3 attempts" in warnings[0]
+    assert log.failed_hosts == set()  # 5xx exhausts taint but never strike
+
+
+def test_download_429_exhausts_and_warns(tmp_path: Path):
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    log = ResolutionLog()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(429)
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._download(c, "https://r.test/m2/a-1-sources.jar", tmp_path / "a.jar", net, log)
+    assert calls["n"] == 3
+    assert exc.value.kind == "HTTP 429"
+    assert len(warnings) == 1 and "r.test: HTTP 429 persisted after 3 attempts" in warnings[0]
+    assert log.failed_hosts == set()
+    assert not list(tmp_path.glob("*.part"))  # every failed attempt's temp file removed
+
+
+def test_download_abort_mid_backoff_gives_up_quietly(tmp_path: Path):
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    net.abort.set()  # abort will be seen during the first backoff wait
+    log = ResolutionLog()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(503)
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._download(c, "https://r.test/m2/a-1-sources.jar", tmp_path / "a.jar", net, log)
+    assert calls["n"] == 1  # no second attempt after the aborted wait
+    assert exc.value.kind == "HTTP 503"
+    assert warnings == [] and log.failed_hosts == set()  # quiet give-up: no warn, no strike
+    assert not list(tmp_path.glob("*.part"))

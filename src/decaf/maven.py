@@ -132,7 +132,7 @@ _INDEX_CACHE: weakref.WeakKeyDictionary[httpx.Client, dict[str, list[str]]] = (
 )
 
 RETRY_ATTEMPTS = 3
-RETRY_BACKOFF = (1.0, 2.0)  # seconds before retry 1 and retry 2
+RETRY_BACKOFF = (1.0, 2.0)  # seconds before retry 1 and retry 2; len == RETRY_ATTEMPTS - 1
 RETRY_AFTER_CAP = 15.0
 BREAKER_STRIKES = 3
 
@@ -221,7 +221,7 @@ def _retry_after_seconds(resp: httpx.Response) -> float | None:
     if resp.status_code not in (429, 503):
         return None
     value = resp.headers.get("Retry-After", "")
-    if value.isdigit():
+    if value.isdecimal():
         return min(float(value), RETRY_AFTER_CAP)
     return None
 
@@ -306,7 +306,10 @@ def _groups_from_index(
             params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
             follow_redirects=True,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            host = httpx.URL(SEARCH_URL).host
+            log.events.append(f"{host}: index HTTP {resp.status_code} during index lookup")
+            return None
         docs = resp.json()["response"]["docs"]
         groups = [d["g"] for d in docs if isinstance(d.get("g"), str)]
     except NetworkFailure as nf:
@@ -441,7 +444,10 @@ def gav_from_central_sha1(
             params={"q": f'1:"{sha1}"', "rows": "1", "wt": "json"},
             follow_redirects=True,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            host = httpx.URL(SEARCH_URL).host
+            log.events.append(f"{host}: index HTTP {resp.status_code} during sha1 lookup")
+            return None
         docs = resp.json()["response"]["docs"]
         if not docs:
             return None
@@ -451,6 +457,8 @@ def gav_from_central_sha1(
         log.events.append(f"{nf.detail} during sha1 lookup")
         return None
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        host = httpx.URL(SEARCH_URL).host
+        log.events.append(f"{host}: malformed index response during sha1 lookup")
         return None
 
 
