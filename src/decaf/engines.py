@@ -122,13 +122,20 @@ def fetch_to(client: httpx.Client, url: str, dest: Path, label: str) -> None:
         raise EngineError(f"{label}: download failed: {exc}") from exc
 
 
-def ensure_engine(spec: EngineSpec, client: httpx.Client, cache_dir: Path | None = None) -> Path:
+def ensure_engine(
+    spec: EngineSpec,
+    client: httpx.Client,
+    cache_dir: Path | None = None,
+    on_download: Callable[[], None] | None = None,
+) -> Path:
     cache = cache_dir or cache_root() / "engines"
     cache.mkdir(parents=True, exist_ok=True)
     jar = cache / f"{spec.name}-{spec.version}.jar"
     if cache_status(spec, cache):
         return jar
 
+    if on_download is not None:
+        on_download()
     part = jar.with_suffix(".part")
     fetch_to(client, spec.url, part, spec.name)
 
