@@ -1,0 +1,94 @@
+name: Bug report
+description: Something is not working
+title: "[BUG] Concise description of the issue"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        #### Thank you for taking the time to report a bug!
+
+        #### Before opening an issue, please double check:
+
+        - [The README](https://github.com/vcth4nh/decaf#usage) — usage, requirements, and engine notes.
+        - [Existing issues](https://github.com/vcth4nh/decaf/search?q=&type=issues).
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what the bug is.
+      placeholder: |
+        Currently decaf does not work when...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. decaf app.jar -o out
+        2. See error / wrong output
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output from decaf related to your issue — `-v` streams each engine's stderr live.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: run-report
+    attributes:
+      label: Run report
+      description: "Relevant entries from `decaf-report.json` in the output directory, if any."
+      render: json
+  - type: input
+    id: artifact
+    attributes:
+      label: Input artifact (if shareable)
+      description: What was being decompiled
+      placeholder: e.g. org.springframework:spring-jdbc:6.2.8, a public link, or an attached sample
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: decaf version
+      description: "`decaf --version`, or the commit you built from"
+      placeholder: e.g. 1.3.1 or commit 8a2e4c7
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Python, Java, and OS
+      placeholder: e.g. Python 3.12 / OpenJDK 21 / Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: engines
+    attributes:
+      label: Engine(s) involved (if known)
+      placeholder: e.g. vineflower, cfr, procyon, fernflower, jd
+    validations:
+      required: false
+  - type: input
+    id: install
+    attributes:
+      label: Install method
+      description: How decaf is installed and run
+      placeholder: e.g. uv tool install / uvx --from git+… / uv run decaf from a clone
+    validations:
+      required: true
+  - type: checkboxes
+    id: required-checks
+    attributes:
+      label: Please confirm the following
+      options:
+        - label: I have already searched for relevant existing issues before opening this report.
+          required: true
+        - label: I have updated the title field above with a concise description.
+          required: true
