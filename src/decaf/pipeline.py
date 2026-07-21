@@ -372,7 +372,14 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     return nested
 
 
-def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
+def _fetch_stage(
+    artifact: Artifact, ctx: Ctx
+) -> tuple[ArtifactReport, list[Artifact], Path | None]:
+    """Stage 1 (IO): discovery, classification, maven resolution, sources extraction.
+
+    Returns the report, nested artifacts to feed back into stage 1, and the
+    decompile target for stage 2 — None when the artifact completed here.
+    """
     report = ArtifactReport(rel=artifact.rel, kind=artifact.kind.value, outcome="ok")
     nested: list[Artifact] = []
     try:
@@ -400,7 +407,7 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
         elif artifact.kind is ArtifactKind.CLASS_TREE:
             tmp = _tmp_dir(ctx)
             copy_class_tree(artifact.path, tmp)
-            _decompile(artifact, tmp, ctx, report)
+            return report, nested, tmp
         else:  # ARCHIVE
             nested = _discover_nested(artifact, ctx)
             resolution = None
@@ -435,10 +442,30 @@ def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list
                     )
                     ctx.on_stderr(f"maven {artifact.rel}: {msg}")
             if not done:
-                _decompile(artifact, artifact.path, ctx, report)
+                return report, nested, artifact.path
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
+    return report, nested, None
+
+
+def _decompile_stage(
+    artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport
+) -> ArtifactReport:
+    """Stage 2 (CPU): engine chain + per-class retries on a stage-1 hand-off."""
+    try:
+        _decompile(artifact, target, ctx, report)
+    except Exception:
+        report.outcome = "failed"
+        report.failure = traceback.format_exc()[-2000:]
+    return report
+
+
+def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
+    """Run both stages synchronously; the parallel runner splits them across pools."""
+    report, nested, target = _fetch_stage(artifact, ctx)
+    if target is not None:
+        _decompile_stage(artifact, target, ctx, report)
     return report, nested
 
 
