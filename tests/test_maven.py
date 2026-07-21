@@ -4,10 +4,14 @@ from pathlib import Path
 import httpx
 import pytest
 
+import decaf.maven as maven
 from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
     MAX_PROBES,
+    NetState,
+    NetworkFailure,
+    ResolutionLog,
     candidate_coords,
     candidate_groups,
     extract_java,
@@ -25,6 +29,11 @@ POM2 = "groupId=org.other\nartifactId=dep\nversion=9.9\n"
 
 def make_client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.fixture(autouse=True)
+def _fast_retries(monkeypatch):
+    monkeypatch.setattr(maven, "RETRY_BACKOFF", (0.0, 0.0))
 
 
 def test_gav_from_single_pom_properties(make_jar):
@@ -492,7 +501,7 @@ def test_verify_gav_empty_body_and_network_error():
             Gav("g", "a", "1"), SHA, ["https://one.test/m2", "https://two.test/m2"], c
         )
     assert repo is None
-    assert calls == ["one.test", "two.test"]
+    assert calls == ["one.test", "two.test", "two.test", "two.test"]  # retried, then miss
 
 
 def test_verify_gav_respects_budget():
@@ -641,3 +650,351 @@ def test_resolve_sources_survives_poisoned_package_names(make_jar, tmp_path: Pat
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
     assert res.sources_jar is None
     assert res.miss is not None
+
+
+EXHAUST_WARN = (
+    "maven: r.test: connection error persisted after 3 attempts; "
+    "artifacts may fall back to decompilation without sources"
+)
+
+
+def test_get_retry_retries_transport_errors_then_succeeds():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.ConnectError("boom")
+        return httpx.Response(200, text="ok")
+
+    net, log = NetState(), ResolutionLog()
+    with make_client(handler) as c:
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert resp.status_code == 200 and calls["n"] == 3
+    assert log.ok_hosts == {"r.test"} and log.failed_hosts == set()
+
+
+def test_get_retry_exhausts_strikes_and_warns_once():
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    log = ResolutionLog()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("boom")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert calls["n"] == 6  # RETRY_ATTEMPTS per request
+    assert exc.value.host == "r.test"
+    assert exc.value.kind == "connection error"
+    assert exc.value.detail == "r.test: connection error"
+    assert log.failed_hosts == {"r.test"}
+    assert warnings == [EXHAUST_WARN]  # deduped per (host, kind)
+
+
+def test_get_retry_different_kind_warns_again():
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    log = ResolutionLog()
+    mode = {"exc": httpx.ConnectError}
+
+    def handler(request):
+        raise mode["exc"]("boom")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        mode["exc"] = httpx.ReadTimeout
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert exc.value.kind == "timeout"
+    assert len(warnings) == 2
+    assert "timeout persisted after 3 attempts" in warnings[1]
+
+
+def test_get_retry_429_uses_retry_after_and_never_strikes(monkeypatch):
+    waits: list = []
+    monkeypatch.setattr(
+        maven, "_wait_before_retry", lambda net, attempt, ra: waits.append(ra) or False
+    )
+    net, log = NetState(), ResolutionLog()
+
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "7"})
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert waits == [7.0, 7.0]
+    assert exc.value.kind == "HTTP 429"
+    assert log.failed_hosts == set()  # 429 taints but never strikes
+
+
+def test_get_retry_retry_after_capped_and_malformed(monkeypatch):
+    waits: list = []
+    monkeypatch.setattr(
+        maven, "_wait_before_retry", lambda net, attempt, ra: waits.append(ra) or False
+    )
+    net, log = NetState(), ResolutionLog()
+    responses = iter(
+        [
+            httpx.Response(429, headers={"Retry-After": "100"}),
+            httpx.Response(503, headers={"Retry-After": "soon"}),
+            httpx.Response(200),
+        ]
+    )
+    with make_client(lambda r: next(responses)) as c:
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert resp.status_code == 200
+    assert waits == [15.0, None]  # capped; malformed falls back to backoff
+
+
+def test_wait_before_retry_jitters_backoff_and_reports_abort(monkeypatch):
+    monkeypatch.setattr(maven, "RETRY_BACKOFF", (8.0, 16.0))
+    net = NetState()
+    seen: list[float] = []
+    monkeypatch.setattr(net.abort, "wait", lambda d: seen.append(d) or True)
+    assert maven._wait_before_retry(net, 1, None) is True
+    assert 6.0 <= seen[0] <= 10.0  # 8s base, 0.75–1.25 jitter
+    assert maven._wait_before_retry(net, 2, 7.0) is True
+    assert seen[1] == 7.0  # retry-after passes through unjittered
+
+
+def test_get_retry_pre_set_abort_gives_up_after_first_failure():
+    net = NetState()
+    net.abort.set()
+    log = ResolutionLog()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("boom")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert calls["n"] == 1
+    assert log.failed_hosts == set()  # aborted give-up: no strike, no warn
+
+
+def test_get_retry_non_transient_status_passes_through():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    net, log = NetState(), ResolutionLog()
+    with make_client(handler) as c:
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert resp.status_code == 404 and calls["n"] == 1
+    assert log.ok_hosts == {"r.test"}
+
+
+def test_netstate_breaker_trips_after_three_consecutive_artifacts():
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    net.record_artifact({"r.test"}, set())
+    net.record_artifact({"r.test"}, {"r.test"})  # success beats failure: reset
+    net.record_artifact({"r.test"}, set())
+    net.record_artifact({"r.test"}, set())
+    assert not net.is_dead("r.test")
+    net.record_artifact({"r.test"}, set())
+    assert net.is_dead("r.test")
+    assert warnings == [
+        "maven: giving up on r.test for the rest of the run "
+        "(3 artifacts hit network failures in a row)"
+    ]
+    net.record_artifact({"r.test"}, set())  # already dead: no second warning
+    assert len(warnings) == 1
+
+
+def test_get_retry_skips_dead_host_without_request():
+    net = NetState()
+    for _ in range(3):
+        net.record_artifact({"r.test"}, set())
+    log = ResolutionLog()
+
+    def handler(request):
+        raise AssertionError("dead host must not be contacted")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert exc.value.kind == "skipped"
+    assert exc.value.detail == "r.test skipped (unreachable this run)"
+
+
+def test_index_network_error_not_cached_but_empty_success_is(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    calls = {"n": 0}
+    mode = {"fail": True}
+
+    def handler(request):
+        assert request.url.host == "search.maven.org"
+        calls["n"] += 1
+        if mode["fail"]:
+            raise httpx.ConnectError("down")
+        return httpx.Response(200, json={"response": {"docs": []}})
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == ["com.acme.lib", "com.acme"]
+        candidate_groups("lib", jar, c)  # errored lookup stayed uncached: re-queries
+        assert calls["n"] == 6  # 2 lookups x RETRY_ATTEMPTS
+        mode["fail"] = False
+        candidate_groups("lib", jar, c)  # success (empty) is cached...
+        candidate_groups("lib", jar, c)  # ...so this one is served from the memo
+        assert calls["n"] == 7
+
+
+def test_resolve_sources_sha1_network_error_tags_miss(make_jar, tmp_path: Path):
+    jar = make_jar("mystery.jar", {"A.class": b"x"})  # no filename/manifest coords
+
+    def handler(request):
+        raise httpx.TimeoutException("slow")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None
+    assert res.miss == (
+        "network: search.maven.org: timeout during sha1 lookup; "
+        "no pom.properties; sha1 lookup errored (network); "
+        "no artifact/version hints in filename or manifest"
+    )
+
+
+def test_resolve_sources_hit_despite_index_down(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    payload = make_jar("p.jar", {"com/acme/lib/A.java": "class A {}"}).read_bytes()
+    sha = sha1_of(jar)
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            raise httpx.ConnectError("index down")
+        if request.url.path.endswith(".jar.sha1"):
+            return httpx.Response(200, text=sha)
+        if request.url.path.endswith("-sources.jar"):
+            return httpx.Response(200, content=payload)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.miss is None
+    assert res.resolved_by == "verified-guess"
+    assert str(res.gav) == "com.acme.lib:lib:1.0"
+
+
+def test_resolve_sources_probe_network_failures_noted_in_miss(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        raise httpx.ConnectError("repo down")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", net=net)
+    assert res.sources_jar is None
+    assert res.miss == (
+        "network: r.test: connection error during candidate probe; "
+        "no pom.properties; sha1 not in Central index; "
+        "2 candidates, none verified (2 probe(s) errored)"
+    )
+    assert len([w for w in warnings if "persisted after 3 attempts" in w]) == 1
+
+
+def test_resolve_sources_download_network_failure_reachable_wording(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+
+    def handler(request):
+        raise httpx.ReadTimeout("stalled")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.miss == (
+        "network: r.test: timeout during sources download; "
+        "found com.example:lib:1.2 in pom.properties "
+        "but no -sources.jar in any reachable repo"
+    )
+
+
+def test_fetch_sources_retries_mid_stream_failure(make_jar, tmp_path: Path):
+    payload = make_jar("p.jar", {"A.java": "class A {}"}).read_bytes()
+    state = {"n": 0}
+
+    class FlakyStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield payload[:10]
+            raise httpx.ReadError("dropped")
+
+    def handler(request):
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(200, stream=FlakyStream())
+        return httpx.Response(200, content=payload)
+
+    cache = tmp_path / "cache"
+    with make_client(handler) as c:
+        got = fetch_sources(Gav("g", "a", "1"), ["https://r.test/m2"], c, cache)
+    assert got is not None and got[0].read_bytes() == payload
+    assert state["n"] == 2
+    assert not list(cache.glob("*.part"))  # failed attempt's temp file cleaned up
+
+
+def test_breaker_gives_up_on_host_after_three_artifacts(make_jar, tmp_path: Path):
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    jars = [
+        make_jar(f"mystery{i}.jar", {"A.class": bytes(str(i), "ascii")}) for i in range(4)
+    ]
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("down")
+
+    with make_client(handler) as c:
+        for jar in jars[:3]:
+            resolve_sources(jar, [], c, tmp_path / "cache", net=net)
+        assert calls["n"] == 9  # 3 artifacts x 1 sha1 lookup x 3 attempts
+        res = resolve_sources(jars[3], [], c, tmp_path / "cache", net=net)
+    assert calls["n"] == 9  # dead host: the 4th artifact makes no HTTP calls
+    assert res.miss.startswith(
+        "network: search.maven.org skipped (unreachable this run) during sha1 lookup; "
+    )
+    assert [w for w in warnings if w.startswith("maven: giving up")] == [
+        "maven: giving up on search.maven.org for the rest of the run "
+        "(3 artifacts hit network failures in a row)"
+    ]
+
+
+def test_index_lookup_follows_redirects(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+
+    def handler(request):
+        assert request.url.host == "search.maven.org"
+        if request.url.path == "/solrsearch/select":
+            return httpx.Response(301, headers={"Location": "https://search.maven.org/moved"})
+        return httpx.Response(
+            200, json={"response": {"docs": [{"g": "com.acme", "a": "lib", "v": "1"}]}}
+        )
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == ["com.acme", "com.acme.lib"]
+
+
+def test_sha1_lookup_follows_redirects():
+    def handler(request):
+        if request.url.path == "/solrsearch/select":
+            return httpx.Response(301, headers={"Location": "https://search.maven.org/moved"})
+        return httpx.Response(200, json={"response": {"docs": [{"g": "g", "a": "a", "v": "1"}]}})
+
+    with make_client(handler) as c:
+        assert gav_from_central_sha1("feedface", c) == Gav("g", "a", "1")

@@ -209,6 +209,11 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
             for a in r.attempts:
                 if a.stderr_tail:
                     console.print(f"    [dim]{a.engine} ({a.level}): {a.stderr_tail[-300:]}[/]")
+    if t["network_misses"]:
+        console.print(
+            f"[yellow]{t['network_misses']} artifact(s) decompiled without sources "
+            "due to network failures[/]"
+        )
     if report.interrupted:
         console.print("[yellow]interrupted — partial results written[/]")
 
@@ -284,11 +289,15 @@ def main(
     def on_stderr(text: str) -> None:
         progress.console.print(f"[dim]{escape(text)}[/]")
 
+    def on_warn(text: str) -> None:
+        progress.console.print(f"[yellow]{escape(text)}[/]")
+
     try:
         with progress:
             task = progress.add_task("decompiling", total=None)
             report = run(settings, on_done=on_done, on_found=on_found,
-                         on_stderr=on_stderr if verbose else None)
+                         on_stderr=on_stderr if verbose else None,
+                         on_warn=on_warn if not quiet else None)
     except (DecafError, ScanError) as exc:
         raise _fail(str(exc))
 

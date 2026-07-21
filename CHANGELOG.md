@@ -4,6 +4,16 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Transient network errors (timeouts, connection errors, HTTP 429/5xx) during
+  Maven sources resolution are retried with backoff (3 attempts, `Retry-After`
+  honored on 429/503). Falling back to decompilation over a network failure now
+  warns loudly without `-v` — one warning per endpoint condition, a run-summary
+  count, and an additive `totals["network_misses"]` report field — and a
+  per-host circuit breaker gives up loudly after 3 consecutive affected
+  artifacts so fully-offline runs stay fast.
+
 ### Changed
 
 - The run pipeline is now two stages with independently sized pools: an
@@ -16,6 +26,13 @@ All notable changes to decaf are documented here.
   Outputs and per-artifact reports are unchanged; the progress bar's total now
   grows as soon as nested archives are discovered, slightly earlier than
   before.
+
+### Fixed
+
+- A network error during an index lookup is no longer negative-cached as "no
+  candidates" for the rest of the run, and network-failed resolution steps no
+  longer masquerade as verified absences: affected artifacts' `sources_miss`
+  now starts with `network:` and names the failing host and step.
 
 ## [1.3.1] - 2026-07-21
 

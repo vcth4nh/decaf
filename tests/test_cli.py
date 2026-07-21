@@ -27,7 +27,7 @@ def ok_report(**overrides) -> RunReport:
         totals={
             "artifacts": 2, "ok": 2, "failed": 0, "skipped": 0,
             "maven_sources": 1, "extracted": 0, "decompiled": 1,
-            "java_files": 5, "collisions": 0,
+            "java_files": 5, "collisions": 0, "network_misses": 0,
         },
         duration_seconds=1.0,
     )
@@ -73,7 +73,7 @@ def test_nonempty_output_needs_force(tmp_path: Path, make_jar, monkeypatch):
     assert "not empty" in result.output
 
     monkeypatch.setattr(cli, "run",
-                        lambda settings, on_done=None, on_found=None, on_stderr=None: ok_report())
+                        lambda settings, **kw: ok_report())
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out), "--force"])
     assert result.exit_code == 0
 
@@ -111,7 +111,7 @@ def test_decaf_error_exits_2(tmp_path: Path, make_jar, monkeypatch):
 
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
 
-    def boom(settings, on_done=None, on_found=None, on_stderr=None):
+    def boom(settings, **kw):
         raise DecafError("java not found on PATH (Java 11+ required)")
 
     monkeypatch.setattr(cli, "run", boom)
@@ -128,7 +128,7 @@ def test_exit_1_when_failures(tmp_path: Path, make_jar, monkeypatch):
     )
     failing.totals = {**failing.totals, "artifacts": 3, "failed": 1}
     monkeypatch.setattr(cli, "run",
-                        lambda settings, on_done=None, on_found=None, on_stderr=None: failing)
+                        lambda settings, **kw: failing)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     assert result.exit_code == 1
     assert "x.jar" in result.output
@@ -138,9 +138,9 @@ def test_settings_wiring(tmp_path: Path, make_jar, monkeypatch):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     captured = {}
 
-    def capture(settings, on_done=None, on_found=None, on_stderr=None):
+    def capture(settings, **kw):
         captured["settings"] = settings
-        captured["on_found"] = on_found
+        captured["on_found"] = kw.get("on_found")
         return ok_report()
 
     monkeypatch.setattr(cli, "run", capture)
@@ -165,7 +165,8 @@ def test_verbose_streams_engine_stderr(tmp_path: Path, make_jar, monkeypatch):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     captured = {}
 
-    def capture(settings, on_done=None, on_found=None, on_stderr=None):
+    def capture(settings, **kw):
+        on_stderr = kw.get("on_stderr")
         captured["on_stderr"] = on_stderr
         if on_stderr is not None:
             on_stderr("vineflower a.jar: [warn] odd <input>")
@@ -216,7 +217,7 @@ def test_engine_overrides_reach_settings(tmp_path: Path, make_jar, monkeypatch):
     )
     captured = {}
 
-    def capture(settings, on_done=None, on_found=None, on_stderr=None):
+    def capture(settings, **kw):
         captured["s"] = settings
         return ok_report()
 
@@ -232,7 +233,7 @@ def test_engine_overrides_reach_settings(tmp_path: Path, make_jar, monkeypatch):
 def test_routing_positional_and_option_first(tmp_path: Path, make_jar, monkeypatch):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     monkeypatch.setattr(cli, "run",
-                        lambda settings, on_done=None, on_found=None, on_stderr=None: ok_report())
+                        lambda settings, **kw: ok_report())
     assert runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "o1")]).exit_code == 0
     assert runner.invoke(app, ["-o", str(tmp_path / "o2"), str(tmp_path / "in")]).exit_code == 0
     assert runner.invoke(app, ["run", str(tmp_path / "in"), "-o", str(tmp_path / "o3")]).exit_code == 0
@@ -243,3 +244,35 @@ def test_bare_decaf_shows_group_help():
     plain = ANSI.sub("", result.output)
     assert "run" in plain
     assert result.exit_code in (0, 2)  # click's no_args_is_help exit code varies by version
+
+
+def test_summary_warns_on_network_misses(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    totals = dict(ok_report().totals, network_misses=2)
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report(totals=totals))
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "2 artifact(s) decompiled without sources due to network failures" in plain
+
+
+def test_summary_silent_when_no_network_misses(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert "network failures" not in ANSI.sub("", result.output)
+
+
+def test_on_warn_wired_unless_quiet(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    captured = {}
+
+    def capture(settings, **kw):
+        captured.update(kw)
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert callable(captured["on_warn"])
+    runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2"), "--quiet"])
+    assert captured["on_warn"] is None

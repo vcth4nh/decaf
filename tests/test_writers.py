@@ -102,6 +102,7 @@ def test_report_json_and_totals(tmp_path: Path):
         "decompiled": 1,
         "java_files": 6,
         "collisions": 0,
+        "network_misses": 0,
     }
     report = RunReport(settings={"engine": "vineflower"}, artifacts=reports, totals=totals, duration_seconds=1.5)
     parsed = json.loads(report.to_json())
