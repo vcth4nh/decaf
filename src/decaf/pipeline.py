@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -173,6 +174,9 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         ),
         "java_files": sum(r.java_files for r in reports),
         "collisions": sum(len(r.collisions) for r in reports),
+        "network_misses": sum(
+            1 for r in reports if (r.sources_miss or "").startswith("network:")
+        ),
     }
 
 
@@ -505,6 +509,7 @@ def run(
     on_done: Callable[[ArtifactReport], None] | None = None,
     on_found: Callable[[int], None] | None = None,
     on_stderr: Callable[[str], None] | None = None,
+    on_warn: Callable[[str], None] | None = None,
     runner: Callable | None = None,
     resolver: Callable | None = None,
 ) -> RunReport:
@@ -521,7 +526,8 @@ def run(
     if on_found is not None:
         on_found(len(artifacts))
     runner = runner or engines.run_engine
-    resolver = resolver or maven.resolve_sources
+    net = maven.NetState(warn=on_warn)
+    resolver = resolver or partial(maven.resolve_sources, net=net)
 
     interrupted = False
     reports: list[ArtifactReport] = []
@@ -603,6 +609,7 @@ def run(
                                 on_done(report)
                 except KeyboardInterrupt:
                     interrupted = True
+                    net.abort.set()  # wake fetch threads sleeping in retry backoff
                     engines.PROCESSES.kill_all()
                     for fut in [*fetch_futs, *dec_futs]:
                         fut.cancel()

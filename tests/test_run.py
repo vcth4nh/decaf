@@ -562,3 +562,90 @@ def test_run_maven_hit_war_still_surfaces_nested_jar(fake_env, make_jar, tmp_pat
     assert calls == [("vineflower", "dep.jar")]  # engines ran for the nested jar only
     assert "war source" in (tmp_path / "out/src/com/w/W.java").read_text()
     assert (tmp_path / "out/src/com/d/D.java").is_file()
+
+
+def test_run_totals_count_network_misses(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    for i in range(2):
+        make_jar(f"a{i}.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    make_jar("b.jar", {"com/y/B.class": b"y"}, base=input_dir)
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        if Path(jar_path).name == "b.jar":
+            return Resolution(miss="no pom.properties; 0 candidates")
+        return Resolution(miss="network: r.test: timeout during sources download; no pom.properties")
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out"),
+        runner=perfect_engine,
+        resolver=resolver,
+    )
+    assert report.totals["network_misses"] == 2
+
+    report2 = run(
+        Settings(input=input_dir, output=tmp_path / "out2"),
+        runner=perfect_engine,
+        resolver=lambda *a, **kw: Resolution(miss="no pom.properties; 0 candidates"),
+    )
+    assert report2.totals["network_misses"] == 0
+
+
+def test_run_binds_netstate_with_on_warn_into_default_resolver(
+    fake_env, make_jar, tmp_path: Path, monkeypatch
+):
+    from decaf import pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    seen = {}
+
+    def spy(jar_path, repos, client, cache_dir, *, net=None, **kw):
+        seen["net"] = net
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    monkeypatch.setattr(pipeline.maven, "resolve_sources", spy)
+
+    def warn(msg):
+        pass
+
+    run(Settings(input=input_dir, output=tmp_path / "out"), runner=perfect_engine, on_warn=warn)
+    assert seen["net"] is not None
+    assert seen["net"].warn is warn
+    assert not seen["net"].abort.is_set()
+
+
+def test_interrupt_sets_resolver_abort_event(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from decaf import pipeline
+
+    input_dir = tmp_path / "in"
+    for i in range(3):
+        make_jar(f"a{i}.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    monkeypatch.setattr(
+        pipeline.maven,
+        "resolve_sources",
+        lambda *a, **kw: Resolution(miss="no pom.properties; 0 candidates"),
+    )
+    created: list = []
+    real_netstate = pipeline.maven.NetState
+    monkeypatch.setattr(
+        pipeline.maven,
+        "NetState",
+        lambda *a, **kw: created.append(real_netstate(*a, **kw)) or created[-1],
+    )
+    real_submit = ThreadPoolExecutor.submit
+    calls = {"n": 0}
+
+    def flaky_submit(self, fn, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt
+        return real_submit(self, fn, *args, **kwargs)
+
+    monkeypatch.setattr(ThreadPoolExecutor, "submit", flaky_submit)
+    report = run(Settings(input=input_dir, output=tmp_path / "out"), runner=perfect_engine)
+    assert report.interrupted is True
+    assert len(created) == 1
+    assert created[0].abort.is_set()
