@@ -326,10 +326,10 @@ def make_display():
     import io
 
     from rich.console import Console
-    from rich.progress import Progress, SpinnerColumn, TextColumn
+    from rich.progress import SpinnerColumn, TextColumn
 
     console = Console(file=io.StringIO(), force_terminal=True, width=120)
-    progress = Progress(
+    progress = cli._GroupedProgress(
         SpinnerColumn(), TextColumn("{task.description}"),
         console=console, transient=True,
     )
@@ -337,7 +337,7 @@ def make_display():
 
 
 def descriptions(progress):
-    return [t.description for t in progress.tasks]
+    return [t.description for t in progress._ordered_tasks()]
 
 
 def test_display_row_lifecycle():
@@ -345,7 +345,7 @@ def test_display_row_lifecycle():
     disp.on_found(3)
     assert descriptions(progress) == ["scanning…"]  # header only, until the scan event
     disp.on_event("scan", "", "2 top-level + 1 nested")
-    assert descriptions(progress)[0] == "decompiling 0/3 · 0 active · 3 queued"
+    assert descriptions(progress)[0] == "0/3 done · 0 fetching · 0 decompiling · 3 queued"
     # Console(force_terminal=True) highlights bare numbers/parens even with no markup
     # in the string — strip ANSI before matching (same idiom as the module-level ANSI
     # regex used for CliRunner output elsewhere in this file).
@@ -353,6 +353,7 @@ def test_display_row_lifecycle():
     assert "found 3 artifacts (2 top-level + 1 nested)" in plain
     disp.on_event("fetch", "a.jar", "")
     assert any("fetching" in d and "a.jar" in d for d in descriptions(progress))
+    assert descriptions(progress)[0] == "0/3 done · 1 fetching · 0 decompiling · 2 queued"
     disp.on_event("queued", "a.jar", "")
     assert not any("a.jar" in d for d in descriptions(progress))  # between stages: queued only
     disp.on_event("decompile", "a.jar", "vineflower")
@@ -360,24 +361,36 @@ def test_display_row_lifecycle():
     assert any(d.strip() == "decompiling a.jar (vineflower)" for d in descriptions(progress))
     disp.on_done(ArtifactReport(rel="a.jar", kind="archive", outcome="ok"))
     assert not any("a.jar" in d for d in descriptions(progress))
-    assert descriptions(progress)[0] == "decompiling 1/3 · 0 active · 2 queued"
+    assert descriptions(progress)[0] == "1/3 done · 0 fetching · 0 decompiling · 2 queued"
 
 
-def test_display_overflow_row():
+def test_display_no_cap_no_overflow():
     progress, disp = make_display()
     disp.on_found(20)
     disp.on_event("scan", "", "20 top-level + 0 nested")
     for i in range(10):
         disp.on_event("fetch", f"j{i:02d}.jar", "")
     descs = descriptions(progress)
-    assert sum("fetching" in d for d in descs) == 8
-    assert "… and 2 more active" in descs
-    assert "10 active" in descs[0]
-    disp.on_event("queued", "j00.jar", "")  # frees a row; one waiting jar is promoted
+    assert sum("fetching" in d for d in descs) == 11  # header + every executing jar has a row
+    assert not any("more active" in d for d in descs)  # overflow line is gone
+    assert descs[0] == "0/20 done · 10 fetching · 0 decompiling · 10 queued"
+
+
+def test_display_groups_fetching_before_decompiling():
+    progress, disp = make_display()
+    disp.on_found(4)
+    disp.on_event("scan", "", "4 top-level + 0 nested")
+    disp.on_event("fetch", "a.jar", "")
+    disp.on_event("fetch", "b.jar", "")
+    disp.on_event("queued", "a.jar", "")
+    disp.on_event("decompile", "a.jar", "vineflower")
+    disp.on_event("fetch", "c.jar", "")  # starts after a.jar moved to decompiling
     descs = descriptions(progress)
-    assert sum("fetching" in d for d in descs) == 8
-    assert "… and 1 more active" in descs
-    assert "9 active" in descs[0]
+    assert descs[0] == "0/4 done · 2 fetching · 1 decompiling · 1 queued"
+    assert [d.split()[0] for d in descs[1:]] == ["fetching", "fetching", "decompiling"]
+    assert "b.jar" in descs[1] and "c.jar" in descs[2] and "a.jar" in descs[3]
+    disp.on_event("engines", "", "verifying")
+    assert descriptions(progress)[1] == "engines: verifying…"  # engines sorts before jar rows
 
 
 def test_display_engine_rows():

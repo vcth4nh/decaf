@@ -176,7 +176,7 @@ def _fail(message: str) -> typer.Exit:
 
 
 _STAGE_VERBS = {"fetch": "fetching", "decompile": "decompiling"}
-_MAX_ROWS = 8
+_STAGE_RANK = {"header": 0, "engines": 1, "fetch": 2, "decompile": 3}
 
 
 def _shorten(rel: str, limit: int = 60) -> str:
@@ -192,6 +192,21 @@ def _shorten(rel: str, limit: int = 60) -> str:
     return f"{prefix}/…/{leaf}" if prefix else f"…/{leaf}"
 
 
+class _GroupedProgress(Progress):
+    """Progress that renders tasks grouped by their `stage` field.
+
+    Stable sort: header, then the engines row, then fetching rows, then
+    decompiling rows — insertion order preserved within each group, and
+    TaskIDs never churn (no remove/re-add on stage transitions).
+    """
+
+    def _ordered_tasks(self) -> list:
+        return sorted(self.tasks, key=lambda t: _STAGE_RANK.get(t.fields.get("stage"), 4))
+
+    def get_renderables(self):
+        yield self.make_tasks_table(self._ordered_tasks())
+
+
 class _RunDisplay:
     """Routes pipeline events onto transient rich Progress rows.
 
@@ -203,13 +218,12 @@ class _RunDisplay:
     def __init__(self, progress: Progress) -> None:
         self._p = progress
         self._lock = threading.Lock()
-        self._header = progress.add_task("scanning…", total=None)
+        self._header = progress.add_task("scanning…", total=None, stage="header")
         self._scanned = False
         self._total = 0
         self._done = 0
         self._rows: dict[str, TaskID] = {}
-        self._waiting: dict[str, str] = {}  # active beyond the row cap: rel -> row text
-        self._overflow: TaskID | None = None
+        self._stage: dict[str, str] = {}  # rel -> "fetch" | "decompile", rows only
         self._engines: TaskID | None = None
 
     def on_found(self, count: int) -> None:
@@ -236,7 +250,7 @@ class _RunDisplay:
                 text = f"{_STAGE_VERBS[kind]:<11} {_shorten(subject)}"
                 if kind == "decompile" and detail:
                     text += f" ({detail})"
-                self._upsert(subject, text)
+                self._upsert(subject, text, kind)
             self._refresh_header()
 
     # -- internals; every method below expects the lock to be held --
@@ -257,49 +271,35 @@ class _RunDisplay:
         else:  # "verifying"
             text = "engines: verifying…"
         if self._engines is None:
-            self._engines = self._p.add_task(text, total=None)
+            self._engines = self._p.add_task(text, total=None, stage="engines")
         else:
             self._p.update(self._engines, description=text)
 
-    def _upsert(self, rel: str, text: str) -> None:
+    def _upsert(self, rel: str, text: str, stage: str) -> None:
+        self._stage[rel] = stage
         if rel in self._rows:
-            self._p.update(self._rows[rel], description=text)
-        elif rel in self._waiting or len(self._rows) >= _MAX_ROWS:
-            self._waiting[rel] = text
-            self._refresh_overflow()
+            self._p.update(self._rows[rel], description=text, stage=stage)
         else:
-            self._rows[rel] = self._p.add_task(text, total=None)
+            self._rows[rel] = self._p.add_task(text, total=None, stage=stage)
 
     def _drop(self, rel: str) -> None:
+        self._stage.pop(rel, None)
         row = self._rows.pop(rel, None)
         if row is not None:
             self._p.remove_task(row)
-            if self._waiting:
-                promoted = next(iter(self._waiting))
-                self._rows[promoted] = self._p.add_task(self._waiting.pop(promoted), total=None)
-        else:
-            self._waiting.pop(rel, None)
-        self._refresh_overflow()
-
-    def _refresh_overflow(self) -> None:
-        if self._waiting:
-            text = f"… and {len(self._waiting)} more active"
-            if self._overflow is None:
-                self._overflow = self._p.add_task(text, total=None)
-            else:
-                self._p.update(self._overflow, description=text)
-        elif self._overflow is not None:
-            self._p.remove_task(self._overflow)
-            self._overflow = None
 
     def _refresh_header(self) -> None:
         if not self._scanned:
             return
-        active = len(self._rows) + len(self._waiting)
-        queued = max(0, self._total - self._done - active)
+        fetching = sum(1 for s in self._stage.values() if s == "fetch")
+        decompiling = len(self._stage) - fetching
+        queued = max(0, self._total - self._done - len(self._stage))
         self._p.update(
             self._header,
-            description=f"decompiling {self._done}/{self._total} · {active} active · {queued} queued",
+            description=(
+                f"{self._done}/{self._total} done · {fetching} fetching"
+                f" · {decompiling} decompiling · {queued} queued"
+            ),
         )
 
 
@@ -400,7 +400,7 @@ def main(
         engine_overrides=cfg.engine_overrides,
     )
 
-    progress = Progress(
+    progress = _GroupedProgress(
         SpinnerColumn(),
         TextColumn("{task.description}", table_column=Column(no_wrap=True)),
         console=console,

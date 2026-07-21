@@ -7,9 +7,9 @@ All notable changes to decaf are documented here.
 ### Added
 
 - Live per-jar progress: each executing jar shows a transient row with its
-  stage (`fetching` / `decompiling`) and engine under a
-  `decompiling M/N · A active · Q queued` header; scrollback still gets
-  exactly one line per jar (#50).
+  stage (`fetching` / `decompiling`) and engine, grouped by stage under a
+  `M/N done · F fetching · D decompiling · Q queued` header; scrollback
+  still gets exactly one line per jar (#50).
 - Stable totals: nested jars are pre-counted during the scan
   (`found N artifacts (T top-level + K nested)`), so the total no longer
   grows mid-run and self-corrects if a pre-counted entry cannot be
