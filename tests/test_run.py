@@ -691,3 +691,74 @@ def test_interrupt_sets_resolver_abort_event(fake_env, make_jar, tmp_path: Path,
     assert report.interrupted is True
     assert len(created) == 1
     assert created[0].abort.is_set()
+
+
+def test_run_emits_artifact_stage_events(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    assert [e for e in events if e[1] == "a.jar"] == [
+        ("fetch", "a.jar", ""),
+        ("queued", "a.jar", ""),
+        ("decompile", "a.jar", "vineflower"),
+    ]
+
+
+def test_run_maven_hit_emits_no_decompile_events_and_carries_cached(
+    fake_env, make_jar, tmp_path: Path
+):
+    input_dir = tmp_path / "in"
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+
+    def hit_resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=sources,
+            repo="https://r.test/m2",
+            resolved_by="pom-properties",
+            cached=True,
+        )
+
+    events: list[tuple[str, str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", mirror=False),
+        runner=perfect_engine,
+        resolver=hit_resolver,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    assert [e[0] for e in events if e[1] == "lib-1.2.jar"] == ["fetch"]
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["lib-1.2.jar"].sources_cached is True
+
+
+def test_run_fallback_refires_decompile_event(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    def flaky_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name == "vineflower":
+            return EngineResult(spec.name, 1, False, 0, "boom")
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=flaky_engine,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    assert [e[2] for e in events if e[0] == "decompile"] == ["vineflower", "cfr"]
+
+
+def test_report_json_carries_sources_cached(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    out = tmp_path / "out"
+    run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    on_disk = json.loads((out / "decaf-report.json").read_text())
+    assert on_disk["artifacts"][0]["sources_cached"] is False

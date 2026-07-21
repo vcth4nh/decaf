@@ -70,6 +70,7 @@ class ArtifactReport:
     repo: str | None = None
     resolved_by: str | None = None  # "pom-properties" | "sha1-index" | "verified-guess"
     sources_miss: str | None = None  # why the maven path yielded nothing
+    sources_cached: bool = False  # sources jar came from the on-disk cache
     classes: int = 0
     java_files: int = 0
     resources_skipped: int = 0
@@ -304,6 +305,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         if engines.PROCESSES.closed:
             break
         dest = _tmp_dir(ctx)
+        if ctx.on_event is not None:
+            ctx.on_event("decompile", artifact.rel, name)
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
@@ -337,6 +340,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         if retry_tree is None:
             break
         dest = _tmp_dir(ctx)
+        if ctx.on_event is not None:
+            ctx.on_event("decompile", artifact.rel, name)
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
@@ -387,6 +392,8 @@ def _fetch_stage(
     decompile target for stage 2 — None when the artifact completed here.
     """
     report = ArtifactReport(rel=artifact.rel, kind=artifact.kind.value, outcome="ok")
+    if ctx.on_event is not None:
+        ctx.on_event("fetch", artifact.rel, "")
     nested: list[Artifact] = []
     try:
         if artifact.kind is ArtifactKind.CORRUPT:
@@ -429,6 +436,7 @@ def _fetch_stage(
                     report.method = "maven"
                     report.repo = resolution.repo
                     report.resolved_by = resolution.resolved_by
+                    report.sources_cached = resolution.cached
                     report.java_files = java
                     report.resources_skipped = resources
                     report.collisions = collisions
@@ -609,6 +617,8 @@ def run(
                                 if delta and on_found is not None:
                                     on_found(delta)
                                 if target is not None:
+                                    if on_event is not None:
+                                        on_event("queued", a.rel, "")
                                     dec_futs.add(
                                         dec_pool.submit(_decompile_stage, a, target, ctx, report)
                                     )
