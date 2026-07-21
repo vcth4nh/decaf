@@ -6,6 +6,7 @@ import pytest
 
 import decaf.engines as engines
 from decaf.engines import EngineResult
+from decaf.maven import Gav, Resolution
 from decaf.pipeline import DecafError, Settings, run
 
 
@@ -381,3 +382,35 @@ def test_run_cpu_budget_and_jobs_clamp(fake_env, make_jar, tmp_path: Path):
     assert report.settings["cpus"] == 2
     assert report.settings["cpu_budget"] == 1
     assert seen == [1]  # each engine JVM sees a 1-core budget
+
+
+def test_run_maven_hit_never_touches_engines(fake_env, make_jar, tmp_path: Path):
+    """A maven sources hit completes without occupying an engine slot."""
+    input_dir = tmp_path / "in"
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// real source\nclass A {}"})
+
+    def hit_resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=sources,
+            repo="https://r.test/m2",
+            resolved_by="pom-properties",
+        )
+
+    calls: list[str] = []
+
+    def spy_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        calls.append(spec.name)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", mirror=False),
+        runner=spy_engine,
+        resolver=hit_resolver,
+    )
+    assert calls == []
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["lib-1.2.jar"].method == "maven"
+    assert report.totals["maven_sources"] == 1
+    assert "real source" in (tmp_path / "out/src/com/x/A.java").read_text()

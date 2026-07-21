@@ -317,3 +317,27 @@ def test_runner_exception_becomes_failed_report(make_jar, tmp_path: Path):
     assert report.outcome == "failed"
     assert "engine exploded" in (report.failure or "")
     assert nested == []
+
+
+def test_resolver_exception_becomes_failed_report_with_nested(make_jar, tmp_path: Path):
+    """A stage-1 (resolution) crash fails the artifact without running engines,
+    but nested archives discovered before the crash are still surfaced."""
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    war = make_jar(
+        "app.war",
+        {
+            "WEB-INF/classes/com/w/W.class": b"w",
+            "WEB-INF/lib/dep.jar": inner.read_bytes(),
+        },
+    )
+
+    def exploding_resolver(jar_path, repos, client, cache_dir, **kw):
+        raise RuntimeError("index server melted")
+
+    runner = writing_runner({"vineflower": {"com/w/W.java": "class W {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=exploding_resolver, maven=True)
+    report, nested = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "failed"
+    assert "index server melted" in (report.failure or "")
+    assert runner.calls == []  # engines never run after a resolution crash
+    assert [n.rel for n in nested] == ["app.war!/WEB-INF/lib/dep.jar"]
