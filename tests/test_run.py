@@ -935,3 +935,41 @@ def test_whale_progresses_with_single_job(fake_env, make_jar, tmp_path):
         runner=perfect_engine,
     )
     assert report.totals["ok"] == 1
+
+
+def kotlin_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+    """Fake engine emitting .kt per top-level class (a vineflower Kotlin-plugin run)."""
+    dest = Path(dest)
+    with zipfile.ZipFile(Path(target)) as zf:
+        entries = [n for n in zf.namelist() if n.endswith(".class")]
+    n = 0
+    for entry in entries:
+        if "$" in entry.rsplit("/", 1)[-1]:
+            continue
+        out = dest / (entry[: -len(".class")] + ".kt")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("fun x() {}\n")
+        n += 1
+    return EngineResult(spec.name, 0, False, n, "")
+
+
+def test_run_accepts_kotlin_output_without_fallback(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("k.jar", {"okio/Buffer.class": b"k", "okio/Okio.class": b"k"}, base=input_dir)
+    engines_used: list[str] = []
+
+    def spy(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        engines_used.append(spec.name)
+        return kotlin_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False),
+        runner=spy,
+    )
+    r = report.artifacts[0]
+    assert engines_used == ["vineflower"]  # success on first engine, no fallback
+    assert r.outcome == "ok" and r.method == "vineflower"
+    assert r.missing_classes == 0
+    assert r.java_files == 2
+    assert (tmp_path / "out/src/okio/Buffer.kt").is_file()
+    assert report.totals["java_files"] == 2

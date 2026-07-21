@@ -23,7 +23,7 @@ from pathlib import Path
 import httpx
 
 from . import engines, maven
-from .engines import ENGINES
+from .engines import ENGINES, SOURCE_SUFFIXES
 from .maven import extract_java
 from .scanner import (
     ARCHIVE_EXTS,
@@ -106,7 +106,7 @@ class MergeWriter:
         for p in sorted(tree.rglob("*")):
             if not p.is_file():
                 continue
-            if p.suffix != ".java":
+            if p.suffix not in SOURCE_SUFFIXES:
                 resources += 1
                 continue
             java += 1
@@ -146,7 +146,7 @@ class MirrorWriter:
         for p in sorted(tree.rglob("*")):
             if not p.is_file():
                 continue
-            if p.suffix == ".java":
+            if p.suffix in SOURCE_SUFFIXES:
                 java += 1
             else:
                 resources += 1
@@ -266,8 +266,9 @@ def expected_class_stems(source: Path) -> set[str]:
 
 def produced_stems(dest: Path) -> set[str]:
     return {
-        normalize_java_rel(p.relative_to(dest).as_posix())[: -len(".java")]
-        for p in dest.rglob("*.java")
+        normalize_java_rel(p.relative_to(dest).as_posix())[: -len(p.suffix)]
+        for p in dest.rglob("*")
+        if p.is_file() and p.suffix in SOURCE_SUFFIXES
     }
 
 

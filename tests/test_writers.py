@@ -108,3 +108,28 @@ def test_report_json_and_totals(tmp_path: Path):
     parsed = json.loads(report.to_json())
     assert parsed["totals"]["artifacts"] == 5
     assert parsed["artifacts"][0]["method"] == "maven"
+
+
+def test_merge_writer_accepts_kotlin(tmp_path):
+    tree = tmp_path / "tree"
+    (tree / "com").mkdir(parents=True)
+    (tree / "com/A.kt").write_text("fun a() {}")
+    (tree / "com/B.java").write_text("class B {}")
+    (tree / "com/data.bin").write_bytes(b"\x00")
+    w = MergeWriter(tmp_path / "src")
+    java, resources, collisions = w.add_tree(tree, "a.jar")
+    assert (java, resources, collisions) == (2, 1, [])
+    assert (tmp_path / "src/com/A.kt").is_file()
+    assert (tmp_path / "src/com/B.java").is_file()
+
+
+def test_mirror_writer_counts_kotlin_as_source(tmp_path):
+    tree = tmp_path / "tree"
+    (tree / "com").mkdir(parents=True)
+    (tree / "com/A.kt").write_text("fun a() {}")
+    (tree / "com/notes.txt").write_text("x")
+    w = MirrorWriter(tmp_path / "out")
+    java, resources, _ = w.add_tree(tree, "a.jar")
+    assert (java, resources) == (1, 1)
+    assert (tmp_path / "out/a.jar/com/A.kt").is_file()
+    assert (tmp_path / "out/a.jar/com/notes.txt").is_file()

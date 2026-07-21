@@ -85,6 +85,8 @@ ENGINES: dict[str, EngineSpec] = {
 
 ENGINE_ORDER = ["vineflower", "cfr", "procyon", "fernflower", "jd"]
 
+SOURCE_SUFFIXES = (".java", ".kt")  # engine output that counts as decompiled source
+
 
 def active_specs(overrides: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, EngineSpec]:
     specs = dict(ENGINES)
@@ -309,7 +311,9 @@ def run_engine(
     else:
         result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, on_stderr_line)
     _unpack_emitted_archives(dest)
-    result.java_files = sum(1 for _ in dest.rglob("*.java"))
+    result.java_files = sum(
+        1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES
+    )
     return result
 
 

@@ -300,3 +300,16 @@ def test_register_on_closed_registry_kills(monkeypatch):
         assert proc.returncode != 0
     finally:
         PROCESSES.reset()
+
+
+def test_run_engine_counts_kotlin_sources(tmp_path: Path, monkeypatch):
+    script = (
+        "import pathlib\n"
+        "d = pathlib.Path(r'{dest}')\n"
+        "(d / 'A.kt').write_text('fun a() {{}}')\n"
+        "(d / 'B.java').write_text('class B {{}}')\n"
+        "(d / 'notes.txt').write_text('not source')\n"
+    )
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    assert res.java_files == 2
