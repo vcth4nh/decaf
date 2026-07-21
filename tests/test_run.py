@@ -35,7 +35,9 @@ def perfect_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budge
 def fake_env(monkeypatch):
     monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
     monkeypatch.setattr(
-        engines, "ensure_engine", lambda spec, client, cache_dir=None: Path(f"/fake/{spec.name}.jar")
+        engines,
+        "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
     )
 
 
@@ -762,3 +764,59 @@ def test_report_json_carries_sources_cached(fake_env, make_jar, tmp_path: Path):
     run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
     on_disk = json.loads((out / "decaf-report.json").read_text())
     assert on_disk["artifacts"][0]["sources_cached"] is False
+
+
+def test_run_emits_engine_preflight_events(monkeypatch, make_jar, tmp_path: Path):
+    from decaf.engines import ENGINES
+
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+
+    def fake_ensure(spec, client, cache_dir=None, on_download=None):
+        if spec.name == "cfr" and on_download is not None:
+            on_download()
+        return Path(f"/fake/{spec.name}.jar")
+
+    monkeypatch.setattr(engines, "ensure_engine", fake_ensure)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    eng = [e for e in events if e[0] == "engines"]
+    ver = ENGINES["cfr"].version
+    assert eng[0] == ("engines", "", "verifying")
+    assert ("engines", "cfr", f"downloading {ver}") in eng
+    assert ("engines", "cfr", f"downloaded {ver}") in eng
+    assert eng[-1] == ("engines", "", "ready")
+    assert eng.index(("engines", "cfr", f"downloading {ver}")) < eng.index(
+        ("engines", "cfr", f"downloaded {ver}")
+    )
+
+
+def test_run_cached_engines_emit_no_download_events(fake_env, make_jar, tmp_path: Path):
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+        on_event=lambda k, s, d: events.append((k, s, d)),
+    )
+    eng = [e for e in events if e[0] == "engines"]
+    assert eng == [("engines", "", "verifying"), ("engines", "", "ready")]
+
+
+def test_preflight_omits_hook_without_on_event(monkeypatch, make_jar, tmp_path: Path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(
+        engines,
+        "ensure_engine",
+        lambda spec, client, cache_dir=None: Path(f"/fake/{spec.name}.jar"),
+    )  # strict 3-arg fake: run() without on_event must never pass on_download
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    report = run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+    )
+    assert report.totals["ok"] == 1

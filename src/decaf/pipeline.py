@@ -488,8 +488,13 @@ class DecafError(Exception):
 
 
 def _preflight_engines(
-    settings: Settings, java_major: int, client: httpx.Client
+    settings: Settings,
+    java_major: int,
+    client: httpx.Client,
+    on_event: Callable[[str, str, str], None] | None = None,
 ) -> tuple[list[str], dict[str, Path]]:
+    if on_event is not None:
+        on_event("engines", "", "verifying")
     wanted = chain_for(settings.engine, settings.fallback)
     specs = engines.active_specs(settings.engine_overrides)
     jars: dict[str, Path] = {}
@@ -501,14 +506,29 @@ def _preflight_engines(
                     f"engine {name} needs Java {spec.min_java}+, found Java {java_major}"
                 )
             continue
+        downloaded = False
+        kwargs: dict = {}
+        if on_event is not None:
+
+            def _hook(name: str = name, version: str = spec.version) -> None:
+                nonlocal downloaded
+                downloaded = True
+                on_event("engines", name, f"downloading {version}")
+
+            kwargs["on_download"] = _hook
         try:
-            jars[name] = engines.ensure_engine(spec, client)
+            jars[name] = engines.ensure_engine(spec, client, **kwargs)
         except engines.EngineError as exc:
             if name == settings.engine:
                 raise DecafError(str(exc)) from exc
+        else:
+            if downloaded:
+                on_event("engines", name, f"downloaded {spec.version}")
     chain = chain_for(settings.engine, settings.fallback, available=set(jars))
     if not chain:
         raise DecafError(f"primary engine {settings.engine!r} unavailable")
+    if on_event is not None:
+        on_event("engines", "", "ready")
     return chain, jars
 
 
@@ -562,7 +582,7 @@ def run(
         affinity_base = os.sched_getaffinity(0)
         os.sched_setaffinity(0, set(sorted(affinity_base)[:total_cpus]))
     try:
-        chain, engine_jars = _preflight_engines(settings, java_major, client)
+        chain, engine_jars = _preflight_engines(settings, java_major, client, on_event)
         writer: MergeWriter | MirrorWriter
         if settings.mirror:
             writer = MirrorWriter(settings.output)
