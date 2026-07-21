@@ -467,6 +467,12 @@ def test_run_reports_fetch_pool_size(fake_env, make_jar, tmp_path: Path):
         runner=perfect_engine,
     )
     assert report.settings["fetch_jobs"] == 8  # capped, from the clamped jobs
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out3", maven=False, jobs=16, cpus=2),
+        runner=perfect_engine,
+    )
+    assert report.settings["jobs"] == 2  # clamped by --cpus
+    assert report.settings["fetch_jobs"] == 4  # derived from the clamped jobs, not the flag
 
 
 def test_fetch_admission_bounded_by_decompile_backlog(fake_env, make_jar, tmp_path: Path):
@@ -508,3 +514,51 @@ def test_fetch_admission_bounded_by_decompile_backlog(fake_env, make_jar, tmp_pa
     assert violations == []
     assert report.totals["ok"] == 12
     assert len(resolver_calls) == 12
+
+
+def test_run_maven_hit_war_still_surfaces_nested_jar(fake_env, make_jar, tmp_path: Path):
+    """A sources hit completes in the fetch stage, but nested archives inside
+    the hit artifact must still be discovered and decompiled (discovery runs
+    in stage 1 precisely so hits don't swallow their nested jars)."""
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "app.war",
+        {
+            "WEB-INF/classes/com/w/W.class": b"w",
+            "WEB-INF/lib/dep.jar": inner.read_bytes(),
+        },
+        base=input_dir,
+    )
+    war_sources = make_jar("app-sources.jar", {"com/w/W.java": "// war source\nclass W {}"})
+
+    def war_only_resolver(jar_path, repos, client, cache_dir, **kw):
+        if Path(jar_path).name == "app.war":
+            return Resolution(
+                gav=Gav("com.example", "app", "1.0"),
+                sources_jar=war_sources,
+                repo="https://r.test/m2",
+                resolved_by="verified-guess",
+            )
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    calls: list[tuple[str, str]] = []
+
+    def spy_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        calls.append((spec.name, Path(target).name))
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", mirror=False),
+        runner=spy_engine,
+        resolver=war_only_resolver,
+    )
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["app.war"].method == "maven"
+    assert rels["app.war"].outcome == "ok"
+    nested = rels["app.war!/WEB-INF/lib/dep.jar"]
+    assert nested.outcome == "ok"
+    assert nested.method == "vineflower"
+    assert calls == [("vineflower", "dep.jar")]  # engines ran for the nested jar only
+    assert "war source" in (tmp_path / "out/src/com/w/W.java").read_text()
+    assert (tmp_path / "out/src/com/d/D.java").is_file()
