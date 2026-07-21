@@ -189,6 +189,9 @@ def find_java() -> tuple[str, int] | None:
 NATIVE_DIR_ENGINES = {"vineflower", "fernflower", "jd"}
 
 
+BATCH_ENGINES = {"vineflower", "fernflower", "jd"}  # verified multi-source CLIs
+
+
 @dataclass
 class EngineResult:
     engine: str
@@ -295,6 +298,25 @@ def build_command(
     raise EngineError(f"unknown engine {spec.name!r}")
 
 
+def build_batch_command(
+    spec: EngineSpec,
+    jar_path: Path,
+    targets: list[Path],
+    dest: Path,
+    java: str = "java",
+    cpu_budget: int | None = None,
+) -> list[str]:
+    if spec.name not in BATCH_ENGINES:
+        raise EngineError(f"engine {spec.name!r} cannot batch")
+    prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
+    t = [str(p) for p in targets]
+    if spec.name == "fernflower":
+        return [*prefix, "-cp", str(jar_path), str(spec.main_class), *t, str(dest)]
+    if spec.name == "jd":
+        return [*prefix, "-jar", str(jar_path), *t, "-od", str(dest)]
+    return [*prefix, "-jar", str(jar_path), *t, str(dest)]  # vineflower
+
+
 def run_engine(
     spec: EngineSpec,
     jar_path: Path,
@@ -330,6 +352,17 @@ def _run_once(
     if PROCESSES.closed:
         return EngineResult(spec.name, -1, False, 0, "interrupted")
     cmd = build_command(spec, jar_path, target, dest, java=java, cpu_budget=cpu_budget)
+    return _exec_command(spec, cmd, timeout, on_stderr_line)
+
+
+def _exec_command(
+    spec: EngineSpec,
+    cmd: list[str],
+    timeout: float,
+    on_stderr_line: Callable[[str], None] | None,
+) -> EngineResult:
+    if PROCESSES.closed:
+        return EngineResult(spec.name, -1, False, 0, "interrupted")
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
         **_SPAWN_KWARGS,
@@ -365,6 +398,26 @@ def _run_once(
         PROCESSES.unregister(proc)
     tail = (err or b"").decode(errors="replace")[-2000:]
     return EngineResult(spec.name, proc.returncode or 0, timed_out, 0, tail)
+
+
+def run_engine_batch(
+    spec: EngineSpec,
+    jar_path: Path,
+    targets: list[Path],
+    dest: Path,
+    timeout: float,
+    java: str = "java",
+    cpu_budget: int | None = None,
+) -> EngineResult:
+    """One JVM, many source archives, merged output tree (BATCH_ENGINES only)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    cmd = build_batch_command(spec, jar_path, targets, dest, java=java, cpu_budget=cpu_budget)
+    result = _exec_command(spec, cmd, timeout, None)
+    _unpack_emitted_archives(dest)
+    result.java_files = sum(
+        1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES
+    )
+    return result
 
 
 def _run_per_class(

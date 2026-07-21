@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, field
 from functools import partial
 from heapq import heappush, heappop
 from itertools import count
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import httpx
 
@@ -232,6 +232,7 @@ class Ctx:
     sources_cache: Path
     runner: Callable
     resolver: Callable
+    batch_runner: Callable | None = None
     cpu_budget: int | None = None  # visible cores per engine JVM
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events
@@ -296,18 +297,57 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
     return out if count else None
 
 
+def _stream_kw_for(ctx: Ctx, name: str, rel: str) -> dict:
+    # Only pass the kwarg when streaming, so custom runners without it keep working.
+    if ctx.on_stderr is None:
+        return {}
+    sink = ctx.on_stderr
+    return {"on_stderr_line": lambda line: sink(f"{name} {rel}: {line}")}
+
+
+def _retry_missing_classes(
+    artifact: Artifact,
+    source: Path,
+    expected: set[str],
+    produced: set[str],
+    ctx: Ctx,
+    report: ArtifactReport,
+    chain: list[str],
+) -> None:
+    missing = expected - produced
+    for name in chain:
+        if engines.PROCESSES.closed:
+            break
+        if not missing:
+            break
+        retry_tree = _extract_failed_classes(source, missing, ctx)
+        if retry_tree is None:
+            break
+        dest = _tmp_dir(ctx)
+        if ctx.on_event is not None:
+            ctx.on_event("decompile", artifact.rel, name)
+        res = ctx.runner(
+            ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
+            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **_stream_kw_for(ctx, name, artifact.rel),
+        )
+        report.attempts.append(
+            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
+        )
+        if res.java_files > 0:
+            java, _, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            report.java_files += java
+            report.collisions += collisions
+            produced |= produced_stems(dest)
+            missing = expected - produced
+    report.missing_classes = len(missing)
+
+
 def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport) -> None:
     source = target if target.is_dir() else artifact.path
     expected = expected_class_stems(source)
     report.classes = len(expected)
     produced: set[str] = set()
-
-    def _stream_kw(name: str) -> dict:
-        # Only pass the kwarg when streaming, so custom runners without it keep working.
-        if ctx.on_stderr is None:
-            return {}
-        sink, rel = ctx.on_stderr, artifact.rel
-        return {"on_stderr_line": lambda line: sink(f"{name} {rel}: {line}")}
 
     used_index: int | None = None
     for i, name in enumerate(ctx.chain):
@@ -319,7 +359,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-            **_stream_kw(name),
+            **_stream_kw_for(ctx, name, artifact.rel),
         )
         report.attempts.append(
             EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
@@ -339,33 +379,9 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         report.failure = "all engines failed"
         return
 
-    missing = expected - produced
-    for name in ctx.chain[used_index + 1 :]:
-        if engines.PROCESSES.closed:
-            break
-        if not missing:
-            break
-        retry_tree = _extract_failed_classes(source, missing, ctx)
-        if retry_tree is None:
-            break
-        dest = _tmp_dir(ctx)
-        if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, name)
-        res = ctx.runner(
-            ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
-            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-            **_stream_kw(name),
-        )
-        report.attempts.append(
-            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
-        )
-        if res.java_files > 0:
-            java, _, collisions = ctx.writer.add_tree(dest, artifact.rel)
-            report.java_files += java
-            report.collisions += collisions
-            produced |= produced_stems(dest)
-            missing = expected - produced
-    report.missing_classes = len(missing)
+    _retry_missing_classes(
+        artifact, source, expected, produced, ctx, report, ctx.chain[used_index + 1 :]
+    )
     report.outcome = "ok"
 
 
@@ -483,6 +499,91 @@ def _decompile_stage(
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
     return report
+
+
+def _extract_member_resources(jar: Path, tree: Path) -> None:
+    """A batched member's resources come from its original jar (engines' merged
+    output can't attribute them)."""
+    try:
+        with zipfile.ZipFile(jar) as zf:
+            names = [
+                n for n in zf.namelist()
+                if not n.endswith("/")
+                and not n.endswith(".class")
+                and PurePosixPath(n).suffix.lower() not in ARCHIVE_EXTS
+            ]
+    except (zipfile.BadZipFile, OSError):
+        return
+    if names:
+        safe_extract_zip(jar, tree, members=names)
+
+
+def _decompile_batch(
+    members: list[tuple[Artifact, Path, ArtifactReport, set[str]]], ctx: Ctx
+) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
+    """Stage 2 for a batch: one primary-engine JVM over several small jars.
+
+    Returns (completed reports, members to requeue for solo processing).
+    Members' expected-stem sets are disjoint (enforced at formation), so every
+    produced source file belongs to exactly one member.
+    """
+    name = ctx.chain[0]
+    dest = _tmp_dir(ctx)
+    if ctx.on_event is not None:
+        for a, _, _, _ in members:
+            ctx.on_event("decompile", a.rel, name)
+    try:
+        res = ctx.batch_runner(
+            ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _ in members], dest,
+            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+        )
+    except Exception:
+        res = engines.EngineResult(name, -1, False, 0, traceback.format_exc()[-2000:])
+
+    owners: dict[str, int] = {}
+    for i, (_, _, _, stems) in enumerate(members):
+        for s in stems:
+            owners[s] = i
+    trees: dict[int, Path] = {}
+    produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
+    if res.returncode == 0 and not res.timed_out:
+        for p in sorted(dest.rglob("*")):
+            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                continue
+            rel = p.relative_to(dest).as_posix()
+            stem = normalize_java_rel(rel)[: -len(p.suffix)]
+            i = owners.get(stem)
+            if i is None:
+                i = owners.get(stem.split("$", 1)[0])  # inner classes ride with their outer
+            if i is None:
+                continue  # engine banner/stray file; real resources come from the member jar
+            tree = trees.setdefault(i, _tmp_dir(ctx))
+            target = tree / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(p, target)
+            produced[i].add(stem)
+
+    done: list[ArtifactReport] = []
+    requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
+    for i, (a, target, report, stems) in enumerate(members):
+        report.attempts.append(
+            EngineAttempt(name, "batch", res.returncode, res.timed_out,
+                          len(produced[i]), res.stderr_tail)
+        )
+        if i not in trees:
+            requeue.append((a, target, report))
+            continue
+        _extract_member_resources(a.path, trees[i])
+        java, resources, collisions = ctx.writer.add_tree(trees[i], a.rel)
+        report.java_files += java
+        report.resources_skipped += resources
+        report.collisions += collisions
+        report.method = name
+        report.classes = len(stems)
+        _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:])
+        report.outcome = "ok"
+        done.append(report)
+    return done, requeue
 
 
 def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
