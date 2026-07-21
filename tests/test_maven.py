@@ -4,10 +4,14 @@ from pathlib import Path
 import httpx
 import pytest
 
+import decaf.maven as maven
 from decaf.config import MAVEN_CENTRAL
 from decaf.maven import (
     Gav,
     MAX_PROBES,
+    NetState,
+    NetworkFailure,
+    ResolutionLog,
     candidate_coords,
     candidate_groups,
     extract_java,
@@ -25,6 +29,11 @@ POM2 = "groupId=org.other\nartifactId=dep\nversion=9.9\n"
 
 def make_client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.fixture(autouse=True)
+def _fast_retries(monkeypatch):
+    monkeypatch.setattr(maven, "RETRY_BACKOFF", (0.0, 0.0))
 
 
 def test_gav_from_single_pom_properties(make_jar):
@@ -641,3 +650,181 @@ def test_resolve_sources_survives_poisoned_package_names(make_jar, tmp_path: Pat
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
     assert res.sources_jar is None
     assert res.miss is not None
+
+
+EXHAUST_WARN = (
+    "maven: r.test: connection error persisted after 3 attempts; "
+    "artifacts may fall back to decompilation without sources"
+)
+
+
+def test_get_retry_retries_transport_errors_then_succeeds():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.ConnectError("boom")
+        return httpx.Response(200, text="ok")
+
+    net, log = NetState(), ResolutionLog()
+    with make_client(handler) as c:
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert resp.status_code == 200 and calls["n"] == 3
+    assert log.ok_hosts == {"r.test"} and log.failed_hosts == set()
+
+
+def test_get_retry_exhausts_strikes_and_warns_once():
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    log = ResolutionLog()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("boom")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert calls["n"] == 6  # RETRY_ATTEMPTS per request
+    assert exc.value.host == "r.test"
+    assert exc.value.kind == "connection error"
+    assert exc.value.detail == "r.test: connection error"
+    assert log.failed_hosts == {"r.test"}
+    assert warnings == [EXHAUST_WARN]  # deduped per (host, kind)
+
+
+def test_get_retry_different_kind_warns_again():
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    log = ResolutionLog()
+    mode = {"exc": httpx.ConnectError}
+
+    def handler(request):
+        raise mode["exc"]("boom")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        mode["exc"] = httpx.ReadTimeout
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert exc.value.kind == "timeout"
+    assert len(warnings) == 2
+    assert "timeout persisted after 3 attempts" in warnings[1]
+
+
+def test_get_retry_429_uses_retry_after_and_never_strikes(monkeypatch):
+    waits: list = []
+    monkeypatch.setattr(
+        maven, "_wait_before_retry", lambda net, attempt, ra: waits.append(ra) or False
+    )
+    net, log = NetState(), ResolutionLog()
+
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "7"})
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert waits == [7.0, 7.0]
+    assert exc.value.kind == "HTTP 429"
+    assert log.failed_hosts == set()  # 429 taints but never strikes
+
+
+def test_get_retry_retry_after_capped_and_malformed(monkeypatch):
+    waits: list = []
+    monkeypatch.setattr(
+        maven, "_wait_before_retry", lambda net, attempt, ra: waits.append(ra) or False
+    )
+    net, log = NetState(), ResolutionLog()
+    responses = iter(
+        [
+            httpx.Response(429, headers={"Retry-After": "100"}),
+            httpx.Response(503, headers={"Retry-After": "soon"}),
+            httpx.Response(200),
+        ]
+    )
+    with make_client(lambda r: next(responses)) as c:
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert resp.status_code == 200
+    assert waits == [15.0, None]  # capped; malformed falls back to backoff
+
+
+def test_wait_before_retry_jitters_backoff_and_reports_abort(monkeypatch):
+    monkeypatch.setattr(maven, "RETRY_BACKOFF", (8.0, 16.0))
+    net = NetState()
+    seen: list[float] = []
+    monkeypatch.setattr(net.abort, "wait", lambda d: seen.append(d) or True)
+    assert maven._wait_before_retry(net, 1, None) is True
+    assert 6.0 <= seen[0] <= 10.0  # 8s base, 0.75–1.25 jitter
+    assert maven._wait_before_retry(net, 2, 7.0) is True
+    assert seen[1] == 7.0  # retry-after passes through unjittered
+
+
+def test_get_retry_pre_set_abort_gives_up_after_first_failure():
+    net = NetState()
+    net.abort.set()
+    log = ResolutionLog()
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("boom")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert calls["n"] == 1
+    assert log.failed_hosts == set()  # aborted give-up: no strike, no warn
+
+
+def test_get_retry_non_transient_status_passes_through():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    net, log = NetState(), ResolutionLog()
+    with make_client(handler) as c:
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert resp.status_code == 404 and calls["n"] == 1
+    assert log.ok_hosts == {"r.test"}
+
+
+def test_netstate_breaker_trips_after_three_consecutive_artifacts():
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    net.record_artifact({"r.test"}, set())
+    net.record_artifact({"r.test"}, {"r.test"})  # success beats failure: reset
+    net.record_artifact({"r.test"}, set())
+    net.record_artifact({"r.test"}, set())
+    assert not net.is_dead("r.test")
+    net.record_artifact({"r.test"}, set())
+    assert net.is_dead("r.test")
+    assert warnings == [
+        "maven: giving up on r.test for the rest of the run "
+        "(3 artifacts hit network failures in a row)"
+    ]
+    net.record_artifact({"r.test"}, set())  # already dead: no second warning
+    assert len(warnings) == 1
+
+
+def test_get_retry_skips_dead_host_without_request():
+    net = NetState()
+    for _ in range(3):
+        net.record_artifact({"r.test"}, set())
+    log = ResolutionLog()
+
+    def handler(request):
+        raise AssertionError("dead host must not be contacted")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+    assert exc.value.kind == "skipped"
+    assert exc.value.detail == "r.test skipped (unreachable this run)"

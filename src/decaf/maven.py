@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import random
 import re
 import tempfile
+import threading
 import weakref
 import zipfile
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -128,6 +130,164 @@ MAX_INDEX_GROUPS = 5
 _INDEX_CACHE: weakref.WeakKeyDictionary[httpx.Client, dict[str, list[str]]] = (
     weakref.WeakKeyDictionary()
 )
+
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF = (1.0, 2.0)  # seconds before retry 1 and retry 2
+RETRY_AFTER_CAP = 15.0
+BREAKER_STRIKES = 3
+
+
+class NetworkFailure(Exception):
+    """A request gave up: retries exhausted, run aborted, or breaker-dead host."""
+
+    def __init__(self, host: str, kind: str, detail: str):
+        super().__init__(detail)
+        self.host = host
+        self.kind = kind
+        self.detail = detail
+
+
+@dataclass
+class NetState:
+    """Per-run network policy state, shared across fetch threads."""
+
+    abort: threading.Event = field(default_factory=threading.Event)
+    warn: Callable[[str], None] | None = None
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _strikes: dict[str, int] = field(default_factory=dict, repr=False)
+    _dead: set[str] = field(default_factory=set, repr=False)
+    _warned: set[tuple[str, str]] = field(default_factory=set, repr=False)
+
+    def is_dead(self, host: str) -> bool:
+        with self._lock:
+            return host in self._dead
+
+    def warn_once(self, host: str, kind_class: str, msg: str) -> None:
+        if self.warn is None:
+            return
+        with self._lock:
+            if (host, kind_class) in self._warned:
+                return
+            self._warned.add((host, kind_class))
+        self.warn(msg)
+
+    def record_artifact(self, failed_hosts: set[str], ok_hosts: set[str]) -> None:
+        """Per-resolution breaker accounting; a host success beats its failures."""
+        tripped: list[str] = []
+        with self._lock:
+            for host in ok_hosts:
+                self._strikes[host] = 0
+            for host in failed_hosts - ok_hosts:
+                self._strikes[host] = self._strikes.get(host, 0) + 1
+                if self._strikes[host] >= BREAKER_STRIKES and host not in self._dead:
+                    self._dead.add(host)
+                    tripped.append(host)
+        if self.warn is not None:
+            for host in tripped:
+                self.warn(
+                    f"maven: giving up on {host} for the rest of the run "
+                    f"({BREAKER_STRIKES} artifacts hit network failures in a row)"
+                )
+
+
+@dataclass
+class ResolutionLog:
+    """Per-resolve_sources accumulation (owned by one call, no lock needed)."""
+
+    events: list[str] = field(default_factory=list)
+    failed_hosts: set[str] = field(default_factory=set)
+    ok_hosts: set[str] = field(default_factory=set)
+    probe_failures: int = 0
+    download_failures: int = 0
+
+
+def _exc_kind(exc: httpx.TransportError) -> str:
+    return "timeout" if isinstance(exc, httpx.TimeoutException) else "connection error"
+
+
+def _status_kind(code: int) -> str | None:
+    if code == 429:
+        return "HTTP 429"
+    if 500 <= code < 600:
+        return f"HTTP {code}"
+    return None
+
+
+def _kind_class(kind: str) -> str:
+    return "HTTP 5xx" if kind.startswith("HTTP 5") else kind
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    if resp.status_code not in (429, 503):
+        return None
+    value = resp.headers.get("Retry-After", "")
+    if value.isdigit():
+        return min(float(value), RETRY_AFTER_CAP)
+    return None
+
+
+def _wait_before_retry(net: NetState, attempt: int, retry_after: float | None) -> bool:
+    """Back off before retry `attempt` (1-based). True if the run aborted mid-wait."""
+    if retry_after is not None:
+        delay = retry_after
+    else:
+        delay = RETRY_BACKOFF[attempt - 1] * (0.75 + random.random() * 0.5)
+    return net.abort.wait(delay)
+
+
+def _check_alive(net: NetState, host: str) -> None:
+    if net.is_dead(host):
+        raise NetworkFailure(host, "skipped", f"{host} skipped (unreachable this run)")
+
+
+def _exhausted(net: NetState, log: ResolutionLog, host: str, kind: str) -> NetworkFailure:
+    if kind in ("timeout", "connection error"):
+        log.failed_hosts.add(host)  # only transport-class failures strike the breaker
+    net.warn_once(
+        host,
+        _kind_class(kind),
+        f"maven: {host}: {_kind_class(kind)} persisted after {RETRY_ATTEMPTS} attempts; "
+        "artifacts may fall back to decompilation without sources",
+    )
+    return NetworkFailure(host, kind, f"{host}: {kind}")
+
+
+def _get_retry(
+    client: httpx.Client,
+    url: str,
+    *,
+    net: NetState,
+    log: ResolutionLog,
+    params: dict[str, str] | None = None,
+    timeout: float = 10.0,
+    follow_redirects: bool = False,
+) -> httpx.Response:
+    """GET with transient-error retries; returns any non-transient response.
+
+    Raises NetworkFailure when the host is breaker-dead, retries exhaust, or
+    the run aborts mid-backoff.
+    """
+    host = httpx.URL(url).host
+    _check_alive(net, host)
+    kind = ""
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        retry_after = None
+        try:
+            resp = client.get(
+                url, params=params, timeout=timeout, follow_redirects=follow_redirects
+            )
+        except httpx.TransportError as exc:
+            kind = _exc_kind(exc)
+        else:
+            status_kind = _status_kind(resp.status_code)
+            if status_kind is None:
+                log.ok_hosts.add(host)
+                return resp
+            kind = status_kind
+            retry_after = _retry_after_seconds(resp)
+        if attempt < RETRY_ATTEMPTS and _wait_before_retry(net, attempt, retry_after):
+            raise NetworkFailure(host, kind, f"{host}: {kind}")  # aborted: quiet give-up
+    raise _exhausted(net, log, host, kind)
 
 
 def _groups_from_index(artifact: str, client: httpx.Client) -> list[str]:
