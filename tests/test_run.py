@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -817,6 +818,120 @@ def test_preflight_omits_hook_without_on_event(monkeypatch, make_jar, tmp_path: 
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
     report = run(
         Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+    )
+    assert report.totals["ok"] == 1
+
+
+def test_fetch_admission_pops_largest_first(fake_env, make_jar, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from decaf import pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("a-small.jar", {"com/s/A.class": b"x"}, base=input_dir)
+    make_jar("m-big.jar", {f"com/b/C{i}.class": b"x" for i in range(40)}, base=input_dir)
+    make_jar("z-mid.jar", {f"com/m/M{i}.class": b"x" for i in range(10)}, base=input_dir)
+    order: list[str] = []
+    real_submit = ThreadPoolExecutor.submit
+
+    def spy_submit(self, fn, *args, **kwargs):
+        if fn is pipeline._fetch_stage:
+            order.append(args[0].rel)
+        return real_submit(self, fn, *args, **kwargs)
+
+    monkeypatch.setattr(ThreadPoolExecutor, "submit", spy_submit)
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+    )
+    # scan order is alphabetical (a-small, m-big, z-mid); size order must win
+    assert order == ["m-big.jar", "z-mid.jar", "a-small.jar"]
+
+
+def test_ready_buffer_drains_largest_first(fake_env, make_jar, tmp_path):
+    """Gate every engine start until all three artifacts are queued; with
+    jobs=1 the buffered pair must then start in size order."""
+    input_dir = tmp_path / "in"
+    make_jar("a-small.jar", {"com/s/A.class": b"x"}, base=input_dir)
+    make_jar("m-big.jar", {f"com/b/C{i}.class": b"x" for i in range(40)}, base=input_dir)
+    make_jar("z-mid.jar", {f"com/m/M{i}.class": b"x" for i in range(10)}, base=input_dir)
+    sizes = {"m-big.jar": 40, "z-mid.jar": 10, "a-small.jar": 1}
+    all_queued = threading.Event()
+    queued: list[str] = []
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued.append(subject)
+            if len(queued) == 3:
+                all_queued.set()
+
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def gated_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        with lock:
+            started.append(Path(target).name)
+        all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
+        runner=gated_engine,
+        on_event=on_event,
+    )
+    # started[0] is whichever fetch finished first; the buffered rest must be size-ordered
+    assert len(started) == 3
+    assert [sizes[n] for n in started[1:]] == sorted((sizes[n] for n in started[1:]), reverse=True)
+
+
+def test_whale_reserves_headroom(fake_env, make_jar, tmp_path):
+    """A whale weighs 2 slots: with jobs=4, at most weight 4 runs concurrently,
+    so the 4th artifact must wait for a completion."""
+    input_dir = tmp_path / "in"
+    make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    for i in range(3):
+        make_jar(f"s{i}.jar", {f"com/s{i}/A.class": b"x"}, base=input_dir)
+    started: list[str] = []
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def blocking_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        with lock:
+            started.append(Path(target).name)
+        release.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    result: dict = {}
+
+    def drive():
+        result["report"] = run(
+            Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=4, cpus=8),
+            runner=blocking_engine,
+        )
+
+    t = threading.Thread(target=drive)
+    t.start()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with lock:
+            if len(started) == 3:
+                break
+        time.sleep(0.01)
+    time.sleep(0.3)  # generous window for an over-admitted 4th start
+    with lock:
+        assert len(started) == 3  # whale(2) + two smalls(1+1) fill jobs=4
+    release.set()
+    t.join(timeout=30)
+    assert result["report"].totals["ok"] == 4
+
+
+def test_whale_progresses_with_single_job(fake_env, make_jar, tmp_path):
+    """weight 2 > jobs=1 must not deadlock: an idle pool admits anything."""
+    input_dir = tmp_path / "in"
+    make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
         runner=perfect_engine,
     )
     assert report.totals["ok"] == 1

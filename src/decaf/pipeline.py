@@ -16,6 +16,8 @@ from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from functools import partial
+from heapq import heappush, heappop
+from itertools import count
 from pathlib import Path
 
 import httpx
@@ -35,6 +37,12 @@ from .scanner import (
 )
 
 _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
+
+_WHALE_CLASSES = 3000  # artifacts at/above this class count get scheduling headroom
+
+
+def _decompile_weight(artifact: Artifact) -> int:
+    return 2 if artifact.classes >= _WHALE_CLASSES else 1
 
 
 def normalize_java_rel(rel: str) -> str:
@@ -609,40 +617,58 @@ def run(
                 ThreadPoolExecutor(max_workers=fetch_jobs) as fetch_pool,
                 ThreadPoolExecutor(max_workers=jobs) as dec_pool,
             ):
-                todo = deque(artifacts)
+                seq = count()
+                todo: list[tuple[int, int, Artifact]] = []
+                for a in artifacts:
+                    heappush(todo, (-a.classes, next(seq), a))
                 fetch_futs: dict = {}  # Future -> Artifact, kept for the stage-2 hand-off
-                dec_futs: set = set()
+                dec_futs: dict = {}  # Future -> weight
+                ready: list[tuple] = []  # (-classes, seq, artifact, target, report)
+                dec_weight = 0
                 try:
-                    while todo or fetch_futs or dec_futs:
+                    while todo or fetch_futs or dec_futs or ready:
                         # Admission gate: every fetch future is a potential decompile,
-                        # so capping in-flight futures bounds the stage-2 backlog and
-                        # stalls downloads when decompilation falls behind.
+                        # so capping in-flight work (including the held ready buffer)
+                        # bounds the stage-2 backlog and stalls downloads when
+                        # decompilation falls behind.
                         while (
                             todo
                             and len(fetch_futs) < fetch_jobs
-                            and len(fetch_futs) + len(dec_futs) < jobs + queue_bound
+                            and len(fetch_futs) + len(dec_futs) + len(ready) < jobs + queue_bound
                         ):
-                            a = todo.popleft()
+                            _, _, a = heappop(todo)
                             fetch_futs[fetch_pool.submit(_fetch_stage, a, ctx)] = a
-                        done, _ = wait(fetch_futs.keys() | dec_futs, return_when=FIRST_COMPLETED)
+                        # Weight-gated drain: whales take 2 slots so they keep
+                        # headroom; an idle pool admits anything (no deadlock at
+                        # jobs=1). Largest first.
+                        while ready and (
+                            dec_weight == 0 or dec_weight + _decompile_weight(ready[0][2]) <= jobs
+                        ):
+                            _, _, a, target, report = heappop(ready)
+                            w = _decompile_weight(a)
+                            dec_weight += w
+                            dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = w
+                        if not fetch_futs and not dec_futs:
+                            continue  # unreachable in practice: drain above always progresses
+                        done, _ = wait(
+                            fetch_futs.keys() | dec_futs.keys(), return_when=FIRST_COMPLETED
+                        )
                         for fut in done:
                             if fut in dec_futs:
-                                dec_futs.discard(fut)
+                                dec_weight -= dec_futs.pop(fut)
                                 report = fut.result()
                             else:
                                 a = fetch_futs.pop(fut)
                                 report, nested, target = fut.result()
-                                if nested:
-                                    todo.extend(nested)
+                                for n in nested:
+                                    heappush(todo, (-n.classes, next(seq), n))
                                 delta = len(nested) - nested_counts.pop(a.rel, 0)
                                 if delta and on_found is not None:
                                     on_found(delta)
                                 if target is not None:
                                     if on_event is not None:
                                         on_event("queued", a.rel, "")
-                                    dec_futs.add(
-                                        dec_pool.submit(_decompile_stage, a, target, ctx, report)
-                                    )
+                                    heappush(ready, (-a.classes, next(seq), a, target, report))
                                     continue
                             reports.append(report)
                             if on_done is not None:
