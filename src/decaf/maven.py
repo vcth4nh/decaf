@@ -304,6 +304,7 @@ def _groups_from_index(
             net=net,
             log=log,
             params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
+            follow_redirects=True,
         )
         resp.raise_for_status()
         docs = resp.json()["response"]["docs"]
@@ -438,6 +439,7 @@ def gav_from_central_sha1(
             net=net,
             log=log,
             params={"q": f'1:"{sha1}"', "rows": "1", "wt": "json"},
+            follow_redirects=True,
         )
         resp.raise_for_status()
         docs = resp.json()["response"]["docs"]

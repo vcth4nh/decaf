@@ -973,3 +973,28 @@ def test_breaker_gives_up_on_host_after_three_artifacts(make_jar, tmp_path: Path
         "maven: giving up on search.maven.org for the rest of the run "
         "(3 artifacts hit network failures in a row)"
     ]
+
+
+def test_index_lookup_follows_redirects(make_jar):
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+
+    def handler(request):
+        assert request.url.host == "search.maven.org"
+        if request.url.path == "/solrsearch/select":
+            return httpx.Response(301, headers={"Location": "https://search.maven.org/moved"})
+        return httpx.Response(
+            200, json={"response": {"docs": [{"g": "com.acme", "a": "lib", "v": "1"}]}}
+        )
+
+    with make_client(handler) as c:
+        assert candidate_groups("lib", jar, c) == ["com.acme", "com.acme.lib"]
+
+
+def test_sha1_lookup_follows_redirects():
+    def handler(request):
+        if request.url.path == "/solrsearch/select":
+            return httpx.Response(301, headers={"Location": "https://search.maven.org/moved"})
+        return httpx.Response(200, json={"response": {"docs": [{"g": "g", "a": "a", "v": "1"}]}})
+
+    with make_client(handler) as c:
+        assert gav_from_central_sha1("feedface", c) == Gav("g", "a", "1")
