@@ -30,6 +30,7 @@ class Artifact:
     path: Path
     rel: str
     kind: ArtifactKind
+    classes: int = 0
 
 
 def _read_names(path: Path) -> list[str] | None:
@@ -48,9 +49,20 @@ def _classify_names(names: list[str]) -> ArtifactKind:
     return ArtifactKind.RESOURCE_ONLY
 
 
-def classify_zip(path: Path) -> ArtifactKind:
+def _count_classes(names: list[str]) -> int:
+    return sum(1 for n in names if n.endswith(".class"))
+
+
+def classify_counted(path: Path) -> tuple[ArtifactKind, int]:
+    """Kind plus .class entry count, from a single namelist read."""
     names = _read_names(path)
-    return ArtifactKind.CORRUPT if names is None else _classify_names(names)
+    if names is None:
+        return ArtifactKind.CORRUPT, 0
+    return _classify_names(names), _count_classes(names)
+
+
+def classify_zip(path: Path) -> ArtifactKind:
+    return classify_counted(path)[0]
 
 
 def find_nested_archives(names: Iterable[str]) -> list[str]:
@@ -71,10 +83,12 @@ def scan_counted(root: Path) -> tuple[list[Artifact], dict[str, int]]:
 
     def _artifact(path: Path, rel: str) -> Artifact:
         names = _read_names(path)
-        kind = ArtifactKind.CORRUPT if names is None else _classify_names(names)
+        if names is None:
+            return Artifact(path, rel, ArtifactKind.CORRUPT)
+        kind = _classify_names(names)
         if kind in (ArtifactKind.ARCHIVE, ArtifactKind.RESOURCE_ONLY):
             counts[rel] = len(find_nested_archives(names))
-        return Artifact(path, rel, kind)
+        return Artifact(path, rel, kind, _count_classes(names))
 
     if root.is_file():
         if root.suffix.lower() not in ARCHIVE_EXTS:
@@ -84,16 +98,16 @@ def scan_counted(root: Path) -> tuple[list[Artifact], dict[str, int]]:
         return [_artifact(root, root.name)], counts
 
     artifacts: list[Artifact] = []
-    has_loose_classes = False
+    loose_classes = 0
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
         if p.suffix.lower() in ARCHIVE_EXTS:
             artifacts.append(_artifact(p, p.relative_to(root).as_posix()))
         elif p.suffix == ".class":
-            has_loose_classes = True
-    if has_loose_classes:
-        artifacts.append(Artifact(root, "_classes", ArtifactKind.CLASS_TREE))
+            loose_classes += 1
+    if loose_classes:
+        artifacts.append(Artifact(root, "_classes", ArtifactKind.CLASS_TREE, loose_classes))
     return artifacts, counts
 
 

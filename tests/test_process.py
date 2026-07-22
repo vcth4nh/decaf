@@ -4,7 +4,7 @@ import pytest
 
 from decaf.engines import ENGINES, EngineResult
 from decaf.maven import Gav, Resolution
-from decaf.pipeline import Ctx, MergeWriter, Settings, chain_for, process_artifact
+from decaf.pipeline import Ctx, MergeWriter, Settings, _discover_nested, chain_for, process_artifact
 from decaf.scanner import Artifact, ArtifactKind
 
 
@@ -341,3 +341,195 @@ def test_resolver_exception_becomes_failed_report_with_nested(make_jar, tmp_path
     assert "index server melted" in (report.failure or "")
     assert runner.calls == []  # engines never run after a resolution crash
     assert [n.rel for n in nested] == ["app.war!/WEB-INF/lib/dep.jar"]
+
+
+def test_discover_nested_carries_class_counts(make_jar, tmp_path):
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d", "com/d/E.class": b"e"})
+    war = make_jar("app.war", {"WEB-INF/lib/dep.jar": inner.read_bytes()})
+    tmp_root = tmp_path / "t"
+    tmp_root.mkdir()
+    ctx = Ctx(
+        settings=Settings(input=war, output=tmp_path / "o"),
+        writer=None, chain=[], engine_jars={}, java="java",
+        tmp_root=tmp_root, client=None, sources_cache=tmp_path / "s",
+        runner=None, resolver=None,
+    )
+    nested = _discover_nested(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    assert [(n.rel, n.classes) for n in nested] == [("app.war!/WEB-INF/lib/dep.jar", 2)]
+
+
+def _batch_ctx(tmp_path, batch_runner, chain=None):
+    from decaf.pipeline import Ctx, MergeWriter, Settings
+
+    tmp_root = tmp_path / "tmp"
+    tmp_root.mkdir(exist_ok=True)
+    return Ctx(
+        settings=Settings(input=tmp_path, output=tmp_path / "out"),
+        writer=MergeWriter(tmp_path / "out" / "src"),
+        chain=chain or ["vineflower"],
+        engine_jars={"vineflower": Path("/fake/vf.jar"), "cfr": Path("/fake/cfr.jar")},
+        java="java", tmp_root=tmp_root, client=None,
+        sources_cache=tmp_path / "s", runner=None, resolver=None,
+        batch_runner=batch_runner,
+    )
+
+
+def _member(make_jar, name, entries):
+    from decaf.pipeline import ArtifactReport, expected_class_stems
+    from decaf.scanner import Artifact, ArtifactKind
+
+    jar = make_jar(name, entries)
+    a = Artifact(jar, name, ArtifactKind.ARCHIVE, len(entries))
+    report = ArtifactReport(rel=name, kind="archive", outcome="ok")
+    return (a, jar, report, expected_class_stems(jar))
+
+
+def merged_batch_engine(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+    """Writes one .java per top-level class of every target into one merged dest."""
+    import zipfile as _zf
+
+    from decaf.engines import EngineResult
+
+    dest = Path(dest)
+    n = 0
+    for t in targets:
+        with _zf.ZipFile(Path(t)) as zf:
+            for entry in zf.namelist():
+                if not entry.endswith(".class") or "$" in entry.rsplit("/", 1)[-1]:
+                    continue
+                out = dest / (entry[: -len(".class")] + ".java")
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text("class X {}\n")
+                n += 1
+    return EngineResult(spec.name, 0, False, n, "")
+
+
+def test_decompile_batch_splits_and_attributes(make_jar, tmp_path):
+    from decaf.pipeline import _decompile_batch
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "res/a.txt": b"r"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    assert [r.rel for r in done] == ["a.jar", "b.jar"]
+    for r in done:
+        assert r.outcome == "ok" and r.method == "vineflower"
+        assert r.attempts[0].level == "batch" and r.attempts[0].returncode == 0
+        assert r.java_files == 1 and r.missing_classes == 0
+    out = tmp_path / "out" / "src"
+    assert (out / "com/a/A.java").is_file() and (out / "com/b/B.java").is_file()
+
+
+def test_decompile_batch_failure_requeues_members(make_jar, tmp_path):
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    def broken_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        return EngineResult(spec.name, 1, False, 0, "boom")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, broken_batch)
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert done == []
+    assert [a.rel for a, _, _ in requeue] == ["a.jar", "b.jar"]
+    for _, _, report in requeue:
+        assert report.attempts[0].level == "batch" and report.attempts[0].returncode == 1
+
+
+def test_decompile_batch_empty_member_requeued(make_jar, tmp_path):
+    from decaf.pipeline import _decompile_batch
+
+    def only_first_engine(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        return merged_batch_engine(spec, jar_path, targets[:1], dest, timeout, java=java)
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, only_first_engine)
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert [r.rel for r in done] == ["a.jar"]
+    assert [a.rel for a, _, _ in requeue] == ["b.jar"]
+
+
+def test_decompile_batch_extracts_member_resources(make_jar, tmp_path):
+    from decaf.pipeline import MirrorWriter, _decompile_batch
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "META-INF/spring.factories": b"cfg"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)
+    ctx.writer = MirrorWriter(tmp_path / "out")
+    done, requeue = _decompile_batch([m1], ctx)
+    assert requeue == [] and done[0].outcome == "ok"
+    assert (tmp_path / "out/a.jar/META-INF/spring.factories").read_bytes() == b"cfg"
+    assert (tmp_path / "out/a.jar/com/a/A.java").is_file()
+
+
+def test_decompile_batch_contains_member_postprocessing_errors(make_jar, tmp_path):
+    from decaf.pipeline import _decompile_batch
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)
+    real_add_tree = ctx.writer.add_tree
+    calls = [0]
+
+    def flaky_add_tree(tree, rel):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise OSError(28, "No space left on device")
+        return real_add_tree(tree, rel)
+
+    ctx.writer.add_tree = flaky_add_tree
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    outcomes = {r.rel: r.outcome for r in done}
+    assert outcomes == {"a.jar": "failed", "b.jar": "ok"}
+    failed = next(r for r in done if r.rel == "a.jar")
+    assert "No space left on device" in (failed.failure or "")
+
+
+def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    def inner_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        dest = Path(dest)
+        (dest / "com/a").mkdir(parents=True, exist_ok=True)
+        (dest / "com/a/A.java").write_text("class A {}")
+        (dest / "com/a/A$1.java").write_text("class A$1 {}")  # inner: no owner stem of its own
+        (dest / "com/zz").mkdir(parents=True, exist_ok=True)
+        (dest / "com/zz/Stray.java").write_text("class Stray {}")  # no member owns this
+        return EngineResult(spec.name, 0, False, 3, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "com/a/A$1.class": b"y"})
+    ctx = _batch_ctx(tmp_path, inner_emitting_batch)
+    done, requeue = _decompile_batch([m1], ctx)
+    assert requeue == [] and done[0].outcome == "ok"
+    out = tmp_path / "out" / "src"
+    assert (out / "com/a/A.java").is_file()
+    assert (out / "com/a/A$1.java").is_file()      # $-inner mapped via outer stem
+    assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped
+
+
+def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
+    """Same split mechanism as the inner-class test, isolated to the
+    no-owner-stem case: a stray file with no matching member must never land
+    in any output tree, even when it's the only extra file the engine wrote."""
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    def stray_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        dest = Path(dest)
+        (dest / "com/a").mkdir(parents=True, exist_ok=True)
+        (dest / "com/a/A.java").write_text("class A {}")
+        (dest / "com/zz").mkdir(parents=True, exist_ok=True)
+        (dest / "com/zz/Stray.java").write_text("class Stray {}")  # no member owns this
+        return EngineResult(spec.name, 0, False, 2, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    ctx = _batch_ctx(tmp_path, stray_emitting_batch)
+    done, requeue = _decompile_batch([m1], ctx)
+    assert requeue == [] and done[0].outcome == "ok"
+    out = tmp_path / "out" / "src"
+    assert (out / "com/a/A.java").is_file()
+    assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped

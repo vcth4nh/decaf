@@ -16,18 +16,20 @@ from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from functools import partial
-from pathlib import Path
+from heapq import heappush, heappop
+from itertools import count
+from pathlib import Path, PurePosixPath
 
 import httpx
 
 from . import engines, maven
-from .engines import ENGINES
+from .engines import ENGINES, SOURCE_SUFFIXES
 from .maven import extract_java
 from .scanner import (
     ARCHIVE_EXTS,
     Artifact,
     ArtifactKind,
-    classify_zip,
+    classify_counted,
     copy_class_tree,
     find_nested_archives,
     safe_extract_zip,
@@ -35,6 +37,16 @@ from .scanner import (
 )
 
 _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
+
+_WHALE_CLASSES = 3000  # artifacts at/above this class count get scheduling headroom
+
+_SMALL_CLASSES = 800  # below this, an archive is batchable
+_BATCH_MAX_JARS = 16
+_BATCH_MAX_CLASSES = 2000
+
+
+def _decompile_weight(artifact: Artifact) -> int:
+    return 2 if artifact.classes >= _WHALE_CLASSES else 1
 
 
 def normalize_java_rel(rel: str) -> str:
@@ -53,7 +65,7 @@ def normalize_java_rel(rel: str) -> str:
 @dataclass
 class EngineAttempt:
     engine: str
-    level: str  # "archive" | "class"
+    level: str  # "archive" | "class" | "batch"
     returncode: int
     timed_out: bool
     java_files: int
@@ -81,7 +93,7 @@ class ArtifactReport:
 
 
 class MergeWriter:
-    """Merges .java files from many trees into one package tree.
+    """Merges source files (.java/.kt) from many trees into one package tree.
 
     Collisions are deterministic: the tree with the lowest sort_key wins,
     regardless of the order in which worker threads deliver results.
@@ -98,7 +110,7 @@ class MergeWriter:
         for p in sorted(tree.rglob("*")):
             if not p.is_file():
                 continue
-            if p.suffix != ".java":
+            if p.suffix not in SOURCE_SUFFIXES:
                 resources += 1
                 continue
             java += 1
@@ -138,7 +150,7 @@ class MirrorWriter:
         for p in sorted(tree.rglob("*")):
             if not p.is_file():
                 continue
-            if p.suffix == ".java":
+            if p.suffix in SOURCE_SUFFIXES:
                 java += 1
             else:
                 resources += 1
@@ -224,7 +236,9 @@ class Ctx:
     sources_cache: Path
     runner: Callable
     resolver: Callable
+    batch_runner: Callable | None = None
     cpu_budget: int | None = None  # visible cores per engine JVM
+    cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events
 
@@ -258,8 +272,9 @@ def expected_class_stems(source: Path) -> set[str]:
 
 def produced_stems(dest: Path) -> set[str]:
     return {
-        normalize_java_rel(p.relative_to(dest).as_posix())[: -len(".java")]
-        for p in dest.rglob("*.java")
+        normalize_java_rel(p.relative_to(dest).as_posix())[: -len(p.suffix)]
+        for p in dest.rglob("*")
+        if p.is_file() and p.suffix in SOURCE_SUFFIXES
     }
 
 
@@ -287,18 +302,58 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
     return out if count else None
 
 
+def _stream_kw_for(ctx: Ctx, name: str, rel: str) -> dict:
+    # Only pass the kwarg when streaming, so custom runners without it keep working.
+    if ctx.on_stderr is None:
+        return {}
+    sink = ctx.on_stderr
+    return {"on_stderr_line": lambda line: sink(f"{name} {rel}: {line}")}
+
+
+def _retry_missing_classes(
+    artifact: Artifact,
+    source: Path,
+    expected: set[str],
+    produced: set[str],
+    ctx: Ctx,
+    report: ArtifactReport,
+    chain: list[str],
+) -> None:
+    missing = expected - produced
+    for name in chain:
+        if engines.PROCESSES.closed:
+            break
+        if not missing:
+            break
+        retry_tree = _extract_failed_classes(source, missing, ctx)
+        if retry_tree is None:
+            break
+        dest = _tmp_dir(ctx)
+        if ctx.on_event is not None:
+            ctx.on_event("decompile", artifact.rel, name)
+        res = ctx.runner(
+            ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
+            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+            **_stream_kw_for(ctx, name, artifact.rel),
+        )
+        report.attempts.append(
+            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
+        )
+        if res.java_files > 0:
+            java, _, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            report.java_files += java
+            report.collisions += collisions
+            produced |= produced_stems(dest)
+            missing = expected - produced
+    report.missing_classes = len(missing)
+
+
 def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport) -> None:
     source = target if target.is_dir() else artifact.path
     expected = expected_class_stems(source)
     report.classes = len(expected)
     produced: set[str] = set()
-
-    def _stream_kw(name: str) -> dict:
-        # Only pass the kwarg when streaming, so custom runners without it keep working.
-        if ctx.on_stderr is None:
-            return {}
-        sink, rel = ctx.on_stderr, artifact.rel
-        return {"on_stderr_line": lambda line: sink(f"{name} {rel}: {line}")}
 
     used_index: int | None = None
     for i, name in enumerate(ctx.chain):
@@ -310,7 +365,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-            **_stream_kw(name),
+            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+            **_stream_kw_for(ctx, name, artifact.rel),
         )
         report.attempts.append(
             EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
@@ -330,33 +386,9 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         report.failure = "all engines failed"
         return
 
-    missing = expected - produced
-    for name in ctx.chain[used_index + 1 :]:
-        if engines.PROCESSES.closed:
-            break
-        if not missing:
-            break
-        retry_tree = _extract_failed_classes(source, missing, ctx)
-        if retry_tree is None:
-            break
-        dest = _tmp_dir(ctx)
-        if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, name)
-        res = ctx.runner(
-            ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
-            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-            **_stream_kw(name),
-        )
-        report.attempts.append(
-            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
-        )
-        if res.java_files > 0:
-            java, _, collisions = ctx.writer.add_tree(dest, artifact.rel)
-            report.java_files += java
-            report.collisions += collisions
-            produced |= produced_stems(dest)
-            missing = expected - produced
-    report.missing_classes = len(missing)
+    _retry_missing_classes(
+        artifact, source, expected, produced, ctx, report, ctx.chain[used_index + 1 :]
+    )
     report.outcome = "ok"
 
 
@@ -379,7 +411,8 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     for name in names:
         p = extract_dir / name
         if p.is_file():
-            nested.append(Artifact(p, f"{artifact.rel}!/{name}", classify_zip(p)))
+            kind, classes = classify_counted(p)
+            nested.append(Artifact(p, f"{artifact.rel}!/{name}", kind, classes))
     return nested
 
 
@@ -475,6 +508,101 @@ def _decompile_stage(
     return report
 
 
+def _extract_member_resources(jar: Path, tree: Path) -> None:
+    """A batched member's resources come from its original jar (engines' merged
+    output can't attribute them)."""
+    try:
+        with zipfile.ZipFile(jar) as zf:
+            names = [
+                n for n in zf.namelist()
+                if not n.endswith("/")
+                and not n.endswith(".class")
+                and PurePosixPath(n).suffix.lower() not in ARCHIVE_EXTS
+            ]
+    except (zipfile.BadZipFile, OSError):
+        return
+    if names:
+        safe_extract_zip(jar, tree, members=names)
+
+
+def _decompile_batch(
+    members: list[tuple[Artifact, Path, ArtifactReport, set[str]]], ctx: Ctx
+) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
+    """Stage 2 for a batch: one primary-engine JVM over several small jars.
+
+    Returns (completed reports, members to requeue for solo processing).
+    Members' expected-stem sets are disjoint (enforced at formation), so every
+    produced source file belongs to exactly one member.
+    """
+    if engines.PROCESSES.closed:
+        return [], [(a, t, r) for a, t, r, _ in members]
+    name = ctx.chain[0]
+    dest = _tmp_dir(ctx)
+    if ctx.on_event is not None:
+        for a, _, _, _ in members:
+            ctx.on_event("decompile", a.rel, name)
+    try:
+        res = ctx.batch_runner(
+            ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _ in members], dest,
+            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+        )
+    except Exception:
+        res = engines.EngineResult(name, -1, False, 0, traceback.format_exc()[-2000:])
+
+    trees: dict[int, Path] = {}
+    produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
+    try:
+        owners: dict[str, int] = {}
+        for i, (_, _, _, stems) in enumerate(members):
+            for s in stems:
+                owners[s] = i
+        if res.returncode == 0 and not res.timed_out:
+            for p in sorted(dest.rglob("*")):
+                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                    continue
+                rel = p.relative_to(dest).as_posix()
+                stem = normalize_java_rel(rel)[: -len(p.suffix)]
+                i = owners.get(stem)
+                if i is None:
+                    i = owners.get(stem.split("$", 1)[0])  # inner classes ride with their outer
+                if i is None:
+                    continue  # engine banner/stray file; real resources come from the member jar
+                tree = trees.setdefault(i, _tmp_dir(ctx))
+                target = tree / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(p, target)
+                produced[i].add(stem)
+    except Exception:
+        trees = {}  # split unusable; every member requeues and redoes solo (self-healing)
+
+    done: list[ArtifactReport] = []
+    requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
+    for i, (a, target, report, stems) in enumerate(members):
+        report.attempts.append(
+            EngineAttempt(name, "batch", res.returncode, res.timed_out,
+                          len(produced[i]), res.stderr_tail)
+        )
+        if i not in trees:
+            requeue.append((a, target, report))
+            continue
+        try:
+            _extract_member_resources(a.path, trees[i])
+            java, resources, collisions = ctx.writer.add_tree(trees[i], a.rel)
+            report.java_files += java
+            report.resources_skipped += resources
+            report.collisions += collisions
+            report.method = name
+            report.classes = len(stems)
+            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:])
+            report.outcome = "ok"
+        except Exception:
+            report.outcome = "failed"
+            report.failure = traceback.format_exc()[-2000:]
+        done.append(report)
+    return done, requeue
+
+
 def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
     """Run both stages synchronously; the parallel runner splits them across pools."""
     report, nested, target = _fetch_stage(artifact, ctx)
@@ -532,6 +660,29 @@ def _preflight_engines(
     return chain, jars
 
 
+def _form_batch(ready_small: deque) -> list:
+    """Greedy prefix of ready smalls with disjoint stems, bounded by the caps.
+
+    Skipped members (stem overlap / class cap) stay queued in order for the
+    next batch. Always takes at least one member, so the queue drains.
+    """
+    batch: list = []
+    taken: set[str] = set()
+    total_classes = 0
+    kept: list = []
+    while ready_small and len(batch) < _BATCH_MAX_JARS:
+        item = ready_small.popleft()
+        a, _, _, stems = item
+        if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (stems & taken)):
+            kept.append(item)
+            continue
+        batch.append(item)
+        taken |= stems
+        total_classes += a.classes
+    ready_small.extendleft(reversed(kept))
+    return batch
+
+
 def run(
     settings: Settings,
     *,
@@ -542,6 +693,7 @@ def run(
     on_event: Callable[[str, str, str], None] | None = None,
     runner: Callable | None = None,
     resolver: Callable | None = None,
+    batch_runner: Callable | None = None,
 ) -> RunReport:
     start = time.monotonic()
     engines.PROCESSES.reset()
@@ -560,7 +712,14 @@ def run(
             "scan", "",
             f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
         )
-    runner = runner or engines.run_engine
+    cds_dir: Path | None = None
+    if runner is None:
+        runner = engines.run_engine
+        batch_runner = batch_runner or engines.run_engine_batch
+        if java_major >= engines.CDS_MIN_JAVA:
+            cds_dir = engines.cache_root() / "engines"
+    # An injected runner without an injected batch_runner disables batching:
+    # custom runners are per-target and must see every artifact individually.
     net = maven.NetState(warn=on_warn)
     resolver = resolver or partial(maven.resolve_sources, net=net)
 
@@ -599,7 +758,9 @@ def run(
             sources_cache=engines.cache_root() / "sources",
             runner=runner,
             resolver=resolver,
+            batch_runner=batch_runner,
             cpu_budget=cpu_budget,
+            cds_dir=cds_dir,
             on_stderr=on_stderr,
             on_event=on_event,
         )
@@ -608,40 +769,89 @@ def run(
                 ThreadPoolExecutor(max_workers=fetch_jobs) as fetch_pool,
                 ThreadPoolExecutor(max_workers=jobs) as dec_pool,
             ):
-                todo = deque(artifacts)
+                seq = count()
+                todo: list[tuple[int, int, Artifact]] = []
+                for a in artifacts:
+                    heappush(todo, (-a.classes, next(seq), a))
                 fetch_futs: dict = {}  # Future -> Artifact, kept for the stage-2 hand-off
-                dec_futs: set = set()
+                dec_futs: dict = {}  # Future -> (kind, weight)
+                ready: list[tuple] = []  # (-classes, seq, artifact, target, report)
+                ready_small: deque = deque()  # batch-eligible: (artifact, target, report, stems)
+                dec_weight = 0
                 try:
-                    while todo or fetch_futs or dec_futs:
+                    while todo or fetch_futs or dec_futs or ready or ready_small:
                         # Admission gate: every fetch future is a potential decompile,
-                        # so capping in-flight futures bounds the stage-2 backlog and
-                        # stalls downloads when decompilation falls behind.
+                        # so capping in-flight work (including the held ready buffer)
+                        # bounds the stage-2 backlog and stalls downloads when
+                        # decompilation falls behind.
                         while (
                             todo
                             and len(fetch_futs) < fetch_jobs
-                            and len(fetch_futs) + len(dec_futs) < jobs + queue_bound
+                            and len(fetch_futs) + len(dec_futs) + len(ready) + len(ready_small)
+                            < jobs + queue_bound
                         ):
-                            a = todo.popleft()
+                            _, _, a = heappop(todo)
                             fetch_futs[fetch_pool.submit(_fetch_stage, a, ctx)] = a
-                        done, _ = wait(fetch_futs.keys() | dec_futs, return_when=FIRST_COMPLETED)
+                        # Weight-gated drain: whales take 2 slots so they keep
+                        # headroom; an idle pool admits anything (no deadlock at
+                        # jobs=1). Largest first.
+                        while ready and (
+                            dec_weight == 0 or dec_weight + _decompile_weight(ready[0][2]) <= jobs
+                        ):
+                            _, _, a, target, report = heappop(ready)
+                            w = _decompile_weight(a)
+                            dec_weight += w
+                            dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", w)
+                        # ready drains first: a waiting whale gets first claim on freed weight
+                        while ready_small and (dec_weight == 0 or dec_weight + 1 <= jobs):
+                            batch = _form_batch(ready_small)
+                            dec_weight += 1
+                            if len(batch) == 1:
+                                a, target, report, _ = batch[0]
+                                dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", 1)
+                            else:
+                                dec_futs[dec_pool.submit(_decompile_batch, batch, ctx)] = ("batch", 1)
+                        if not fetch_futs and not dec_futs:
+                            continue  # unreachable in practice: drain above always progresses
+                        done, _ = wait(
+                            fetch_futs.keys() | dec_futs.keys(), return_when=FIRST_COMPLETED
+                        )
                         for fut in done:
                             if fut in dec_futs:
-                                dec_futs.discard(fut)
+                                kind, w = dec_futs.pop(fut)
+                                dec_weight -= w
+                                if kind == "batch":
+                                    done_reports, requeue = fut.result()
+                                    for a2, t2, r2 in requeue:
+                                        heappush(ready, (-a2.classes, next(seq), a2, t2, r2))
+                                    for r2 in done_reports:
+                                        reports.append(r2)
+                                        if on_done is not None:
+                                            on_done(r2)
+                                    continue
                                 report = fut.result()
                             else:
                                 a = fetch_futs.pop(fut)
                                 report, nested, target = fut.result()
-                                if nested:
-                                    todo.extend(nested)
+                                for n in nested:
+                                    heappush(todo, (-n.classes, next(seq), n))
                                 delta = len(nested) - nested_counts.pop(a.rel, 0)
                                 if delta and on_found is not None:
                                     on_found(delta)
                                 if target is not None:
                                     if on_event is not None:
                                         on_event("queued", a.rel, "")
-                                    dec_futs.add(
-                                        dec_pool.submit(_decompile_stage, a, target, ctx, report)
-                                    )
+                                    if (
+                                        batch_runner is not None
+                                        and not target.is_dir()
+                                        and a.classes < _SMALL_CLASSES
+                                        and chain[0] in engines.BATCH_ENGINES
+                                    ):
+                                        ready_small.append(
+                                            (a, target, report, expected_class_stems(target))
+                                        )
+                                    else:
+                                        heappush(ready, (-a.classes, next(seq), a, target, report))
                                     continue
                             reports.append(report)
                             if on_done is not None:

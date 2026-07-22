@@ -21,6 +21,7 @@ import platformdirs
 from .scanner import ARCHIVE_EXTS, safe_extract_zip
 
 JAVA_MIN = 11
+CDS_MIN_JAVA = 19  # -XX:+AutoCreateSharedArchive
 
 
 class EngineError(Exception):
@@ -84,6 +85,8 @@ ENGINES: dict[str, EngineSpec] = {
 }
 
 ENGINE_ORDER = ["vineflower", "cfr", "procyon", "fernflower", "jd"]
+
+SOURCE_SUFFIXES = (".java", ".kt")  # engine output that counts as decompiled source
 
 
 def active_specs(overrides: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, EngineSpec]:
@@ -187,6 +190,9 @@ def find_java() -> tuple[str, int] | None:
 NATIVE_DIR_ENGINES = {"vineflower", "fernflower", "jd"}
 
 
+BATCH_ENGINES = {"vineflower", "fernflower", "jd"}  # verified multi-source CLIs
+
+
 @dataclass
 class EngineResult:
     engine: str
@@ -273,11 +279,17 @@ def build_command(
     dest: Path,
     java: str = "java",
     cpu_budget: int | None = None,
+    cds_dir: Path | None = None,
 ) -> list[str]:
     t, d, jar = str(target), str(dest), str(jar_path)
     # ActiveProcessorCount caps the JVM's visible cores, which sizes the
     # engine's own thread pools (e.g. vineflower --thread-count), GC, and JIT.
     prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
+    if cds_dir is not None:
+        prefix += [
+            "-XX:+AutoCreateSharedArchive",
+            f"-XX:SharedArchiveFile={cds_dir / f'{spec.name}-{spec.version}.jsa'}",
+        ]
     if spec.name == "vineflower":
         return [*prefix, "-jar", jar, t, d]
     if spec.name == "cfr":
@@ -293,6 +305,31 @@ def build_command(
     raise EngineError(f"unknown engine {spec.name!r}")
 
 
+def build_batch_command(
+    spec: EngineSpec,
+    jar_path: Path,
+    targets: list[Path],
+    dest: Path,
+    java: str = "java",
+    cpu_budget: int | None = None,
+    cds_dir: Path | None = None,
+) -> list[str]:
+    if spec.name not in BATCH_ENGINES:
+        raise EngineError(f"engine {spec.name!r} cannot batch")
+    prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
+    if cds_dir is not None:
+        prefix += [
+            "-XX:+AutoCreateSharedArchive",
+            f"-XX:SharedArchiveFile={cds_dir / f'{spec.name}-{spec.version}.jsa'}",
+        ]
+    t = [str(p) for p in targets]
+    if spec.name == "fernflower":
+        return [*prefix, "-cp", str(jar_path), str(spec.main_class), *t, str(dest)]
+    if spec.name == "jd":
+        return [*prefix, "-jar", str(jar_path), *t, "-od", str(dest)]
+    return [*prefix, "-jar", str(jar_path), *t, str(dest)]  # vineflower
+
+
 def run_engine(
     spec: EngineSpec,
     jar_path: Path,
@@ -301,15 +338,18 @@ def run_engine(
     timeout: float,
     java: str = "java",
     cpu_budget: int | None = None,
+    cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> EngineResult:
     dest.mkdir(parents=True, exist_ok=True)
     if target.is_dir() and spec.name not in NATIVE_DIR_ENGINES:
-        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget, on_stderr_line)
+        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line)
     else:
-        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, on_stderr_line)
+        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line)
     _unpack_emitted_archives(dest)
-    result.java_files = sum(1 for _ in dest.rglob("*.java"))
+    result.java_files = sum(
+        1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES
+    )
     return result
 
 
@@ -321,11 +361,26 @@ def _run_once(
     timeout: float,
     java: str,
     cpu_budget: int | None = None,
+    cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> EngineResult:
     if PROCESSES.closed:
         return EngineResult(spec.name, -1, False, 0, "interrupted")
-    cmd = build_command(spec, jar_path, target, dest, java=java, cpu_budget=cpu_budget)
+    cmd = build_command(
+        spec, jar_path, target, dest, java=java, cpu_budget=cpu_budget,
+        **({"cds_dir": cds_dir} if cds_dir is not None else {}),
+    )
+    return _exec_command(spec, cmd, timeout, on_stderr_line)
+
+
+def _exec_command(
+    spec: EngineSpec,
+    cmd: list[str],
+    timeout: float,
+    on_stderr_line: Callable[[str], None] | None,
+) -> EngineResult:
+    if PROCESSES.closed:
+        return EngineResult(spec.name, -1, False, 0, "interrupted")
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
         **_SPAWN_KWARGS,
@@ -363,6 +418,30 @@ def _run_once(
     return EngineResult(spec.name, proc.returncode or 0, timed_out, 0, tail)
 
 
+def run_engine_batch(
+    spec: EngineSpec,
+    jar_path: Path,
+    targets: list[Path],
+    dest: Path,
+    timeout: float,
+    java: str = "java",
+    cpu_budget: int | None = None,
+    cds_dir: Path | None = None,
+) -> EngineResult:
+    """One JVM, many source archives, merged output tree (BATCH_ENGINES only)."""
+    dest.mkdir(parents=True, exist_ok=True)
+    cmd = build_batch_command(
+        spec, jar_path, targets, dest, java=java, cpu_budget=cpu_budget,
+        **({"cds_dir": cds_dir} if cds_dir is not None else {}),
+    )
+    result = _exec_command(spec, cmd, timeout, None)
+    _unpack_emitted_archives(dest)
+    result.java_files = sum(
+        1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES
+    )
+    return result
+
+
 def _run_per_class(
     spec: EngineSpec,
     jar_path: Path,
@@ -371,6 +450,7 @@ def _run_per_class(
     timeout: float,
     java: str,
     cpu_budget: int | None = None,
+    cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> EngineResult:
     returncode = 0
@@ -379,7 +459,7 @@ def _run_per_class(
     for f in sorted(root.rglob("*.class")):
         if "$" in f.name:
             continue  # inner classes ride along with their outer class
-        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, on_stderr_line)
+        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line)
         returncode = returncode or r.returncode
         timed_out = timed_out or r.timed_out
         if r.stderr_tail:

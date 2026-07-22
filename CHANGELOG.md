@@ -20,6 +20,16 @@ All notable changes to decaf are documented here.
 - Maven sources-cache hits are now visible: `, cached` on the artifact
   status line, `maven N (K cached)` in the summary, and an additive
   `sources_cached` field in decaf-report.json (#50).
+- Faster decompilation (#53): the biggest archives decompile first and keep
+  scheduler headroom while they run; small jars share one engine JVM
+  (vineflower/fernflower/jd); engine JVMs start from a class-data-sharing
+  archive on Java 19+.
+
+### Changed
+
+- Kotlin decompiler output (`.kt`) now counts as decompiled source: no more
+  fallback re-decompile of Kotlin jars, `.kt` files reach the output tree in
+  both mirror and merge modes, and `java_files` counts include them (#53).
 
 ## [1.4.1] - 2026-07-21
 

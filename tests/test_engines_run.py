@@ -300,3 +300,86 @@ def test_register_on_closed_registry_kills(monkeypatch):
         assert proc.returncode != 0
     finally:
         PROCESSES.reset()
+
+
+def test_run_engine_counts_kotlin_sources(tmp_path: Path, monkeypatch):
+    script = (
+        "import pathlib\n"
+        "d = pathlib.Path(r'{dest}')\n"
+        "(d / 'A.kt').write_text('fun a() {{}}')\n"
+        "(d / 'B.java').write_text('class B {{}}')\n"
+        "(d / 'notes.txt').write_text('not source')\n"
+    )
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    assert res.java_files == 2
+
+
+def test_build_batch_command_multi_source():
+    from decaf.engines import build_batch_command
+
+    a, b = Path("/in/a.jar"), Path("/in/b.jar")
+    assert build_batch_command(ENGINES["vineflower"], JAR, [a, b], OUT, java=J) == [
+        J, "-jar", str(JAR), str(a), str(b), str(OUT),
+    ]
+    ff = ENGINES["fernflower"]
+    assert build_batch_command(ff, JAR, [a, b], OUT, java=J, cpu_budget=3) == [
+        J, "-XX:ActiveProcessorCount=3", "-cp", str(JAR), ff.main_class, str(a), str(b), str(OUT),
+    ]
+    assert build_batch_command(ENGINES["jd"], JAR, [a, b], OUT, java=J) == [
+        J, "-jar", str(JAR), str(a), str(b), "-od", str(OUT),
+    ]
+
+
+def test_build_batch_command_rejects_single_input_engines():
+    from decaf.engines import EngineError, build_batch_command
+
+    with pytest.raises(EngineError, match="cannot batch"):
+        build_batch_command(ENGINES["cfr"], JAR, [Path("/in/a.jar")], OUT, java=J)
+
+
+def test_run_engine_batch_counts_merged_sources(tmp_path: Path, monkeypatch):
+    from decaf.engines import run_engine_batch
+
+    script = (
+        "import pathlib\n"
+        "d = pathlib.Path(r'{dest}')\n"
+        "(d / 'com').mkdir(parents=True, exist_ok=True)\n"
+        "(d / 'com' / 'A.java').write_text('class A {{}}')\n"
+        "(d / 'com' / 'B.kt').write_text('fun b() {{}}')\n"
+    )
+
+    def fake_batch_build(spec, jar_path, targets, dest, java="java", cpu_budget=None):
+        return [sys.executable, "-c", script.format(dest=str(dest))]
+
+    monkeypatch.setattr(engines, "build_batch_command", fake_batch_build)
+    res = run_engine_batch(
+        ENGINES["vineflower"], JAR, [tmp_path / "a.jar", tmp_path / "b.jar"],
+        tmp_path / "out", timeout=30,
+    )
+    assert res.returncode == 0 and res.java_files == 2
+
+
+def test_build_command_cds_flags():
+    cds = Path("/cache/engines")
+    cmd = build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J, cds_dir=cds)
+    ver = ENGINES["vineflower"].version
+    assert cmd == [
+        J,
+        "-XX:+AutoCreateSharedArchive",
+        f"-XX:SharedArchiveFile={cds / f'vineflower-{ver}.jsa'}",
+        "-jar", str(JAR), str(APP), str(OUT),
+    ]
+    assert build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J) == [
+        J, "-jar", str(JAR), str(APP), str(OUT),
+    ]  # unchanged without cds_dir
+
+
+def test_build_command_cds_follows_cpu_budget():
+    cds = Path("/cache/engines")
+    cmd = build_command(ENGINES["cfr"], JAR, APP, OUT, java=J, cpu_budget=3, cds_dir=cds)
+    assert cmd[:4] == [
+        J, "-XX:ActiveProcessorCount=3",
+        "-XX:+AutoCreateSharedArchive",
+        f"-XX:SharedArchiveFile={cds / ('cfr-' + ENGINES['cfr'].version + '.jsa')}",
+    ]

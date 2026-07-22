@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -820,3 +821,336 @@ def test_preflight_omits_hook_without_on_event(monkeypatch, make_jar, tmp_path: 
         runner=perfect_engine,
     )
     assert report.totals["ok"] == 1
+
+
+def test_fetch_admission_pops_largest_first(fake_env, make_jar, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from decaf import pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("a-small.jar", {"com/s/A.class": b"x"}, base=input_dir)
+    make_jar("m-big.jar", {f"com/b/C{i}.class": b"x" for i in range(40)}, base=input_dir)
+    make_jar("z-mid.jar", {f"com/m/M{i}.class": b"x" for i in range(10)}, base=input_dir)
+    order: list[str] = []
+    real_submit = ThreadPoolExecutor.submit
+
+    def spy_submit(self, fn, *args, **kwargs):
+        if fn is pipeline._fetch_stage:
+            order.append(args[0].rel)
+        return real_submit(self, fn, *args, **kwargs)
+
+    monkeypatch.setattr(ThreadPoolExecutor, "submit", spy_submit)
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+    )
+    # scan order is alphabetical (a-small, m-big, z-mid); size order must win
+    assert order == ["m-big.jar", "z-mid.jar", "a-small.jar"]
+
+
+def test_ready_buffer_drains_largest_first(fake_env, make_jar, tmp_path):
+    """Gate every engine start until all three artifacts are queued; with
+    jobs=1 the buffered pair must then start in size order."""
+    input_dir = tmp_path / "in"
+    make_jar("a-small.jar", {"com/s/A.class": b"x"}, base=input_dir)
+    make_jar("m-big.jar", {f"com/b/C{i}.class": b"x" for i in range(40)}, base=input_dir)
+    make_jar("z-mid.jar", {f"com/m/M{i}.class": b"x" for i in range(10)}, base=input_dir)
+    sizes = {"m-big.jar": 40, "z-mid.jar": 10, "a-small.jar": 1}
+    all_queued = threading.Event()
+    queued: list[str] = []
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued.append(subject)
+            if len(queued) == 3:
+                all_queued.set()
+
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def gated_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        with lock:
+            started.append(Path(target).name)
+        all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
+        runner=gated_engine,
+        on_event=on_event,
+    )
+    # started[0] is whichever fetch finished first; the buffered rest must be size-ordered
+    assert len(started) == 3
+    assert [sizes[n] for n in started[1:]] == sorted((sizes[n] for n in started[1:]), reverse=True)
+
+
+def test_whale_reserves_headroom(fake_env, make_jar, tmp_path):
+    """A whale weighs 2 slots: with jobs=4, at most weight 4 runs concurrently,
+    so the 4th artifact must wait for a completion."""
+    input_dir = tmp_path / "in"
+    make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    for i in range(3):
+        make_jar(f"s{i}.jar", {f"com/s{i}/A.class": b"x"}, base=input_dir)
+    started: list[str] = []
+    lock = threading.Lock()
+    release = threading.Event()
+
+    def blocking_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        with lock:
+            started.append(Path(target).name)
+        release.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    result: dict = {}
+
+    def drive():
+        result["report"] = run(
+            Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=4, cpus=8),
+            runner=blocking_engine,
+        )
+
+    t = threading.Thread(target=drive)
+    t.start()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        with lock:
+            if len(started) == 3:
+                break
+        time.sleep(0.01)
+    time.sleep(0.3)  # generous window for an over-admitted 4th start
+    with lock:
+        assert len(started) == 3  # whale(2) + two smalls(1+1) fill jobs=4
+    release.set()
+    t.join(timeout=30)
+    assert result["report"].totals["ok"] == 4
+
+
+def test_whale_progresses_with_single_job(fake_env, make_jar, tmp_path):
+    """weight 2 > jobs=1 must not deadlock: an idle pool admits anything."""
+    input_dir = tmp_path / "in"
+    make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
+        runner=perfect_engine,
+    )
+    assert report.totals["ok"] == 1
+
+
+def kotlin_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+    """Fake engine emitting .kt per top-level class (a vineflower Kotlin-plugin run)."""
+    dest = Path(dest)
+    with zipfile.ZipFile(Path(target)) as zf:
+        entries = [n for n in zf.namelist() if n.endswith(".class")]
+    n = 0
+    for entry in entries:
+        if "$" in entry.rsplit("/", 1)[-1]:
+            continue
+        out = dest / (entry[: -len(".class")] + ".kt")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("fun x() {}\n")
+        n += 1
+    return EngineResult(spec.name, 0, False, n, "")
+
+
+def test_run_accepts_kotlin_output_without_fallback(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("k.jar", {"okio/Buffer.class": b"k", "okio/Okio.class": b"k"}, base=input_dir)
+    engines_used: list[str] = []
+
+    def spy(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        engines_used.append(spec.name)
+        return kotlin_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False),
+        runner=spy,
+    )
+    r = report.artifacts[0]
+    assert engines_used == ["vineflower"]  # success on first engine, no fallback
+    assert r.outcome == "ok" and r.method == "vineflower"
+    assert r.missing_classes == 0
+    assert r.java_files == 2
+    assert (tmp_path / "out/src/okio/Buffer.kt").is_file()
+    assert report.totals["java_files"] == 2
+
+
+def merged_batch_engine(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+    """Batch fake: one .java per top-level class of every target, merged dest."""
+    dest = Path(dest)
+    n = 0
+    for t in targets:
+        with zipfile.ZipFile(Path(t)) as zf:
+            for entry in zf.namelist():
+                if not entry.endswith(".class") or "$" in entry.rsplit("/", 1)[-1]:
+                    continue
+                out = dest / (entry[: -len(".class")] + ".java")
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text("class X {}\n")
+                n += 1
+    return EngineResult(spec.name, 0, False, n, "")
+
+
+def test_run_batches_ready_smalls_into_one_jvm(fake_env, make_jar, tmp_path):
+    """The smalls are nested INSIDE the big jar, so the big jar's hand-off is
+    processed in the same scheduler iteration that discovers them: with jobs=1
+    the big jar deterministically occupies the worker first, the smalls pile
+    into the batch buffer, and on release they form one batch. Two smalls keep
+    the in-flight admission cap (jobs + 2*jobs = 3) from stalling the gate."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    batches: list[list[str]] = []
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+        runner=gated_solo,
+        batch_runner=recording_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3
+    assert batches == [["s0.jar", "s1.jar"]]
+    rels = {r.rel: r for r in report.artifacts}
+    for i in range(2):
+        assert rels[f"big.jar!/lib/s{i}.jar"].attempts[0].level == "batch"
+        assert rels[f"big.jar!/lib/s{i}.jar"].method == "vineflower"
+    assert rels["big.jar"].attempts[0].level == "archive"
+    assert (tmp_path / "out/src/com/s0/A.java").is_file()
+
+
+def test_run_overlapping_stems_never_share_a_batch(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("x1.jar", {"com/dup/Same.class": b"a"}, base=input_dir)
+    make_jar("x2.jar", {"com/dup/Same.class": b"b"}, base=input_dir)
+    solo: list[str] = []
+    batches: list[list[str]] = []
+
+    def solo_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        solo.append(Path(target).name)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append([Path(t).name for t in targets])
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
+        runner=solo_engine,
+        batch_runner=recording_batch,
+    )
+    assert report.totals["ok"] == 2
+    assert batches == []  # overlap → both went solo (a 1-member batch submits solo)
+    assert sorted(solo) == ["x1.jar", "x2.jar"]
+
+
+def test_run_batch_failure_requeues_members_solo(fake_env, make_jar, tmp_path):
+    """Same nested-smalls structure as the formation test, but the batch engine
+    fails — every member must come back through the solo chain and succeed."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    solo: list[str] = []
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        solo.append(Path(target).name)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def broken_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        return EngineResult(spec.name, 1, False, 0, "boom")
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
+        runner=gated_solo,
+        batch_runner=broken_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3 and report.totals["failed"] == 0
+    rels = {r.rel: r for r in report.artifacts}
+    for i in range(2):
+        levels = [at.level for at in rels[f"big.jar!/lib/s{i}.jar"].attempts]
+        assert levels[0] == "batch" and "archive" in levels  # failed batch, then solo
+    assert sorted(n for n in solo if n != "big.jar") == ["s0.jar", "s1.jar"]
+
+
+def test_run_passes_cds_dir_to_default_runner(monkeypatch, make_jar, tmp_path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
+    )
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    seen = {}
+
+    def spy(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None):
+        seen["cds"] = cds_dir
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    monkeypatch.setattr(engines, "run_engine", spy)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    assert seen["cds"] == tmp_path / "cache" / "engines"
+
+
+def test_run_no_cds_below_java_19(monkeypatch, make_jar, tmp_path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 17))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
+    )
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    seen = {"cds": "unset"}
+
+    def spy(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None):
+        seen["cds"] = cds_dir
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    monkeypatch.setattr(engines, "run_engine", spy)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    assert seen["cds"] is None
