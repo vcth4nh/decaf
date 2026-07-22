@@ -78,7 +78,7 @@ def test_run_merged_end_to_end(fake_env, make_jar, tmp_path: Path):
     assert (out / "src/com/d/D.java").is_file()      # nested jar reached
     on_disk = json.loads((out / "decaf-report.json").read_text())
     assert on_disk["totals"] == report.totals
-    assert on_disk["settings"]["chain"] == ["vineflower", "cfr", "procyon", "fernflower", "jd"]
+    assert on_disk["settings"]["chain"] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
 
 
 def test_run_mirror_is_default(fake_env, make_jar, tmp_path: Path):

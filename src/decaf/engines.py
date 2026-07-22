@@ -55,13 +55,6 @@ ENGINES: dict[str, EngineSpec] = {
         sha256="f686e8f3ded377d7bc87d216a90e9e9512df4156e75b06c655a16648ae8765b2",
         min_java=11,
     ),
-    "procyon": EngineSpec(
-        name="procyon",
-        version="0.6.0",
-        url="https://github.com/mstrobel/procyon/releases/download/v0.6.0/procyon-decompiler-0.6.0.jar",
-        sha256="821da96012fc69244fa1ea298c90455ee4e021434bc796d3b9546ab24601b779",
-        min_java=11,
-    ),
     "fernflower": EngineSpec(
         name="fernflower",
         version="253.33813.25",
@@ -72,6 +65,13 @@ ENGINES: dict[str, EngineSpec] = {
         sha256="c87d45b0ead73cc058bb176fd8a396a7fa3e8445daa3a12e866df5d2ad6fe2a5",
         min_java=21,
         main_class="org.jetbrains.java.decompiler.main.decompiler.ConsoleDecompiler",
+    ),
+    "procyon": EngineSpec(
+        name="procyon",
+        version="0.6.0",
+        url="https://github.com/mstrobel/procyon/releases/download/v0.6.0/procyon-decompiler-0.6.0.jar",
+        sha256="821da96012fc69244fa1ea298c90455ee4e021434bc796d3b9546ab24601b779",
+        min_java=11,
     ),
     "jd": EngineSpec(
         name="jd",
@@ -84,7 +84,7 @@ ENGINES: dict[str, EngineSpec] = {
     ),
 }
 
-ENGINE_ORDER = ["vineflower", "cfr", "procyon", "fernflower", "jd"]
+ENGINE_ORDER = ["vineflower", "cfr", "fernflower", "procyon", "jd"]
 
 SOURCE_SUFFIXES = (".java", ".kt")  # engine output that counts as decompiled source
 

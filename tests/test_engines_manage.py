@@ -132,7 +132,7 @@ def test_engines_fetch_reports_and_exit_code(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
     plain = ANSI.sub("", result.output)
     assert "downloaded" in plain and "cfr" in plain and "boom" in plain
-    assert fetched == ["vineflower", "procyon", "fernflower", "jd"]
+    assert fetched == ["vineflower", "fernflower", "procyon", "jd"]
 
     fetched.clear()
     result = runner.invoke(app, ["engines", "fetch", "vineflower"])
