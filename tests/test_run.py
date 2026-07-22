@@ -973,3 +973,146 @@ def test_run_accepts_kotlin_output_without_fallback(fake_env, make_jar, tmp_path
     assert r.java_files == 2
     assert (tmp_path / "out/src/okio/Buffer.kt").is_file()
     assert report.totals["java_files"] == 2
+
+
+def merged_batch_engine(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+    """Batch fake: one .java per top-level class of every target, merged dest."""
+    dest = Path(dest)
+    n = 0
+    for t in targets:
+        with zipfile.ZipFile(Path(t)) as zf:
+            for entry in zf.namelist():
+                if not entry.endswith(".class") or "$" in entry.rsplit("/", 1)[-1]:
+                    continue
+                out = dest / (entry[: -len(".class")] + ".java")
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text("class X {}\n")
+                n += 1
+    return EngineResult(spec.name, 0, False, n, "")
+
+
+def test_run_batches_ready_smalls_into_one_jvm(fake_env, make_jar, tmp_path):
+    """The smalls are nested INSIDE the big jar, so the big jar's hand-off is
+    processed in the same scheduler iteration that discovers them: with jobs=1
+    the big jar deterministically occupies the worker first, the smalls pile
+    into the batch buffer, and on release they form one batch. Two smalls keep
+    the in-flight admission cap (jobs + 2*jobs = 3) from stalling the gate."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    batches: list[list[str]] = []
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+        runner=gated_solo,
+        batch_runner=recording_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3
+    assert batches == [["s0.jar", "s1.jar"]]
+    rels = {r.rel: r for r in report.artifacts}
+    for i in range(2):
+        assert rels[f"big.jar!/lib/s{i}.jar"].attempts[0].level == "batch"
+        assert rels[f"big.jar!/lib/s{i}.jar"].method == "vineflower"
+    assert rels["big.jar"].attempts[0].level == "archive"
+    assert (tmp_path / "out/src/com/s0/A.java").is_file()
+
+
+def test_run_overlapping_stems_never_share_a_batch(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("x1.jar", {"com/dup/Same.class": b"a"}, base=input_dir)
+    make_jar("x2.jar", {"com/dup/Same.class": b"b"}, base=input_dir)
+    solo: list[str] = []
+    batches: list[list[str]] = []
+
+    def solo_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        solo.append(Path(target).name)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append([Path(t).name for t in targets])
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
+        runner=solo_engine,
+        batch_runner=recording_batch,
+    )
+    assert report.totals["ok"] == 2
+    assert batches == []  # overlap → both went solo (a 1-member batch submits solo)
+    assert sorted(solo) == ["x1.jar", "x2.jar"]
+
+
+def test_run_batch_failure_requeues_members_solo(fake_env, make_jar, tmp_path):
+    """Same nested-smalls structure as the formation test, but the batch engine
+    fails — every member must come back through the solo chain and succeed."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    solo: list[str] = []
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        solo.append(Path(target).name)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def broken_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        return EngineResult(spec.name, 1, False, 0, "boom")
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1),
+        runner=gated_solo,
+        batch_runner=broken_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3 and report.totals["failed"] == 0
+    rels = {r.rel: r for r in report.artifacts}
+    for i in range(2):
+        levels = [at.level for at in rels[f"big.jar!/lib/s{i}.jar"].attempts]
+        assert levels[0] == "batch" and "archive" in levels  # failed batch, then solo
+    assert sorted(n for n in solo if n != "big.jar") == ["s0.jar", "s1.jar"]

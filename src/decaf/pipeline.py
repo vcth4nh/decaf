@@ -40,6 +40,10 @@ _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
 
 _WHALE_CLASSES = 3000  # artifacts at/above this class count get scheduling headroom
 
+_SMALL_CLASSES = 800  # below this, an archive is batchable
+_BATCH_MAX_JARS = 16
+_BATCH_MAX_CLASSES = 2000
+
 
 def _decompile_weight(artifact: Artifact) -> int:
     return 2 if artifact.classes >= _WHALE_CLASSES else 1
@@ -643,6 +647,29 @@ def _preflight_engines(
     return chain, jars
 
 
+def _form_batch(ready_small: deque) -> list:
+    """Greedy prefix of ready smalls with disjoint stems, bounded by the caps.
+
+    Skipped members (stem overlap / class cap) stay queued in order for the
+    next batch. Always takes at least one member, so the queue drains.
+    """
+    batch: list = []
+    taken: set[str] = set()
+    total_classes = 0
+    kept: list = []
+    while ready_small and len(batch) < _BATCH_MAX_JARS:
+        item = ready_small.popleft()
+        a, _, _, stems = item
+        if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (stems & taken)):
+            kept.append(item)
+            continue
+        batch.append(item)
+        taken |= stems
+        total_classes += a.classes
+    ready_small.extendleft(reversed(kept))
+    return batch
+
+
 def run(
     settings: Settings,
     *,
@@ -653,6 +680,7 @@ def run(
     on_event: Callable[[str, str, str], None] | None = None,
     runner: Callable | None = None,
     resolver: Callable | None = None,
+    batch_runner: Callable | None = None,
 ) -> RunReport:
     start = time.monotonic()
     engines.PROCESSES.reset()
@@ -671,7 +699,11 @@ def run(
             "scan", "",
             f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
         )
-    runner = runner or engines.run_engine
+    if runner is None:
+        runner = engines.run_engine
+        batch_runner = batch_runner or engines.run_engine_batch
+    # An injected runner without an injected batch_runner disables batching:
+    # custom runners are per-target and must see every artifact individually.
     net = maven.NetState(warn=on_warn)
     resolver = resolver or partial(maven.resolve_sources, net=net)
 
@@ -710,6 +742,7 @@ def run(
             sources_cache=engines.cache_root() / "sources",
             runner=runner,
             resolver=resolver,
+            batch_runner=batch_runner,
             cpu_budget=cpu_budget,
             on_stderr=on_stderr,
             on_event=on_event,
@@ -724,11 +757,12 @@ def run(
                 for a in artifacts:
                     heappush(todo, (-a.classes, next(seq), a))
                 fetch_futs: dict = {}  # Future -> Artifact, kept for the stage-2 hand-off
-                dec_futs: dict = {}  # Future -> weight
+                dec_futs: dict = {}  # Future -> (kind, weight)
                 ready: list[tuple] = []  # (-classes, seq, artifact, target, report)
+                ready_small: deque = deque()  # batch-eligible: (artifact, target, report, stems)
                 dec_weight = 0
                 try:
-                    while todo or fetch_futs or dec_futs or ready:
+                    while todo or fetch_futs or dec_futs or ready or ready_small:
                         # Admission gate: every fetch future is a potential decompile,
                         # so capping in-flight work (including the held ready buffer)
                         # bounds the stage-2 backlog and stalls downloads when
@@ -736,7 +770,8 @@ def run(
                         while (
                             todo
                             and len(fetch_futs) < fetch_jobs
-                            and len(fetch_futs) + len(dec_futs) + len(ready) < jobs + queue_bound
+                            and len(fetch_futs) + len(dec_futs) + len(ready) + len(ready_small)
+                            < jobs + queue_bound
                         ):
                             _, _, a = heappop(todo)
                             fetch_futs[fetch_pool.submit(_fetch_stage, a, ctx)] = a
@@ -749,7 +784,15 @@ def run(
                             _, _, a, target, report = heappop(ready)
                             w = _decompile_weight(a)
                             dec_weight += w
-                            dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = w
+                            dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", w)
+                        while ready_small and (dec_weight == 0 or dec_weight + 1 <= jobs):
+                            batch = _form_batch(ready_small)
+                            dec_weight += 1
+                            if len(batch) == 1:
+                                a, target, report, _ = batch[0]
+                                dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", 1)
+                            else:
+                                dec_futs[dec_pool.submit(_decompile_batch, batch, ctx)] = ("batch", 1)
                         if not fetch_futs and not dec_futs:
                             continue  # unreachable in practice: drain above always progresses
                         done, _ = wait(
@@ -757,7 +800,17 @@ def run(
                         )
                         for fut in done:
                             if fut in dec_futs:
-                                dec_weight -= dec_futs.pop(fut)
+                                kind, w = dec_futs.pop(fut)
+                                dec_weight -= w
+                                if kind == "batch":
+                                    done_reports, requeue = fut.result()
+                                    for a2, t2, r2 in requeue:
+                                        heappush(ready, (-a2.classes, next(seq), a2, t2, r2))
+                                    for r2 in done_reports:
+                                        reports.append(r2)
+                                        if on_done is not None:
+                                            on_done(r2)
+                                    continue
                                 report = fut.result()
                             else:
                                 a = fetch_futs.pop(fut)
@@ -770,7 +823,17 @@ def run(
                                 if target is not None:
                                     if on_event is not None:
                                         on_event("queued", a.rel, "")
-                                    heappush(ready, (-a.classes, next(seq), a, target, report))
+                                    if (
+                                        batch_runner is not None
+                                        and not target.is_dir()
+                                        and a.classes < _SMALL_CLASSES
+                                        and chain[0] in engines.BATCH_ENGINES
+                                    ):
+                                        ready_small.append(
+                                            (a, target, report, expected_class_stems(target))
+                                        )
+                                    else:
+                                        heappush(ready, (-a.classes, next(seq), a, target, report))
                                     continue
                             reports.append(report)
                             if on_done is not None:
