@@ -358,3 +358,28 @@ def test_run_engine_batch_counts_merged_sources(tmp_path: Path, monkeypatch):
         tmp_path / "out", timeout=30,
     )
     assert res.returncode == 0 and res.java_files == 2
+
+
+def test_build_command_cds_flags():
+    cds = Path("/cache/engines")
+    cmd = build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J, cds_dir=cds)
+    ver = ENGINES["vineflower"].version
+    assert cmd == [
+        J,
+        "-XX:+AutoCreateSharedArchive",
+        f"-XX:SharedArchiveFile={cds / f'vineflower-{ver}.jsa'}",
+        "-jar", str(JAR), str(APP), str(OUT),
+    ]
+    assert build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J) == [
+        J, "-jar", str(JAR), str(APP), str(OUT),
+    ]  # unchanged without cds_dir
+
+
+def test_build_command_cds_follows_cpu_budget():
+    cds = Path("/cache/engines")
+    cmd = build_command(ENGINES["cfr"], JAR, APP, OUT, java=J, cpu_budget=3, cds_dir=cds)
+    assert cmd[:4] == [
+        J, "-XX:ActiveProcessorCount=3",
+        "-XX:+AutoCreateSharedArchive",
+        f"-XX:SharedArchiveFile={cds / ('cfr-' + ENGINES['cfr'].version + '.jsa')}",
+    ]

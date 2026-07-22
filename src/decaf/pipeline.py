@@ -238,6 +238,7 @@ class Ctx:
     resolver: Callable
     batch_runner: Callable | None = None
     cpu_budget: int | None = None  # visible cores per engine JVM
+    cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events
 
@@ -333,6 +334,7 @@ def _retry_missing_classes(
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
         report.attempts.append(
@@ -363,6 +365,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
         report.attempts.append(
@@ -540,6 +543,7 @@ def _decompile_batch(
         res = ctx.batch_runner(
             ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _ in members], dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
         )
     except Exception:
         res = engines.EngineResult(name, -1, False, 0, traceback.format_exc()[-2000:])
@@ -699,9 +703,12 @@ def run(
             "scan", "",
             f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
         )
+    cds_dir: Path | None = None
     if runner is None:
         runner = engines.run_engine
         batch_runner = batch_runner or engines.run_engine_batch
+        if java_major >= engines.CDS_MIN_JAVA:
+            cds_dir = engines.cache_root() / "engines"
     # An injected runner without an injected batch_runner disables batching:
     # custom runners are per-target and must see every artifact individually.
     net = maven.NetState(warn=on_warn)
@@ -744,6 +751,7 @@ def run(
             resolver=resolver,
             batch_runner=batch_runner,
             cpu_budget=cpu_budget,
+            cds_dir=cds_dir,
             on_stderr=on_stderr,
             on_event=on_event,
         )

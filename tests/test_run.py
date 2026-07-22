@@ -1116,3 +1116,41 @@ def test_run_batch_failure_requeues_members_solo(fake_env, make_jar, tmp_path):
         levels = [at.level for at in rels[f"big.jar!/lib/s{i}.jar"].attempts]
         assert levels[0] == "batch" and "archive" in levels  # failed batch, then solo
     assert sorted(n for n in solo if n != "big.jar") == ["s0.jar", "s1.jar"]
+
+
+def test_run_passes_cds_dir_to_default_runner(monkeypatch, make_jar, tmp_path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
+    )
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    seen = {}
+
+    def spy(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None):
+        seen["cds"] = cds_dir
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    monkeypatch.setattr(engines, "run_engine", spy)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    assert seen["cds"] == tmp_path / "cache" / "engines"
+
+
+def test_run_no_cds_below_java_19(monkeypatch, make_jar, tmp_path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 17))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
+    )
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    seen = {"cds": "unset"}
+
+    def spy(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None):
+        seen["cds"] = cds_dir
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    monkeypatch.setattr(engines, "run_engine", spy)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    assert seen["cds"] is None

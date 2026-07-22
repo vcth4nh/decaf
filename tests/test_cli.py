@@ -188,7 +188,7 @@ def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):
     import decaf.engines as engines
     from decaf.engines import EngineResult
 
-    def fake_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+    def fake_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None):
         out = Path(dest) / "com/x/A.java"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("class A {}")
