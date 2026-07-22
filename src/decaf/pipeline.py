@@ -65,7 +65,7 @@ def normalize_java_rel(rel: str) -> str:
 @dataclass
 class EngineAttempt:
     engine: str
-    level: str  # "archive" | "class"
+    level: str  # "archive" | "class" | "batch"
     returncode: int
     timed_out: bool
     java_files: int
@@ -93,7 +93,7 @@ class ArtifactReport:
 
 
 class MergeWriter:
-    """Merges .java files from many trees into one package tree.
+    """Merges source files (.java/.kt) from many trees into one package tree.
 
     Collisions are deterministic: the tree with the lowest sort_key wins,
     regardless of the order in which worker threads deliver results.
@@ -534,6 +534,8 @@ def _decompile_batch(
     Members' expected-stem sets are disjoint (enforced at formation), so every
     produced source file belongs to exactly one member.
     """
+    if engines.PROCESSES.closed:
+        return [], [(a, t, r) for a, t, r, _ in members]
     name = ctx.chain[0]
     dest = _tmp_dir(ctx)
     if ctx.on_event is not None:
@@ -548,28 +550,31 @@ def _decompile_batch(
     except Exception:
         res = engines.EngineResult(name, -1, False, 0, traceback.format_exc()[-2000:])
 
-    owners: dict[str, int] = {}
-    for i, (_, _, _, stems) in enumerate(members):
-        for s in stems:
-            owners[s] = i
     trees: dict[int, Path] = {}
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
-    if res.returncode == 0 and not res.timed_out:
-        for p in sorted(dest.rglob("*")):
-            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
-                continue
-            rel = p.relative_to(dest).as_posix()
-            stem = normalize_java_rel(rel)[: -len(p.suffix)]
-            i = owners.get(stem)
-            if i is None:
-                i = owners.get(stem.split("$", 1)[0])  # inner classes ride with their outer
-            if i is None:
-                continue  # engine banner/stray file; real resources come from the member jar
-            tree = trees.setdefault(i, _tmp_dir(ctx))
-            target = tree / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(p, target)
-            produced[i].add(stem)
+    try:
+        owners: dict[str, int] = {}
+        for i, (_, _, _, stems) in enumerate(members):
+            for s in stems:
+                owners[s] = i
+        if res.returncode == 0 and not res.timed_out:
+            for p in sorted(dest.rglob("*")):
+                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                    continue
+                rel = p.relative_to(dest).as_posix()
+                stem = normalize_java_rel(rel)[: -len(p.suffix)]
+                i = owners.get(stem)
+                if i is None:
+                    i = owners.get(stem.split("$", 1)[0])  # inner classes ride with their outer
+                if i is None:
+                    continue  # engine banner/stray file; real resources come from the member jar
+                tree = trees.setdefault(i, _tmp_dir(ctx))
+                target = tree / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(p, target)
+                produced[i].add(stem)
+    except Exception:
+        trees = {}  # split unusable; every member requeues and redoes solo (self-healing)
 
     done: list[ArtifactReport] = []
     requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
@@ -581,15 +586,19 @@ def _decompile_batch(
         if i not in trees:
             requeue.append((a, target, report))
             continue
-        _extract_member_resources(a.path, trees[i])
-        java, resources, collisions = ctx.writer.add_tree(trees[i], a.rel)
-        report.java_files += java
-        report.resources_skipped += resources
-        report.collisions += collisions
-        report.method = name
-        report.classes = len(stems)
-        _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:])
-        report.outcome = "ok"
+        try:
+            _extract_member_resources(a.path, trees[i])
+            java, resources, collisions = ctx.writer.add_tree(trees[i], a.rel)
+            report.java_files += java
+            report.resources_skipped += resources
+            report.collisions += collisions
+            report.method = name
+            report.classes = len(stems)
+            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:])
+            report.outcome = "ok"
+        except Exception:
+            report.outcome = "failed"
+            report.failure = traceback.format_exc()[-2000:]
         done.append(report)
     return done, requeue
 
@@ -793,6 +802,7 @@ def run(
                             w = _decompile_weight(a)
                             dec_weight += w
                             dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", w)
+                        # ready drains first: a waiting whale gets first claim on freed weight
                         while ready_small and (dec_weight == 0 or dec_weight + 1 <= jobs):
                             batch = _form_batch(ready_small)
                             dec_weight += 1

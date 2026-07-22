@@ -462,3 +462,74 @@ def test_decompile_batch_extracts_member_resources(make_jar, tmp_path):
     assert requeue == [] and done[0].outcome == "ok"
     assert (tmp_path / "out/a.jar/META-INF/spring.factories").read_bytes() == b"cfg"
     assert (tmp_path / "out/a.jar/com/a/A.java").is_file()
+
+
+def test_decompile_batch_contains_member_postprocessing_errors(make_jar, tmp_path):
+    from decaf.pipeline import _decompile_batch
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)
+    real_add_tree = ctx.writer.add_tree
+    calls = [0]
+
+    def flaky_add_tree(tree, rel):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise OSError(28, "No space left on device")
+        return real_add_tree(tree, rel)
+
+    ctx.writer.add_tree = flaky_add_tree
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    outcomes = {r.rel: r.outcome for r in done}
+    assert outcomes == {"a.jar": "failed", "b.jar": "ok"}
+    failed = next(r for r in done if r.rel == "a.jar")
+    assert "No space left on device" in (failed.failure or "")
+
+
+def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    def inner_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        dest = Path(dest)
+        (dest / "com/a").mkdir(parents=True, exist_ok=True)
+        (dest / "com/a/A.java").write_text("class A {}")
+        (dest / "com/a/A$1.java").write_text("class A$1 {}")  # inner: no owner stem of its own
+        (dest / "com/zz").mkdir(parents=True, exist_ok=True)
+        (dest / "com/zz/Stray.java").write_text("class Stray {}")  # no member owns this
+        return EngineResult(spec.name, 0, False, 3, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "com/a/A$1.class": b"y"})
+    ctx = _batch_ctx(tmp_path, inner_emitting_batch)
+    done, requeue = _decompile_batch([m1], ctx)
+    assert requeue == [] and done[0].outcome == "ok"
+    out = tmp_path / "out" / "src"
+    assert (out / "com/a/A.java").is_file()
+    assert (out / "com/a/A$1.java").is_file()      # $-inner mapped via outer stem
+    assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped
+
+
+def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
+    """Same split mechanism as the inner-class test, isolated to the
+    no-owner-stem case: a stray file with no matching member must never land
+    in any output tree, even when it's the only extra file the engine wrote."""
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    def stray_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        dest = Path(dest)
+        (dest / "com/a").mkdir(parents=True, exist_ok=True)
+        (dest / "com/a/A.java").write_text("class A {}")
+        (dest / "com/zz").mkdir(parents=True, exist_ok=True)
+        (dest / "com/zz/Stray.java").write_text("class Stray {}")  # no member owns this
+        return EngineResult(spec.name, 0, False, 2, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    ctx = _batch_ctx(tmp_path, stray_emitting_batch)
+    done, requeue = _decompile_batch([m1], ctx)
+    assert requeue == [] and done[0].outcome == "ok"
+    out = tmp_path / "out" / "src"
+    assert (out / "com/a/A.java").is_file()
+    assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped
