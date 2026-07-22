@@ -51,8 +51,8 @@ def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=Fals
 
 
 def test_chain_for():
-    assert chain_for("vineflower", True) == ["vineflower", "cfr", "procyon", "fernflower", "jd"]
-    assert chain_for("cfr", True) == ["cfr", "vineflower", "procyon", "fernflower", "jd"]
+    assert chain_for("vineflower", True) == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
+    assert chain_for("cfr", True) == ["cfr", "vineflower", "fernflower", "procyon", "jd"]
     assert chain_for("cfr", False) == ["cfr"]
     assert chain_for("cfr", True, available={"cfr", "jd"}) == ["cfr", "jd"]
 

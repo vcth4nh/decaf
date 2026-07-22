@@ -95,7 +95,7 @@ def test_zip_member_extraction(tmp_path: Path):
 
 
 def test_registry_complete_and_ordered():
-    assert list(ENGINES) == ENGINE_ORDER == ["vineflower", "cfr", "procyon", "fernflower", "jd"]
+    assert list(ENGINES) == ENGINE_ORDER == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
     for spec in ENGINES.values():
         assert spec.url.startswith("https://")
         assert len(spec.sha256) == 64

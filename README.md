@@ -15,8 +15,8 @@ into a source tree that mirrors your input, or one merged package tree with
   sources; when resolution degrades to decompilation over a network
   failure, decaf warns loudly and tags the report (`sources_miss:
   "network: …"`, `totals.network_misses`).
-- **Five engines, automatic fallback:** Vineflower → CFR → Procyon →
-  Fernflower → JD-CLI. If an engine crashes, times out, or misses classes,
+- **Five engines, automatic fallback:** Vineflower → CFR → Fernflower →
+  Procyon → JD-CLI. If an engine crashes, times out, or misses classes,
   the next one takes over (whole-archive and per-class retries).
 - **Engines auto-download** on first use (pinned versions, sha256-verified)
   into your user cache dir. Manage them with `decaf engines list|fetch|clean|update`.

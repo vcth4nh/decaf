@@ -4,6 +4,8 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-22
+
 ### Added
 
 - Live per-jar progress: each executing jar shows a transient row with its
@@ -30,6 +32,15 @@ All notable changes to decaf are documented here.
 - Kotlin decompiler output (`.kt`) now counts as decompiled source: no more
   fallback re-decompile of Kotlin jars, `.kt` files reach the output tree in
   both mirror and merge modes, and `java_files` counts include them (#53).
+- Fallback order now tries Fernflower before Procyon (Vineflower → CFR →
+  Fernflower → Procyon → JD-CLI). On a 19,453-class obfuscated jar, Procyon
+  wedged on a single class — burning CPU for 12+ minutes with no output
+  after completing 3,668 classes — while Fernflower decompiled the archive
+  in full and produced the fewest defects of any engine measured (0 parse
+  errors; 61% of a 400-class sample had a javac error attributable to the
+  decompiler, versus 62% for Procyon run per-class with a timeout, 67% for
+  Vineflower and 73% for CFR). Procyon remains available and unchanged as
+  an explicit `--engine procyon` choice.
 
 ## [1.4.1] - 2026-07-21
 
@@ -181,6 +192,7 @@ First public release.
 - Exit codes: `0` all succeeded · `1` some failed · `2` usage/environment
   error · `130` interrupted.
 
+[1.5.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.5.0
 [1.4.1]: https://github.com/vcth4nh/decaf/releases/tag/v1.4.1
 [1.4.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.4.0
 [1.3.1]: https://github.com/vcth4nh/decaf/releases/tag/v1.3.1
