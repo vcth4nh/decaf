@@ -452,7 +452,8 @@ def test_decompile_batch_empty_member_requeued(make_jar, tmp_path):
     assert [a.rel for a, _, _ in requeue] == ["b.jar"]
 
 
-def test_decompile_batch_extracts_member_resources(make_jar, tmp_path):
+def test_decompile_batch_writes_sources_only(make_jar, tmp_path):
+    """Resources come from the fetch stage's add_resources, not from the batch."""
     from decaf.pipeline import MirrorWriter, _decompile_batch
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "META-INF/spring.factories": b"cfg"})
@@ -460,8 +461,8 @@ def test_decompile_batch_extracts_member_resources(make_jar, tmp_path):
     ctx.writer = MirrorWriter(tmp_path / "out")
     done, requeue = _decompile_batch([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
-    assert (tmp_path / "out/a.jar/META-INF/spring.factories").read_bytes() == b"cfg"
     assert (tmp_path / "out/a.jar/com/a/A.java").is_file()
+    assert not (tmp_path / "out/a.jar/META-INF/spring.factories").exists()
 
 
 def test_decompile_batch_contains_member_postprocessing_errors(make_jar, tmp_path):
@@ -606,3 +607,21 @@ def test_sources_jar_artifact_carries_resources(make_jar, tmp_path: Path):
     assert (tmp_path / "out/lib-sources.jar/LICENSE").is_file()
     assert (tmp_path / "out/lib-sources.jar/com/x/A.java").is_file()
     assert report.resources_copied == 1
+
+
+def test_solo_mirror_drops_strays_and_takes_original_resources(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"x", "cfg.properties": "k=v"})
+    runner = writing_runner(
+        {"vineflower": {"com/x/A.java": "class A {}", "summary.txt": "engine banner"}}
+    )
+    ctx = make_ctx(tmp_path, runner, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok"
+    dest = tmp_path / "out/app.jar"
+    assert (dest / "com/x/A.java").is_file()
+    assert (dest / "cfg.properties").is_file()   # from the original jar
+    assert not (dest / "summary.txt").exists()   # engine stray dropped
+    assert report.resources_copied == 1
+    assert report.resources_skipped == 0

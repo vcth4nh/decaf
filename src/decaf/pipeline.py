@@ -121,14 +121,11 @@ class MergeWriter:
         self._lock = threading.Lock()
         self._index: dict[str, tuple[str, str]] = {}  # rel -> (sort_key, sha256)
 
-    def add_tree(self, tree: Path, sort_key: str) -> tuple[int, int, list[dict]]:
-        java = resources = 0
+    def add_tree(self, tree: Path, sort_key: str) -> tuple[int, list[dict]]:
+        java = 0
         collisions: list[dict] = []
         for p in sorted(tree.rglob("*")):
-            if not p.is_file():
-                continue
-            if p.suffix not in SOURCE_SUFFIXES:
-                resources += 1
+            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
                 continue
             java += 1
             rel = normalize_java_rel(p.relative_to(tree).as_posix())
@@ -149,7 +146,7 @@ class MergeWriter:
                     (self.root / rel).write_bytes(content)
                 else:
                     collisions.append({"path": rel, "kept": existing[0], "dropped": sort_key})
-        return java, resources, collisions
+        return java, collisions
 
     def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
         return 0, len(_resource_members(archive, include_sources))
@@ -159,7 +156,7 @@ class MergeWriter:
 
 
 class MirrorWriter:
-    """Copies each artifact's full output tree under out_root/<rel with '!' removed>."""
+    """Copies each artifact's source files under out_root/<rel with '!' removed>."""
 
     def __init__(self, out_root: Path, resources: bool = True) -> None:
         self.root = out_root
@@ -168,22 +165,17 @@ class MirrorWriter:
     def dest_for(self, rel: str) -> Path:
         return self.root / rel.replace("!", "")
 
-    def add_tree(self, tree: Path, rel: str) -> tuple[int, int, list[dict]]:
+    def add_tree(self, tree: Path, rel: str) -> tuple[int, list[dict]]:
         dest = self.dest_for(rel)
-        java = resources = 0
+        java = 0
         for p in sorted(tree.rglob("*")):
-            if not p.is_file():
-                continue
-            if p.suffix in SOURCE_SUFFIXES:
-                java += 1
-            else:
-                resources += 1
-                if p.suffix.lower() in ARCHIVE_EXTS:
-                    continue  # a nested archive's decompiled directory takes this path; blob and directory cannot coexist
+            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                continue  # engine strays never land; resources come from add_resources
+            java += 1
             target = dest / p.relative_to(tree)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(p, target)
-        return java, resources, []
+        return java, []
 
     def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
         names = _resource_members(archive, include_sources)
@@ -387,7 +379,7 @@ def _retry_missing_classes(
             EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
         )
         if res.java_files > 0:
-            java, _, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
             report.collisions += collisions
             produced |= produced_stems(dest)
@@ -418,9 +410,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
         )
         if res.java_files > 0:
-            java, resources, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
-            report.resources_skipped += resources
             report.collisions += collisions
             report.method = name
             produced |= produced_stems(dest)
@@ -492,9 +483,8 @@ def _fetch_stage(
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             tmp = _tmp_dir(ctx)
             extract_java(artifact.path, tmp)
-            java, resources, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+            java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
             report.java_files = java
-            report.resources_skipped = resources
             report.collisions = collisions
             copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
             report.resources_copied += copied
@@ -522,13 +512,12 @@ def _fetch_stage(
             if resolution is not None and resolution.sources_jar is not None:
                 tmp = _tmp_dir(ctx)
                 if extract_java(resolution.sources_jar, tmp) > 0:
-                    java, resources, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+                    java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
                     report.method = "maven"
                     report.repo = resolution.repo
                     report.resolved_by = resolution.resolved_by
                     report.sources_cached = resolution.cached
                     report.java_files = java
-                    report.resources_skipped = resources
                     report.collisions = collisions
                     done = True
                 else:
@@ -563,23 +552,6 @@ def _decompile_stage(
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
     return report
-
-
-def _extract_member_resources(jar: Path, tree: Path) -> None:
-    """A batched member's resources come from its original jar (engines' merged
-    output can't attribute them)."""
-    try:
-        with zipfile.ZipFile(jar) as zf:
-            names = [
-                n for n in zf.namelist()
-                if not n.endswith("/")
-                and not n.endswith(".class")
-                and PurePosixPath(n).suffix.lower() not in ARCHIVE_EXTS
-            ]
-    except (zipfile.BadZipFile, OSError):
-        return
-    if names:
-        safe_extract_zip(jar, tree, members=names)
 
 
 def _decompile_batch(
@@ -644,10 +616,8 @@ def _decompile_batch(
             requeue.append((a, target, report))
             continue
         try:
-            _extract_member_resources(a.path, trees[i])
-            java, resources, collisions = ctx.writer.add_tree(trees[i], a.rel)
+            java, collisions = ctx.writer.add_tree(trees[i], a.rel)
             report.java_files += java
-            report.resources_skipped += resources
             report.collisions += collisions
             report.method = name
             report.classes = len(stems)
