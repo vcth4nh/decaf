@@ -10,6 +10,7 @@ from enum import Enum
 from pathlib import Path, PurePosixPath
 
 ARCHIVE_EXTS = {".jar", ".war", ".ear", ".aar"}
+SOURCE_SUFFIXES = (".java", ".kt")  # source files: input classification and engine output
 
 
 class ScanError(Exception):
@@ -44,7 +45,7 @@ def _read_names(path: Path) -> list[str] | None:
 def _classify_names(names: list[str]) -> ArtifactKind:
     if any(n.endswith(".class") for n in names):
         return ArtifactKind.ARCHIVE
-    if any(n.endswith(".java") for n in names):
+    if any(n.endswith(SOURCE_SUFFIXES) for n in names):
         return ArtifactKind.SOURCES_JAR
     return ArtifactKind.RESOURCE_ONLY
 

@@ -23,12 +23,13 @@ from pathlib import Path, PurePosixPath
 import httpx
 
 from . import engines, maven
-from .engines import ENGINES, SOURCE_SUFFIXES
+from .engines import ENGINES
 from .maven import extract_java
 from .scanner import (
     ARCHIVE_EXTS,
     Artifact,
     ArtifactKind,
+    SOURCE_SUFFIXES,
     classify_counted,
     copy_class_tree,
     find_nested_archives,
