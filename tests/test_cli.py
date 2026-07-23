@@ -509,4 +509,4 @@ def test_summary_ok_row_counts_mirrored_resource_only(tmp_path: Path, make_jar, 
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "maven 1, decompiled 1, extracted 0, resources 1" in plain
+    assert "maven 1, decompiled 1, extracted 0, resource-only 1" in plain

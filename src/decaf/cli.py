@@ -337,7 +337,7 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
     )
     ok_detail = f"{maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']}"
     if resource_only_ok:
-        ok_detail += f", resources {resource_only_ok}"
+        ok_detail += f", resource-only {resource_only_ok}"
     table.add_row("OK", f"{t['ok']} ({ok_detail})")
     table.add_row("Skipped", str(t["skipped"]))
     table.add_row("Failed", str(t["failed"]))
