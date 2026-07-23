@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 import platformdirs
 
-from .scanner import ARCHIVE_EXTS, safe_extract_zip
+from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, safe_extract_zip
 
 JAVA_MIN = 11
 CDS_MIN_JAVA = 19  # -XX:+AutoCreateSharedArchive
@@ -85,8 +85,6 @@ ENGINES: dict[str, EngineSpec] = {
 }
 
 ENGINE_ORDER = ["vineflower", "cfr", "fernflower", "procyon", "jd"]
-
-SOURCE_SUFFIXES = (".java", ".kt")  # engine output that counts as decompiled source
 
 
 def active_specs(overrides: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, EngineSpec]:

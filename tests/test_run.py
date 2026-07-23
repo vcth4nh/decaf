@@ -92,6 +92,18 @@ def test_run_mirror_is_default(fake_env, make_jar, tmp_path: Path):
     assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
 
 
+def test_run_kotlin_sources_jar_extracted(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("kt-lib-sources.jar", {"com/k/K.kt": "fun k() {}"}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    (art,) = report.artifacts
+    assert art.kind == "sources_jar"
+    assert art.method == "extracted"
+    assert art.java_files == 1
+    assert (out / "kt-lib-sources.jar/com/k/K.kt").is_file()
+
+
 def test_run_mirror_mode_nested_archive_resource_no_collision(fake_env, make_jar, tmp_path: Path):
     """Real engines pass a nested archive through as a resource file alongside the
     decompiled .java files; the mirror output for the nested artifact's own

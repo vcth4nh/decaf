@@ -198,7 +198,7 @@ def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
     ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
     report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert report.method == "vineflower"
-    assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no .java files"
+    assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no .java/.kt files"
 
 
 def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
@@ -587,14 +587,52 @@ def test_resource_only_mirrored_ok(make_jar, tmp_path: Path):
     assert (tmp_path / "out/r.jar/META-INF/MANIFEST.MF").is_file()
 
 
-def test_resource_only_kotlin_sources_jar_keeps_kt(make_jar, tmp_path: Path):
+def test_kotlin_sources_jar_extracted(make_jar, tmp_path: Path):
     from decaf.pipeline import MirrorWriter
 
-    r = make_jar("lib-sources.jar", {"com/x/A.kt": "fun a() {}"})
+    sj = make_jar("lib-sources.jar", {"com/x/A.kt": "fun a() {}", "META-INF/MANIFEST.MF": "m"})
     ctx = make_ctx(tmp_path, writing_runner({}), writer=MirrorWriter(tmp_path / "out"))
-    rep, _ = process_artifact(Artifact(r, "lib-sources.jar", ArtifactKind.RESOURCE_ONLY), ctx)
-    assert rep.outcome == "ok"
+    report, _ = process_artifact(Artifact(sj, "lib-sources.jar", ArtifactKind.SOURCES_JAR), ctx)
+    assert report.outcome == "ok"
+    assert report.method == "extracted"
+    assert report.java_files == 1
+    assert report.resources_copied == 1
     assert (tmp_path / "out/lib-sources.jar/com/x/A.kt").is_file()
+    assert (tmp_path / "out/lib-sources.jar/META-INF/MANIFEST.MF").is_file()
+
+
+def test_mixed_sources_jar_keeps_java_and_kt(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    sj = make_jar("lib-sources.jar", {"com/x/A.java": "class A {}", "com/x/B.kt": "fun b() {}"})
+    ctx = make_ctx(tmp_path, writing_runner({}), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(sj, "lib-sources.jar", ArtifactKind.SOURCES_JAR), ctx)
+    assert report.outcome == "ok"
+    assert report.java_files == 2
+    assert (tmp_path / "out/lib-sources.jar/com/x/A.java").is_file()
+    assert (tmp_path / "out/lib-sources.jar/com/x/B.kt").is_file()
+
+
+def test_maven_kotlin_sources_jar_used(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.kt": "// real source\nfun a() {}"})
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=sources,
+            repo="https://r.test/m2",
+            resolved_by="pom-properties",
+        )
+
+    runner = writing_runner({})
+    ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok"
+    assert report.method == "maven"
+    assert runner.calls == []
+    assert report.sources_miss is None
+    assert "real source" in (tmp_path / "out/src/com/x/A.kt").read_text()
 
 
 def test_sources_jar_artifact_carries_resources(make_jar, tmp_path: Path):

@@ -31,6 +31,16 @@ def test_classify_resource_only(make_jar):
     assert classify_zip(jar) == ArtifactKind.RESOURCE_ONLY
 
 
+def test_classify_kotlin_sources_jar(make_jar):
+    jar = make_jar("a-sources.jar", {"com/x/A.kt": "fun a() {}"})
+    assert classify_zip(jar) == ArtifactKind.SOURCES_JAR
+
+
+def test_classify_kotlin_with_classes_is_archive(make_jar):
+    jar = make_jar("a.jar", {"com/x/A.class": b"\xca\xfe\xba\xbe", "com/x/A.kt": "fun a() {}"})
+    assert classify_zip(jar) == ArtifactKind.ARCHIVE
+
+
 def test_classify_corrupt(tmp_path: Path):
     bad = tmp_path / "bad.jar"
     bad.write_bytes(b"this is not a zip")
