@@ -478,6 +478,10 @@ def _fetch_stage(
             report.resources_skipped += skipped
             report.outcome = "ok" if copied else "skipped"
         elif artifact.kind is ArtifactKind.BEYOND_DEPTH:
+            member = artifact.rel.rsplit("!/", 1)[1]
+            copied, skipped = ctx.writer.add_blob(artifact.path, member, artifact.rel)
+            report.resources_copied += copied
+            report.resources_skipped += skipped
             report.outcome = "skipped"
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:

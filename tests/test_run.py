@@ -1154,3 +1154,27 @@ def test_run_no_cds_below_java_19(monkeypatch, make_jar, tmp_path):
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
     run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
     assert seen["cds"] is None
+
+
+def test_run_beyond_depth_blob_copied_in_mirror(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_deep_inputs(make_jar, tmp_path)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    deep = {r.rel: r for r in report.artifacts}["app.war!/WEB-INF/lib/dep.jar!/lib/inner.jar"]
+    assert deep.outcome == "skipped"
+    assert deep.resources_copied == 1
+    blob = out / "app.war/WEB-INF/lib/dep.jar/lib/inner.jar"
+    assert blob.is_file()
+    with zipfile.ZipFile(blob) as zf:
+        assert "com/i/I.class" in zf.namelist()
+
+
+def test_run_beyond_depth_merge_counts_skipped(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_deep_inputs(make_jar, tmp_path)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False),
+        runner=perfect_engine,
+    )
+    deep = {r.rel: r for r in report.artifacts}["app.war!/WEB-INF/lib/dep.jar!/lib/inner.jar"]
+    assert deep.resources_copied == 0
+    assert deep.resources_skipped == 1
