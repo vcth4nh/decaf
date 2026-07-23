@@ -18,6 +18,14 @@ All notable changes to decaf are documented here.
   row (#57).
 - The `OK` summary row gains a `resource-only N` part when resource-only jars
   were mirrored, so its breakdown keeps summing to the total (#57).
+- Maven lookup verdicts are cached on disk (`<user cache>/decaf/verdicts/`):
+  positive sha1→GAV matches are kept forever, negative verdicts ("not in
+  the index", "no sources published") for 7 days, and only network-clean
+  misses are ever recorded. Warm re-runs skip all index and probe traffic,
+  and network failures can no longer force decompilation of artifacts
+  whose sources are already cached on disk (#52).
+- `--fresh-maven` re-derives Maven lookup verdicts, ignoring cached ones,
+  and `decaf cache clean` deletes cached sources jars and verdicts (#52).
 
 ### Changed
 

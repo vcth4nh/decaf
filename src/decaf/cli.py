@@ -162,6 +162,30 @@ def engines_clean(
     console.print(f"removed {files} files ({size / 1e6:.1f} MB)")
 
 
+cache_app = typer.Typer(name="cache", help="Manage the Maven sources/verdict cache", no_args_is_help=True)
+app.add_typer(cache_app)
+
+
+@cache_app.command("clean")
+def cache_clean() -> None:
+    """Delete cached Maven sources jars and lookup verdicts."""
+    files = size = 0
+    removed = False
+    for sub in ("sources", "verdicts"):
+        d = engines.cache_root() / sub
+        if not d.is_dir():
+            continue
+        n, s = _tree_size(d)
+        files += n
+        size += s
+        shutil.rmtree(d, ignore_errors=True)
+        removed = True
+    if not removed:
+        console.print("nothing to clean")
+        return
+    console.print(f"removed {files} files ({size / 1e6:.1f} MB)")
+
+
 class Engine(str, Enum):
     vineflower = "vineflower"
     cfr = "cfr"
