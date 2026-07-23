@@ -31,8 +31,8 @@ def test_merge_dedupes_identical_content(tmp_path: Path):
     w = MergeWriter(tmp_path / "src")
     t1 = tree(tmp_path / "t1", {"com/x/A.java": "class A {}"})
     t2 = tree(tmp_path / "t2", {"com/x/A.java": "class A {}"})
-    assert w.add_tree(t1, "a.jar") == (1, 0, [])
-    assert w.add_tree(t2, "b.jar") == (1, 0, [])
+    assert w.add_tree(t1, "a.jar") == (1, [])
+    assert w.add_tree(t2, "b.jar") == (1, [])
     assert (tmp_path / "src/com/x/A.java").read_text() == "class A {}"
 
 
@@ -42,8 +42,8 @@ def test_merge_collision_lowest_key_wins_either_order(tmp_path: Path):
         w = MergeWriter(root / "src")
         first = tree(root / "t1", {"com/x/A.java": f"// from {order[0]}\n"})
         second = tree(root / "t2", {"com/x/A.java": f"// from {order[1]}\n"})
-        _, _, c1 = w.add_tree(first, order[0])
-        _, _, c2 = w.add_tree(second, order[1])
+        _, c1 = w.add_tree(first, order[0])
+        _, c2 = w.add_tree(second, order[1])
         assert c1 == []
         assert len(c2) == 1
         assert c2[0]["path"] == "com/x/A.java"
@@ -60,26 +60,26 @@ def test_merge_skips_resources_and_normalizes(tmp_path: Path):
             "META-INF/MANIFEST.MF": "Manifest-Version: 1.0",
         },
     )
-    assert w.add_tree(t, "app.war") == (1, 1, [])
+    assert w.add_tree(t, "app.war") == (1, [])
     assert (tmp_path / "src/com/x/A.java").is_file()
     assert not (tmp_path / "src/META-INF").exists()
 
 
-def test_mirror_writer_copies_everything(tmp_path: Path):
+def test_mirror_writer_copies_sources_only(tmp_path: Path):
     w = MirrorWriter(tmp_path / "out")
     t = tree(tmp_path / "t", {"com/x/A.java": "class A {}", "res.properties": "k=v"})
-    java, resources, collisions = w.add_tree(t, "libs/app.war!/WEB-INF/lib/dep.jar")
-    assert (java, resources, collisions) == (1, 1, [])
+    java, collisions = w.add_tree(t, "libs/app.war!/WEB-INF/lib/dep.jar")
+    assert (java, collisions) == (1, [])
     dest = tmp_path / "out/libs/app.war/WEB-INF/lib/dep.jar"
     assert (dest / "com/x/A.java").is_file()
-    assert (dest / "res.properties").is_file()
+    assert not (dest / "res.properties").exists()  # engine strays never land
 
 
 def test_mirror_writer_skips_archive_blobs(tmp_path: Path):
     w = MirrorWriter(tmp_path / "out")
     t = tree(tmp_path / "t", {"com/x/A.java": "class A {}", "WEB-INF/lib/dep.jar": "blob-bytes"})
-    java, resources, collisions = w.add_tree(t, "app.war")
-    assert (java, resources, collisions) == (1, 1, [])
+    java, collisions = w.add_tree(t, "app.war")
+    assert (java, collisions) == (1, [])
     assert not (tmp_path / "out/app.war/WEB-INF/lib/dep.jar").exists()
 
 
@@ -101,6 +101,7 @@ def test_report_json_and_totals(tmp_path: Path):
         "extracted": 1,
         "decompiled": 1,
         "java_files": 6,
+        "resources_copied": 0,
         "collisions": 0,
         "network_misses": 0,
     }
@@ -117,8 +118,8 @@ def test_merge_writer_accepts_kotlin(tmp_path):
     (tree / "com/B.java").write_text("class B {}")
     (tree / "com/data.bin").write_bytes(b"\x00")
     w = MergeWriter(tmp_path / "src")
-    java, resources, collisions = w.add_tree(tree, "a.jar")
-    assert (java, resources, collisions) == (2, 1, [])
+    java, collisions = w.add_tree(tree, "a.jar")
+    assert (java, collisions) == (2, [])
     assert (tmp_path / "src/com/A.kt").is_file()
     assert (tmp_path / "src/com/B.java").is_file()
 
@@ -129,7 +130,90 @@ def test_mirror_writer_counts_kotlin_as_source(tmp_path):
     (tree / "com/A.kt").write_text("fun a() {}")
     (tree / "com/notes.txt").write_text("x")
     w = MirrorWriter(tmp_path / "out")
-    java, resources, _ = w.add_tree(tree, "a.jar")
-    assert (java, resources) == (1, 1)
+    java, _ = w.add_tree(tree, "a.jar")
+    assert java == 1
     assert (tmp_path / "out/a.jar/com/A.kt").is_file()
-    assert (tmp_path / "out/a.jar/com/notes.txt").is_file()
+    assert not (tmp_path / "out/a.jar/com/notes.txt").exists()
+
+
+def test_mirror_add_resources_extracts_non_class_non_archive(make_jar, tmp_path: Path):
+    jar = make_jar("a.jar", {
+        "META-INF/MANIFEST.MF": "m",
+        "res/config.properties": "k=v",
+        "com/x/A.class": b"bytes",
+        "lib/inner.jar": b"blob",
+        "com/x/A.java": "class A {}",  # stray source inside a binary jar: excluded
+    })
+    w = MirrorWriter(tmp_path / "out")
+    assert w.add_resources(jar, "a.jar") == (2, 0)
+    dest = tmp_path / "out/a.jar"
+    assert (dest / "META-INF/MANIFEST.MF").is_file()
+    assert (dest / "res/config.properties").is_file()
+    assert not (dest / "com/x/A.class").exists()
+    assert not (dest / "lib/inner.jar").exists()
+    assert not (dest / "com/x/A.java").exists()
+
+
+def test_mirror_add_resources_include_sources(make_jar, tmp_path: Path):
+    jar = make_jar("k.jar", {"com/x/A.kt": "fun a() {}", "META-INF/MANIFEST.MF": "m"})
+    w = MirrorWriter(tmp_path / "out")
+    assert w.add_resources(jar, "k.jar", include_sources=True) == (2, 0)
+    assert (tmp_path / "out/k.jar/com/x/A.kt").is_file()
+
+
+def test_mirror_add_resources_disabled_counts_only(make_jar, tmp_path: Path):
+    jar = make_jar("a.jar", {"res.properties": "k=v"})
+    w = MirrorWriter(tmp_path / "out", resources=False)
+    assert w.add_resources(jar, "a.jar") == (0, 1)
+    assert not (tmp_path / "out/a.jar").exists()
+
+
+def test_mirror_add_resources_corrupt_member_degrades_to_zero(make_jar, tmp_path: Path):
+    jar = make_jar("a.jar", {"com/x/A.class": b"x", "big.properties": b"A" * 1024})
+    jar.write_bytes(jar.read_bytes().replace(b"A" * 64, b"B" * 64, 1))
+    assert MirrorWriter(tmp_path / "out").add_resources(jar, "a.jar") == (0, 0)
+
+
+def test_merge_add_resources_counts_without_writing(make_jar, tmp_path: Path):
+    jar = make_jar("a.jar", {"res.properties": "k=v", "com/x/A.class": b"b"})
+    w = MergeWriter(tmp_path / "src")
+    assert w.add_resources(jar, "a.jar") == (0, 1)
+    assert not (tmp_path / "src").exists()
+
+
+def test_add_resources_unreadable_zip_is_zero(tmp_path: Path):
+    bad = tmp_path / "bad.jar"
+    bad.write_bytes(b"junk")
+    assert MirrorWriter(tmp_path / "out").add_resources(bad, "bad.jar") == (0, 0)
+    assert MergeWriter(tmp_path / "src").add_resources(bad, "bad.jar") == (0, 0)
+
+
+def test_mirror_add_blob_writes_member_as_file(make_jar, tmp_path: Path):
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    parent = make_jar("dep.jar", {"lib/inner.jar": inner.read_bytes()})
+    w = MirrorWriter(tmp_path / "out")
+    assert w.add_blob(parent, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (1, 0)
+    blob = tmp_path / "out/dep.jar/lib/inner.jar"
+    assert blob.is_file()
+    assert blob.read_bytes() == inner.read_bytes()
+
+
+def test_add_blob_merge_and_disabled_count_only(make_jar, tmp_path: Path):
+    parent = make_jar("dep.jar", {"lib/inner.jar": b"blob"})
+    assert MergeWriter(tmp_path / "src").add_blob(parent, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (0, 1)
+    w = MirrorWriter(tmp_path / "out", resources=False)
+    assert w.add_blob(parent, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (0, 1)
+    assert not (tmp_path / "out/dep.jar/lib/inner.jar").exists()
+
+
+def test_mirror_add_blob_missing_member_is_zero(make_jar, tmp_path: Path):
+    parent = make_jar("dep.jar", {"other.txt": "x"})
+    assert MirrorWriter(tmp_path / "out").add_blob(parent, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (0, 0)
+
+
+def test_mirror_add_blob_unreadable_zip_is_zero(tmp_path: Path):
+    bad = tmp_path / "bad.jar"
+    bad.write_bytes(b"junk")
+    w = MirrorWriter(tmp_path / "out")
+    assert w.add_blob(bad, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (0, 0)
+    assert not (tmp_path / "out/dep.jar/lib/inner.jar").exists()

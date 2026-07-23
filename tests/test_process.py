@@ -25,7 +25,7 @@ def writing_runner(files_per_engine: dict[str, dict[str, str]]):
     return _run
 
 
-def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=False, engine="vineflower"):
+def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=False, engine="vineflower", writer=None):
     settings = Settings(
         input=tmp_path,
         output=tmp_path / "out",
@@ -38,7 +38,7 @@ def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=Fals
     tmp_root.mkdir(exist_ok=True)
     return Ctx(
         settings=settings,
-        writer=MergeWriter(tmp_path / "out/src"),
+        writer=writer or MergeWriter(tmp_path / "out/src"),
         chain=chain_for(engine, fallback),
         engine_jars={name: Path(f"/fake/{name}.jar") for name in ENGINES},
         java="java",
@@ -452,7 +452,8 @@ def test_decompile_batch_empty_member_requeued(make_jar, tmp_path):
     assert [a.rel for a, _, _ in requeue] == ["b.jar"]
 
 
-def test_decompile_batch_extracts_member_resources(make_jar, tmp_path):
+def test_decompile_batch_writes_sources_only(make_jar, tmp_path):
+    """Resources come from the fetch stage's add_resources, not from the batch."""
     from decaf.pipeline import MirrorWriter, _decompile_batch
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "META-INF/spring.factories": b"cfg"})
@@ -460,8 +461,8 @@ def test_decompile_batch_extracts_member_resources(make_jar, tmp_path):
     ctx.writer = MirrorWriter(tmp_path / "out")
     done, requeue = _decompile_batch([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
-    assert (tmp_path / "out/a.jar/META-INF/spring.factories").read_bytes() == b"cfg"
     assert (tmp_path / "out/a.jar/com/a/A.java").is_file()
+    assert not (tmp_path / "out/a.jar/META-INF/spring.factories").exists()
 
 
 def test_decompile_batch_contains_member_postprocessing_errors(make_jar, tmp_path):
@@ -533,3 +534,108 @@ def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
     out = tmp_path / "out" / "src"
     assert (out / "com/a/A.java").is_file()
     assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped
+
+
+def test_maven_hit_mirror_carries_original_resources(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "META-INF/spring.factories": b"cfg"})
+    sources = make_jar(
+        "lib-1.2-sources.jar",
+        {"com/x/A.java": "class A {}", "sql/schema.sql": "-- upstream copy"},
+    )
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(
+            gav=Gav("com.example", "lib", "1.2"),
+            sources_jar=sources,
+            repo="https://r.test/m2",
+            resolved_by="pom-properties",
+        )
+
+    ctx = make_ctx(tmp_path, writing_runner({}), resolver=resolver, maven=True,
+                   writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok" and report.method == "maven"
+    dest = tmp_path / "out/lib-1.2.jar"
+    assert (dest / "META-INF/spring.factories").read_bytes() == b"cfg"
+    assert (dest / "com/x/A.java").is_file()
+    assert not (dest / "sql/schema.sql").exists()  # sources jar's resource copies are ignored
+    assert report.resources_copied == 1
+    assert report.resources_skipped == 0
+
+
+def test_failed_decompile_still_writes_resources_in_mirror(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"x", "cfg.properties": "k=v"})
+    ctx = make_ctx(tmp_path, writing_runner({}), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "failed"
+    assert (tmp_path / "out/app.jar/cfg.properties").is_file()
+    assert report.resources_copied == 1
+
+
+def test_resource_only_mirrored_ok(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    r = make_jar("r.jar", {"META-INF/MANIFEST.MF": "m"})
+    ctx = make_ctx(tmp_path, writing_runner({}), writer=MirrorWriter(tmp_path / "out"))
+    rep, _ = process_artifact(Artifact(r, "r.jar", ArtifactKind.RESOURCE_ONLY), ctx)
+    assert rep.outcome == "ok"
+    assert rep.resources_copied == 1
+    assert (tmp_path / "out/r.jar/META-INF/MANIFEST.MF").is_file()
+
+
+def test_resource_only_kotlin_sources_jar_keeps_kt(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    r = make_jar("lib-sources.jar", {"com/x/A.kt": "fun a() {}"})
+    ctx = make_ctx(tmp_path, writing_runner({}), writer=MirrorWriter(tmp_path / "out"))
+    rep, _ = process_artifact(Artifact(r, "lib-sources.jar", ArtifactKind.RESOURCE_ONLY), ctx)
+    assert rep.outcome == "ok"
+    assert (tmp_path / "out/lib-sources.jar/com/x/A.kt").is_file()
+
+
+def test_sources_jar_artifact_carries_resources(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    sj = make_jar("lib-sources.jar", {"com/x/A.java": "class A {}", "LICENSE": "MIT"})
+    ctx = make_ctx(tmp_path, writing_runner({}), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(sj, "lib-sources.jar", ArtifactKind.SOURCES_JAR), ctx)
+    assert report.outcome == "ok" and report.method == "extracted"
+    assert (tmp_path / "out/lib-sources.jar/LICENSE").is_file()
+    assert (tmp_path / "out/lib-sources.jar/com/x/A.java").is_file()
+    assert report.resources_copied == 1
+
+
+def test_solo_mirror_drops_strays_and_takes_original_resources(make_jar, tmp_path: Path):
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"x", "cfg.properties": "k=v"})
+    runner = writing_runner(
+        {"vineflower": {"com/x/A.java": "class A {}", "summary.txt": "engine banner"}}
+    )
+    ctx = make_ctx(tmp_path, runner, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok"
+    dest = tmp_path / "out/app.jar"
+    assert (dest / "com/x/A.java").is_file()
+    assert (dest / "cfg.properties").is_file()   # from the original jar
+    assert not (dest / "summary.txt").exists()   # engine stray dropped
+    assert report.resources_copied == 1
+    assert report.resources_skipped == 0
+
+
+def test_corrupt_resource_member_does_not_block_decompile(make_jar, tmp_path: Path):
+    """A damaged resource member must never stop the engines from running."""
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"x", "big.properties": b"A" * 1024})
+    jar.write_bytes(jar.read_bytes().replace(b"A" * 64, b"B" * 64, 1))
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok"
+    assert report.resources_copied == 0
+    assert (tmp_path / "out/app.jar/com/x/A.java").is_file()

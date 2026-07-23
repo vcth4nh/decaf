@@ -86,10 +86,27 @@ class ArtifactReport:
     classes: int = 0
     java_files: int = 0
     resources_skipped: int = 0
+    resources_copied: int = 0
     missing_classes: int = 0
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
     failure: str | None = None
+
+
+def _resource_members(archive: Path, include_sources: bool) -> list[str]:
+    """Entries of the original archive that mirror mode carries through."""
+    excluded = () if include_sources else SOURCE_SUFFIXES
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            return [
+                n for n in zf.namelist()
+                if not n.endswith("/")
+                and not n.endswith(".class")
+                and PurePosixPath(n).suffix.lower() not in ARCHIVE_EXTS
+                and not n.endswith(excluded)
+            ]
+    except (zipfile.BadZipFile, OSError):
+        return []
 
 
 class MergeWriter:
@@ -104,14 +121,11 @@ class MergeWriter:
         self._lock = threading.Lock()
         self._index: dict[str, tuple[str, str]] = {}  # rel -> (sort_key, sha256)
 
-    def add_tree(self, tree: Path, sort_key: str) -> tuple[int, int, list[dict]]:
-        java = resources = 0
+    def add_tree(self, tree: Path, sort_key: str) -> tuple[int, list[dict]]:
+        java = 0
         collisions: list[dict] = []
         for p in sorted(tree.rglob("*")):
-            if not p.is_file():
-                continue
-            if p.suffix not in SOURCE_SUFFIXES:
-                resources += 1
+            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
                 continue
             java += 1
             rel = normalize_java_rel(p.relative_to(tree).as_posix())
@@ -132,34 +146,64 @@ class MergeWriter:
                     (self.root / rel).write_bytes(content)
                 else:
                     collisions.append({"path": rel, "kept": existing[0], "dropped": sort_key})
-        return java, resources, collisions
+        return java, collisions
+
+    def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
+        return 0, len(_resource_members(archive, include_sources))
+
+    def add_blob(self, zip_path: Path, member: str, rel: str) -> tuple[int, int]:
+        return 0, 1
 
 
 class MirrorWriter:
-    """Copies each artifact's full output tree under out_root/<rel with '!' removed>."""
+    """Copies each artifact's source files under out_root/<rel with '!' removed>."""
 
-    def __init__(self, out_root: Path) -> None:
+    def __init__(self, out_root: Path, resources: bool = True) -> None:
         self.root = out_root
+        self.resources = resources
 
     def dest_for(self, rel: str) -> Path:
         return self.root / rel.replace("!", "")
 
-    def add_tree(self, tree: Path, rel: str) -> tuple[int, int, list[dict]]:
+    def add_tree(self, tree: Path, rel: str) -> tuple[int, list[dict]]:
         dest = self.dest_for(rel)
-        java = resources = 0
+        java = 0
         for p in sorted(tree.rglob("*")):
-            if not p.is_file():
-                continue
-            if p.suffix in SOURCE_SUFFIXES:
-                java += 1
-            else:
-                resources += 1
-                if p.suffix.lower() in ARCHIVE_EXTS:
-                    continue  # a nested archive's decompiled directory takes this path; blob and directory cannot coexist
+            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                continue  # engine strays never land; resources come from add_resources
+            java += 1
             target = dest / p.relative_to(tree)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(p, target)
-        return java, resources, []
+        return java, []
+
+    def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
+        names = _resource_members(archive, include_sources)
+        if not names:
+            return 0, 0
+        if not self.resources:
+            return 0, len(names)
+        try:
+            # Partial extractions may leave files behind; refused/duplicate
+            # entries make the count approximate. Resources must never taint
+            # the artifact's decompile outcome.
+            return safe_extract_zip(archive, self.dest_for(rel), members=names), 0
+        except (zipfile.BadZipFile, RuntimeError, OSError):
+            return 0, 0
+
+    def add_blob(self, zip_path: Path, member: str, rel: str) -> tuple[int, int]:
+        if not self.resources:
+            return 0, 1
+        target = self.dest_for(rel)
+        try:
+            with zipfile.ZipFile(zip_path) as zf, zf.open(member) as src:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+        except (KeyError, zipfile.BadZipFile, OSError):
+            target.unlink(missing_ok=True)
+            return 0, 0
+        return 1, 0
 
 
 @dataclass
@@ -186,6 +230,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
             1 for r in reports if r.method not in (None, "maven", "extracted")
         ),
         "java_files": sum(r.java_files for r in reports),
+        "resources_copied": sum(r.resources_copied for r in reports),
         "collisions": sum(len(r.collisions) for r in reports),
         "network_misses": sum(
             1 for r in reports if (r.sources_miss or "").startswith("network:")
@@ -200,6 +245,7 @@ class Settings:
     engine: str = "vineflower"
     fallback: bool = True
     mirror: bool = True  # mirror the input layout; False = one merged src/ tree
+    resources: bool = True  # mirror mode: also carry the original archives' resources
     maven: bool = True
     max_depth: int = 1  # archive-in-archive levels to extract; 0 = top-level only
     jobs: int = 0  # 0 = auto: min(4, cpu count)
@@ -341,7 +387,7 @@ def _retry_missing_classes(
             EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
         )
         if res.java_files > 0:
-            java, _, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
             report.collisions += collisions
             produced |= produced_stems(dest)
@@ -372,9 +418,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
         )
         if res.java_files > 0:
-            java, resources, collisions = ctx.writer.add_tree(dest, artifact.rel)
+            java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
-            report.resources_skipped += resources
             report.collisions += collisions
             report.method = name
             produced |= produced_stems(dest)
@@ -434,17 +479,28 @@ def _fetch_stage(
             report.failure = "unreadable archive"
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
             nested = _discover_nested(artifact, ctx)  # e.g. a war bundling only jars
-            report.outcome = "skipped"
+            copied, skipped = ctx.writer.add_resources(
+                artifact.path, artifact.rel, include_sources=True
+            )
+            report.resources_copied += copied
+            report.resources_skipped += skipped
+            report.outcome = "ok" if copied else "skipped"
         elif artifact.kind is ArtifactKind.BEYOND_DEPTH:
+            member = artifact.rel.rsplit("!/", 1)[1]
+            copied, skipped = ctx.writer.add_blob(artifact.path, member, artifact.rel)
+            report.resources_copied += copied
+            report.resources_skipped += skipped
             report.outcome = "skipped"
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             tmp = _tmp_dir(ctx)
             extract_java(artifact.path, tmp)
-            java, resources, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+            java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
             report.java_files = java
-            report.resources_skipped = resources
             report.collisions = collisions
+            copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
+            report.resources_copied += copied
+            report.resources_skipped += skipped
             if java == 0:
                 report.outcome = "failed"
                 report.failure = "sources jar contained no .java files"
@@ -456,6 +512,9 @@ def _fetch_stage(
             return report, nested, tmp
         else:  # ARCHIVE
             nested = _discover_nested(artifact, ctx)
+            copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
+            report.resources_copied += copied
+            report.resources_skipped += skipped
             resolution = None
             if ctx.settings.maven and ctx.client is not None:
                 resolution = ctx.resolver(
@@ -465,13 +524,12 @@ def _fetch_stage(
             if resolution is not None and resolution.sources_jar is not None:
                 tmp = _tmp_dir(ctx)
                 if extract_java(resolution.sources_jar, tmp) > 0:
-                    java, resources, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+                    java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
                     report.method = "maven"
                     report.repo = resolution.repo
                     report.resolved_by = resolution.resolved_by
                     report.sources_cached = resolution.cached
                     report.java_files = java
-                    report.resources_skipped = resources
                     report.collisions = collisions
                     done = True
                 else:
@@ -506,23 +564,6 @@ def _decompile_stage(
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
     return report
-
-
-def _extract_member_resources(jar: Path, tree: Path) -> None:
-    """A batched member's resources come from its original jar (engines' merged
-    output can't attribute them)."""
-    try:
-        with zipfile.ZipFile(jar) as zf:
-            names = [
-                n for n in zf.namelist()
-                if not n.endswith("/")
-                and not n.endswith(".class")
-                and PurePosixPath(n).suffix.lower() not in ARCHIVE_EXTS
-            ]
-    except (zipfile.BadZipFile, OSError):
-        return
-    if names:
-        safe_extract_zip(jar, tree, members=names)
 
 
 def _decompile_batch(
@@ -587,10 +628,8 @@ def _decompile_batch(
             requeue.append((a, target, report))
             continue
         try:
-            _extract_member_resources(a.path, trees[i])
-            java, resources, collisions = ctx.writer.add_tree(trees[i], a.rel)
+            java, collisions = ctx.writer.add_tree(trees[i], a.rel)
             report.java_files += java
-            report.resources_skipped += resources
             report.collisions += collisions
             report.method = name
             report.classes = len(stems)
@@ -744,7 +783,7 @@ def run(
         chain, engine_jars = _preflight_engines(settings, java_major, client, on_event)
         writer: MergeWriter | MirrorWriter
         if settings.mirror:
-            writer = MirrorWriter(settings.output)
+            writer = MirrorWriter(settings.output, resources=settings.resources)
         else:
             writer = MergeWriter(settings.output / "src")
         ctx = Ctx(
@@ -873,6 +912,7 @@ def run(
                     "engine": settings.engine,
                     "fallback": settings.fallback,
                     "mirror": settings.mirror,
+                    "resources": settings.resources,
                     "maven": settings.maven,
                     "max_depth": settings.max_depth,
                     "jobs": jobs,

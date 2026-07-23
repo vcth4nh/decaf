@@ -311,6 +311,8 @@ def _status_line(r: ArtifactReport) -> str:
                 detail += ", cached"
         elif r.method == "extracted":
             detail = "extracted sources jar"
+        elif r.method is None and r.kind == "resource_only":
+            detail = f"resources only, {r.resources_copied} files"
         else:
             detail = f"{r.method}, {r.classes} classes"
             if r.missing_classes:
@@ -330,10 +332,17 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
     maven_part = f"maven {t['maven_sources']}"
     if cached:
         maven_part += f" ({cached} cached)"
-    table.add_row("OK", f"{t['ok']} ({maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']})")
+    resource_only_ok = sum(
+        1 for r in report.artifacts if r.outcome == "ok" and r.method is None
+    )
+    ok_detail = f"{maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']}"
+    if resource_only_ok:
+        ok_detail += f", resource-only {resource_only_ok}"
+    table.add_row("OK", f"{t['ok']} ({ok_detail})")
     table.add_row("Skipped", str(t["skipped"]))
     table.add_row("Failed", str(t["failed"]))
     table.add_row("Java files", str(t["java_files"]))
+    table.add_row("Resources", str(t["resources_copied"]))
     table.add_row("Collisions", str(t["collisions"]))
     table.add_row("Duration", f"{report.duration_seconds}s")
     console.print(table)
@@ -360,6 +369,7 @@ def main(
     engine: Annotated[Engine, typer.Option("--engine", help="Primary decompiler engine")] = Engine.vineflower,
     no_fallback: Annotated[bool, typer.Option("--no-fallback", help="Do not try other engines on failure")] = False,
     merge: Annotated[bool, typer.Option("--merge", help="Merge all sources into one src/ tree instead of mirroring the input layout")] = False,
+    no_resource: Annotated[bool, typer.Option("--no-resource", help="Mirror decompiled/extracted sources only, no resource files")] = False,
     no_maven: Annotated[bool, typer.Option("--no-maven", help="Skip Maven sources lookup, always decompile")] = False,
     max_depth: Annotated[int, typer.Option("--max-depth", min=0, help="Archive-in-archive levels to unpack (0 = none; folders are always fully scanned)")] = 1,
     repo: Annotated[Optional[list[str]], typer.Option("--repo", help="Extra Maven repository URL (repeatable)")] = None,
@@ -378,6 +388,8 @@ def main(
         raise _fail(f"output {output} exists and is not a directory")
     if output.exists() and any(output.iterdir()) and not force:
         raise _fail(f"output {output} is not empty (use --force to write anyway)")
+    if no_resource and merge:
+        raise _fail("--no-resource only applies to mirror mode (remove --merge)")
     try:
         cfg = load_config(config, extra_repos=repo or [])
     except ConfigError as exc:
@@ -389,6 +401,7 @@ def main(
         engine=engine.value,
         fallback=not no_fallback,
         mirror=not merge,
+        resources=not no_resource,
         maven=not no_maven,
         max_depth=max_depth,
         jobs=jobs,
