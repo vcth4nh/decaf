@@ -30,6 +30,15 @@ All notable changes to decaf are documented here.
   resources counted but not written (merge mode, or mirror with
   `--no-resource`) instead of its previous path-dependent meanings (#57).
 
+### Fixed
+
+- Kotlin sources are no longer invisible on the input side: a jar of `.kt`
+  sources now classifies as a sources jar (previously resource-only, and
+  nothing in merge mode), Maven sources extraction keeps `.kt` files
+  (previously a Kotlin library's fetched `-sources.jar` yielded nothing
+  and decaf fell back to decompiling the binary), and a sources jar
+  shipping both `.java` and `.kt` keeps both (#59).
+
 ## [1.5.0] - 2026-07-22
 
 ### Added
