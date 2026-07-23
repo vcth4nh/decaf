@@ -14,7 +14,12 @@ into a source tree that mirrors your input, or one merged package tree with
   network errors are retried with backoff and never mistaken for missing
   sources; when resolution degrades to decompilation over a network
   failure, decaf warns loudly and tags the report (`sources_miss:
-  "network: …"`, `totals.network_misses`).
+  "network: …"`, `totals.network_misses`). Lookup verdicts are cached
+  on disk as well — sha1→GAV matches forever, "no sources published"
+  answers for a week — so warm re-runs skip the index and probe traffic
+  entirely, and a network hiccup can't hide sources that are already
+  cached. `--fresh-maven` re-derives verdicts; `decaf cache clean`
+  wipes cached sources and verdicts.
 - **Five engines, automatic fallback:** Vineflower → CFR → Fernflower →
   Procyon → JD-CLI. If an engine crashes, times out, or misses classes,
   the next one takes over (whole-archive and per-class retries).
@@ -132,7 +137,7 @@ decaf engines update --reset   # back to built-in pins
 sha1 with a warning when that's all the repo offers; an engine publishing no checksum at all fails closed — reported with a red ✗ and exit code 1 — keeping its current pin) and records the new pin under `[engines.NAME]`
 in your config file — note that rewriting drops hand-written comments there.
 Every later run verifies the cached jar against that pin, exactly like the
-built-in ones. Like a folder named `engines`, a folder literally named `run`
+built-in ones. Like folders named `engines` or `cache`, a folder literally named `run`
 needs an explicit path (`decaf ./run`).
 
 ## Development

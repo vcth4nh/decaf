@@ -617,6 +617,171 @@ def test_resolve_sources_no_candidate_groups(make_jar, tmp_path: Path):
     assert res.miss == "no pom.properties; sha1 not in Central index; no candidate groups found"
 
 
+def _counting(handler):
+    calls = {"n": 0}
+
+    def wrapped(request):
+        calls["n"] += 1
+        return handler(request)
+
+    return wrapped, calls
+
+
+def test_resolve_verdict_replay_sha1_index(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("mystery.jar", {"A.class": b"x"})
+    sources_payload = make_jar("p.jar", {"A.java": "class A {}"}).read_bytes()
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(
+                200, json={"response": {"docs": [{"g": "g", "a": "a", "v": "1"}]}}
+            )
+        return httpx.Response(200, content=sources_payload)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.resolved_by == "sha1-index" and res.sources_jar is not None
+
+    wrapped, calls = _counting(handler)
+    with make_client(wrapped) as c:
+        res2 = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert calls["n"] == 0  # verdict + disk sources cache: fully offline
+    assert str(res2.gav) == "g:a:1"
+    assert res2.resolved_by == "sha1-index"
+    assert res2.cached is True and res2.miss is None
+
+
+def test_resolve_verdict_replay_verified_guess(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/core/A.class": b"x"})
+    payload = make_jar("p.jar", {"org/springframework/jdbc/core/A.java": "class A {}"}).read_bytes()
+    hit = "/m2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar.sha1"
+    handler = _post_freeze_handler(payload, {hit}, sha1_of(jar))
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.resolved_by == "verified-guess"
+
+    wrapped, calls = _counting(handler)
+    with make_client(wrapped) as c:
+        res2 = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert calls["n"] == 0
+    assert str(res2.gav) == "org.springframework:spring-jdbc:6.2.17"
+    assert res2.resolved_by == "verified-guess" and res2.cached is True
+
+
+def test_resolve_negative_verdict_replay(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/A.class": b"x"})
+    handler = _post_freeze_handler(b"", set(), "")
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.miss == "no pom.properties; sha1 not in Central index; 2 candidates, none verified"
+
+    wrapped, calls = _counting(handler)
+    with make_client(wrapped) as c:
+        res2 = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert calls["n"] == 0
+    assert res2.miss == f"cached verdict: {res.miss}"
+    assert res2.gav is None and res2.sources_jar is None
+
+
+def test_resolve_tainted_miss_not_recorded_as_verdict(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("mystery.jar", {"A.class": b"x"})
+
+    def handler(request):
+        raise httpx.ConnectError("boom", request=request)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.sources_jar is None and res.miss.startswith("network:")
+    assert not (tmp_path / "verdicts" / "sha1").exists()  # tainted: nothing recorded
+
+
+def test_no_sources_verdict_replay(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+
+    def handler(request):
+        return httpx.Response(404)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.miss == "found com.example:lib:1.2 in pom.properties but no -sources.jar in any repo"
+
+    wrapped, calls = _counting(handler)
+    with make_client(wrapped) as c:
+        res2 = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert calls["n"] == 0
+    assert res2.miss == (
+        "found com.example:lib:1.2 in pom.properties "
+        "but no -sources.jar in any repo (cached verdict)"
+    )
+
+
+def test_verdict_offline_hit_despite_network_down(make_jar, tmp_path: Path):
+    """#52 core scenario: disk-cached sources stay reachable when the network dies."""
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("mystery.jar", {"A.class": b"x"})
+    sources_payload = make_jar("p.jar", {"A.java": "class A {}"}).read_bytes()
+
+    def ok_handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(
+                200, json={"response": {"docs": [{"g": "g", "a": "a", "v": "1"}]}}
+            )
+        return httpx.Response(200, content=sources_payload)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(ok_handler) as c:
+        resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+
+    def down(request):
+        raise httpx.ConnectError("network down", request=request)
+
+    with make_client(down) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.sources_jar is not None and res.cached is True
+    assert res.resolved_by == "sha1-index" and res.miss is None
+
+
+def test_fresh_maven_ignores_verdicts_and_overwrites(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("mystery.jar", {"A.class": b"x"})
+    sources_payload = make_jar("p.jar", {"A.java": "class A {}"}).read_bytes()
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(
+                200, json={"response": {"docs": [{"g": "g", "a": "a", "v": "1"}]}}
+            )
+        return httpx.Response(200, content=sources_payload)
+
+    with make_client(handler) as c:
+        resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache",
+                        verdicts=VerdictCache(tmp_path / "verdicts"))
+
+    wrapped, calls = _counting(handler)
+    fresh = VerdictCache(tmp_path / "verdicts", fresh=True)
+    with make_client(wrapped) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=fresh)
+    assert calls["n"] == 1  # verdict ignored: the sha1 index lookup re-ran
+    assert res.resolved_by == "sha1-index" and res.cached is True
+
+
 def test_resolve_sources_probe_budget_caps_requests(make_jar, tmp_path: Path):
     jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
     probes = []

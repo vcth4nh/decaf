@@ -36,6 +36,7 @@ from .scanner import (
     safe_extract_zip,
     scan_counted,
 )
+from .verdicts import VerdictCache
 
 _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
 
@@ -248,6 +249,7 @@ class Settings:
     mirror: bool = True  # mirror the input layout; False = one merged src/ tree
     resources: bool = True  # mirror mode: also carry the original archives' resources
     maven: bool = True
+    fresh_maven: bool = False  # ignore stored lookup verdicts this run (still re-records)
     max_depth: int = 1  # archive-in-archive levels to extract; 0 = top-level only
     jobs: int = 0  # 0 = auto: min(4, cpu count)
     cpus: int = 0  # total CPU budget across all workers; 0 = all cores
@@ -761,7 +763,11 @@ def run(
     # An injected runner without an injected batch_runner disables batching:
     # custom runners are per-target and must see every artifact individually.
     net = maven.NetState(warn=on_warn)
-    resolver = resolver or partial(maven.resolve_sources, net=net)
+    if resolver is None:
+        verdict_cache = VerdictCache(
+            engines.cache_root() / "verdicts", fresh=settings.fresh_maven
+        )
+        resolver = partial(maven.resolve_sources, net=net, verdicts=verdict_cache)
 
     interrupted = False
     reports: list[ArtifactReport] = []
@@ -915,6 +921,7 @@ def run(
                     "mirror": settings.mirror,
                     "resources": settings.resources,
                     "maven": settings.maven,
+                    "fresh_maven": settings.fresh_maven,
                     "max_depth": settings.max_depth,
                     "jobs": jobs,
                     "fetch_jobs": fetch_jobs,

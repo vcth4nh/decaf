@@ -42,6 +42,7 @@ def test_help_lists_flags():
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
     for flag in ["--output", "--engine", "--no-fallback", "--merge", "--no-maven",
+                 "--fresh-maven",
                  "--max-depth", "--repo", "--config", "--jobs", "--cpus", "--timeout",
                  "--force"]:
         assert flag in plain
@@ -510,3 +511,58 @@ def test_summary_ok_row_counts_mirrored_resource_only(tmp_path: Path, make_jar, 
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
     assert "maven 1, decompiled 1, extracted 0, resource-only 1" in plain
+
+
+def test_fresh_maven_flag_wiring(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    captured = {}
+
+    def capture(settings, **kw):
+        captured["settings"] = settings
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--fresh-maven"])
+    assert result.exit_code == 0
+    assert captured["settings"].fresh_maven is True
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2")])
+    assert result.exit_code == 0
+    assert captured["settings"].fresh_maven is False
+
+
+def test_fresh_maven_with_no_maven_exits_2(tmp_path: Path, make_jar):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--fresh-maven", "--no-maven"]
+    )
+    assert result.exit_code == 2
+    plain = ANSI.sub("", result.output)
+    assert "--fresh-maven has no effect with --no-maven" in plain
+
+
+def test_cache_clean_removes_sources_and_verdicts(tmp_path: Path, monkeypatch):
+    from decaf import engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    (tmp_path / "sources").mkdir()
+    (tmp_path / "sources" / "g_a_1-sources.jar").write_bytes(b"x" * 100)
+    (tmp_path / "verdicts" / "sha1").mkdir(parents=True)
+    (tmp_path / "verdicts" / "sha1" / ("a" * 40 + ".json")).write_text("{}")
+    (tmp_path / "engines").mkdir()
+    (tmp_path / "engines" / "cfr-0.152.jar").write_bytes(b"e")
+
+    result = runner.invoke(app, ["cache", "clean"])
+    assert result.exit_code == 0
+    assert "removed 2 files" in result.output
+    assert not (tmp_path / "sources").exists()
+    assert not (tmp_path / "verdicts").exists()
+    assert (tmp_path / "engines" / "cfr-0.152.jar").exists()  # engines untouched
+
+
+def test_cache_clean_nothing_to_clean(tmp_path: Path, monkeypatch):
+    from decaf import engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    result = runner.invoke(app, ["cache", "clean"])
+    assert result.exit_code == 0
+    assert "nothing to clean" in result.output

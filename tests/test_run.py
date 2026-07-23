@@ -1206,3 +1206,32 @@ def test_run_no_resource_settings_respected(fake_env, make_jar, tmp_path: Path):
     assert rep.resources_copied == 0
     assert rep.resources_skipped == 1
     assert report.settings["resources"] is False
+
+
+def test_run_binds_verdict_cache(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    from decaf.verdicts import VerdictCache
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cachedir")
+    captured = {}
+
+    def fake_resolve(jar_path, repos, client, cache_dir, *, net=None, verdicts=None):
+        captured["verdicts"] = verdicts
+        return Resolution(miss="stub")
+
+    monkeypatch.setattr("decaf.maven.resolve_sources", fake_resolve)
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"A.class": b"x"}, base=input_dir)
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out"), runner=perfect_engine)
+    v = captured["verdicts"]
+    assert isinstance(v, VerdictCache)
+    assert v.root == tmp_path / "cachedir" / "verdicts"
+    assert v.fresh is False
+    assert report.settings["fresh_maven"] is False
+
+    report2 = run(
+        Settings(input=input_dir, output=tmp_path / "out2", fresh_maven=True),
+        runner=perfect_engine,
+    )
+    assert captured["verdicts"].fresh is True
+    assert report2.settings["fresh_maven"] is True

@@ -162,6 +162,30 @@ def engines_clean(
     console.print(f"removed {files} files ({size / 1e6:.1f} MB)")
 
 
+cache_app = typer.Typer(name="cache", help="Manage the Maven sources/verdict cache", no_args_is_help=True)
+app.add_typer(cache_app)
+
+
+@cache_app.command("clean")
+def cache_clean() -> None:
+    """Delete cached Maven sources jars and lookup verdicts."""
+    files = size = 0
+    removed = False
+    for sub in ("sources", "verdicts"):
+        d = engines.cache_root() / sub
+        if not d.is_dir():
+            continue
+        n, s = _tree_size(d)
+        files += n
+        size += s
+        shutil.rmtree(d, ignore_errors=True)
+        removed = True
+    if not removed:
+        console.print("nothing to clean")
+        return
+    console.print(f"removed {files} files ({size / 1e6:.1f} MB)")
+
+
 class Engine(str, Enum):
     vineflower = "vineflower"
     cfr = "cfr"
@@ -371,6 +395,7 @@ def main(
     merge: Annotated[bool, typer.Option("--merge", help="Merge all sources into one src/ tree instead of mirroring the input layout")] = False,
     no_resource: Annotated[bool, typer.Option("--no-resource", help="Mirror decompiled/extracted sources only, no resource files")] = False,
     no_maven: Annotated[bool, typer.Option("--no-maven", help="Skip Maven sources lookup, always decompile")] = False,
+    fresh_maven: Annotated[bool, typer.Option("--fresh-maven", help="Re-derive Maven lookup verdicts, ignoring cached ones")] = False,
     max_depth: Annotated[int, typer.Option("--max-depth", min=0, help="Archive-in-archive levels to unpack (0 = none; folders are always fully scanned)")] = 1,
     repo: Annotated[Optional[list[str]], typer.Option("--repo", help="Extra Maven repository URL (repeatable)")] = None,
     config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
@@ -390,6 +415,8 @@ def main(
         raise _fail(f"output {output} is not empty (use --force to write anyway)")
     if no_resource and merge:
         raise _fail("--no-resource only applies to mirror mode (remove --merge)")
+    if fresh_maven and no_maven:
+        raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
     try:
         cfg = load_config(config, extra_repos=repo or [])
     except ConfigError as exc:
@@ -403,6 +430,7 @@ def main(
         mirror=not merge,
         resources=not no_resource,
         maven=not no_maven,
+        fresh_maven=fresh_maven,
         max_depth=max_depth,
         jobs=jobs,
         cpus=cpus,
