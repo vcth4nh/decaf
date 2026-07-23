@@ -238,6 +238,7 @@ class Settings:
     engine: str = "vineflower"
     fallback: bool = True
     mirror: bool = True  # mirror the input layout; False = one merged src/ tree
+    resources: bool = True  # mirror mode: also carry the original archives' resources
     maven: bool = True
     max_depth: int = 1  # archive-in-archive levels to extract; 0 = top-level only
     jobs: int = 0  # 0 = auto: min(4, cpu count)
@@ -775,7 +776,7 @@ def run(
         chain, engine_jars = _preflight_engines(settings, java_major, client, on_event)
         writer: MergeWriter | MirrorWriter
         if settings.mirror:
-            writer = MirrorWriter(settings.output)
+            writer = MirrorWriter(settings.output, resources=settings.resources)
         else:
             writer = MergeWriter(settings.output / "src")
         ctx = Ctx(

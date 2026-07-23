@@ -27,7 +27,9 @@ def ok_report(**overrides) -> RunReport:
         totals={
             "artifacts": 2, "ok": 2, "failed": 0, "skipped": 0,
             "maven_sources": 1, "extracted": 0, "decompiled": 1,
-            "java_files": 5, "collisions": 0, "network_misses": 0,
+            "java_files": 5,
+            "resources_copied": 0,
+            "collisions": 0, "network_misses": 0,
         },
         duration_seconds=1.0,
     )
@@ -446,3 +448,52 @@ def test_run_output_shows_found_and_download_lines(tmp_path: Path, make_jar, mon
     plain = ANSI.sub("", result.output)
     assert "found 3 artifacts (2 top-level + 1 nested)" in plain
     assert "cfr 0.152 downloaded" in plain
+
+
+def test_no_resource_flag_wiring(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    captured = {}
+
+    def capture(settings, **kw):
+        captured["settings"] = settings
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--no-resource"])
+    assert result.exit_code == 0
+    assert captured["settings"].resources is False
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2")])
+    assert result.exit_code == 0
+    assert captured["settings"].resources is True
+
+
+def test_no_resource_with_merge_exits_2(tmp_path: Path, make_jar):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--merge", "--no-resource"]
+    )
+    assert result.exit_code == 2
+    plain = ANSI.sub("", result.output)
+    assert "--no-resource only applies to mirror mode" in plain
+
+
+def test_help_lists_no_resource():
+    result = runner.invoke(app, ["run", "--help"])
+    plain = ANSI.sub("", result.output)
+    assert "--no-resource" in plain
+
+
+def test_status_line_resource_only_mirrored():
+    r = ArtifactReport(rel="r.jar", kind="resource_only", outcome="ok", resources_copied=3)
+    assert cli._status_line(r) == "[green]✓[/] r.jar (resources only, 3 files)"
+
+
+def test_summary_shows_resources_row(tmp_path: Path, make_jar, monkeypatch):
+    rep = ok_report()
+    rep.totals = {**rep.totals, "resources_copied": 7}
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "Resources" in plain
+    assert "7" in plain
