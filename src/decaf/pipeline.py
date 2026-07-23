@@ -504,7 +504,7 @@ def _fetch_stage(
             report.resources_skipped += skipped
             if java == 0:
                 report.outcome = "failed"
-                report.failure = "sources jar contained no .java files"
+                report.failure = "sources jar contained no .java/.kt files"
             else:
                 report.method = "extracted"
         elif artifact.kind is ArtifactKind.CLASS_TREE:
@@ -534,7 +534,7 @@ def _fetch_stage(
                     report.collisions = collisions
                     done = True
                 else:
-                    resolution.miss = f"sources jar for {resolution.gav} contained no .java files"
+                    resolution.miss = f"sources jar for {resolution.gav} contained no .java/.kt files"
             if resolution is not None:
                 if resolution.gav is not None:
                     report.gav = str(resolution.gav)
