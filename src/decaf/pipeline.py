@@ -480,7 +480,12 @@ def _fetch_stage(
             report.failure = "unreadable archive"
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
             nested = _discover_nested(artifact, ctx)  # e.g. a war bundling only jars
-            report.outcome = "skipped"
+            copied, skipped = ctx.writer.add_resources(
+                artifact.path, artifact.rel, include_sources=True
+            )
+            report.resources_copied += copied
+            report.resources_skipped += skipped
+            report.outcome = "ok" if copied else "skipped"
         elif artifact.kind is ArtifactKind.BEYOND_DEPTH:
             report.outcome = "skipped"
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
@@ -491,6 +496,9 @@ def _fetch_stage(
             report.java_files = java
             report.resources_skipped = resources
             report.collisions = collisions
+            copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
+            report.resources_copied += copied
+            report.resources_skipped += skipped
             if java == 0:
                 report.outcome = "failed"
                 report.failure = "sources jar contained no .java files"
@@ -502,6 +510,9 @@ def _fetch_stage(
             return report, nested, tmp
         else:  # ARCHIVE
             nested = _discover_nested(artifact, ctx)
+            copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
+            report.resources_copied += copied
+            report.resources_skipped += skipped
             resolution = None
             if ctx.settings.maven and ctx.client is not None:
                 resolution = ctx.resolver(
