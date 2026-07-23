@@ -497,3 +497,16 @@ def test_summary_shows_resources_row(tmp_path: Path, make_jar, monkeypatch):
     plain = ANSI.sub("", result.output)
     assert "Resources" in plain
     assert "7" in plain
+
+
+def test_summary_ok_row_counts_mirrored_resource_only(tmp_path: Path, make_jar, monkeypatch):
+    rep = ok_report()
+    rep.artifacts.append(
+        ArtifactReport(rel="r.jar", kind="resource_only", outcome="ok", resources_copied=2)
+    )
+    rep.totals = {**rep.totals, "artifacts": 3, "ok": 3, "resources_copied": 2}
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "maven 1, decompiled 1, extracted 0, resources 1" in plain

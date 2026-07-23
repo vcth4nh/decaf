@@ -183,7 +183,13 @@ class MirrorWriter:
             return 0, 0
         if not self.resources:
             return 0, len(names)
-        return safe_extract_zip(archive, self.dest_for(rel), members=names), 0
+        try:
+            # Partial extractions may leave files behind; refused/duplicate
+            # entries make the count approximate. Resources must never taint
+            # the artifact's decompile outcome.
+            return safe_extract_zip(archive, self.dest_for(rel), members=names), 0
+        except (zipfile.BadZipFile, RuntimeError, OSError):
+            return 0, 0
 
     def add_blob(self, zip_path: Path, member: str, rel: str) -> tuple[int, int]:
         if not self.resources:
@@ -195,6 +201,7 @@ class MirrorWriter:
                 with open(target, "wb") as out:
                     shutil.copyfileobj(src, out)
         except (KeyError, zipfile.BadZipFile, OSError):
+            target.unlink(missing_ok=True)
             return 0, 0
         return 1, 0
 
@@ -905,6 +912,7 @@ def run(
                     "engine": settings.engine,
                     "fallback": settings.fallback,
                     "mirror": settings.mirror,
+                    "resources": settings.resources,
                     "maven": settings.maven,
                     "max_depth": settings.max_depth,
                     "jobs": jobs,

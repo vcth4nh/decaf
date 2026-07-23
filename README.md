@@ -82,7 +82,9 @@ nested beyond `--max-depth` are copied through unchanged as files.
 `--no-resource` keeps the mirrored layout but writes decompiled/extracted
 sources only. Carve-outs: corrupt archives are reported but not copied, and
 a stray `.java`/`.kt` shipped inside a binary jar is dropped in favor of
-the decompiler's output.
+the decompiler's output, and a sources jar shipping both `.java` and `.kt`
+keeps only the `.java` files (Kotlin-aware sources handling is tracked
+separately).
 
 **Merged (`--merge`):** every artifact's `.java` files are merged into
 `OUTPUT/src/` by package — ready to open in an IDE. Duplicate classes are

@@ -168,6 +168,12 @@ def test_mirror_add_resources_disabled_counts_only(make_jar, tmp_path: Path):
     assert not (tmp_path / "out/a.jar").exists()
 
 
+def test_mirror_add_resources_corrupt_member_degrades_to_zero(make_jar, tmp_path: Path):
+    jar = make_jar("a.jar", {"com/x/A.class": b"x", "big.properties": b"A" * 1024})
+    jar.write_bytes(jar.read_bytes().replace(b"A" * 64, b"B" * 64, 1))
+    assert MirrorWriter(tmp_path / "out").add_resources(jar, "a.jar") == (0, 0)
+
+
 def test_merge_add_resources_counts_without_writing(make_jar, tmp_path: Path):
     jar = make_jar("a.jar", {"res.properties": "k=v", "com/x/A.class": b"b"})
     w = MergeWriter(tmp_path / "src")
@@ -203,3 +209,11 @@ def test_add_blob_merge_and_disabled_count_only(make_jar, tmp_path: Path):
 def test_mirror_add_blob_missing_member_is_zero(make_jar, tmp_path: Path):
     parent = make_jar("dep.jar", {"other.txt": "x"})
     assert MirrorWriter(tmp_path / "out").add_blob(parent, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (0, 0)
+
+
+def test_mirror_add_blob_unreadable_zip_is_zero(tmp_path: Path):
+    bad = tmp_path / "bad.jar"
+    bad.write_bytes(b"junk")
+    w = MirrorWriter(tmp_path / "out")
+    assert w.add_blob(bad, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (0, 0)
+    assert not (tmp_path / "out/dep.jar/lib/inner.jar").exists()

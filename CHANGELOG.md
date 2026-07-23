@@ -16,6 +16,8 @@ All notable changes to decaf are documented here.
   mirror output instead of silently vanishing (#57).
 - New additive `resources_copied` report field and a `Resources` summary
   row (#57).
+- The `OK` summary row gains a `resources N` part when resource-only jars
+  were mirrored, so its breakdown keeps summing to the total (#57).
 
 ### Changed
 

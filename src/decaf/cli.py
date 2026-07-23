@@ -332,7 +332,13 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
     maven_part = f"maven {t['maven_sources']}"
     if cached:
         maven_part += f" ({cached} cached)"
-    table.add_row("OK", f"{t['ok']} ({maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']})")
+    resource_only_ok = sum(
+        1 for r in report.artifacts if r.outcome == "ok" and r.method is None
+    )
+    ok_detail = f"{maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']}"
+    if resource_only_ok:
+        ok_detail += f", resources {resource_only_ok}"
+    table.add_row("OK", f"{t['ok']} ({ok_detail})")
     table.add_row("Skipped", str(t["skipped"]))
     table.add_row("Failed", str(t["failed"]))
     table.add_row("Java files", str(t["java_files"]))

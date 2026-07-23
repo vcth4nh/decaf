@@ -1193,3 +1193,4 @@ def test_run_no_resource_settings_respected(fake_env, make_jar, tmp_path: Path):
     rep = report.artifacts[0]
     assert rep.resources_copied == 0
     assert rep.resources_skipped == 1
+    assert report.settings["resources"] is False

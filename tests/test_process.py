@@ -625,3 +625,17 @@ def test_solo_mirror_drops_strays_and_takes_original_resources(make_jar, tmp_pat
     assert not (dest / "summary.txt").exists()   # engine stray dropped
     assert report.resources_copied == 1
     assert report.resources_skipped == 0
+
+
+def test_corrupt_resource_member_does_not_block_decompile(make_jar, tmp_path: Path):
+    """A damaged resource member must never stop the engines from running."""
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"x", "big.properties": b"A" * 1024})
+    jar.write_bytes(jar.read_bytes().replace(b"A" * 64, b"B" * 64, 1))
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok"
+    assert report.resources_copied == 0
+    assert (tmp_path / "out/app.jar/com/x/A.java").is_file()
