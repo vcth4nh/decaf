@@ -86,10 +86,27 @@ class ArtifactReport:
     classes: int = 0
     java_files: int = 0
     resources_skipped: int = 0
+    resources_copied: int = 0
     missing_classes: int = 0
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
     failure: str | None = None
+
+
+def _resource_members(archive: Path, include_sources: bool) -> list[str]:
+    """Entries of the original archive that mirror mode carries through."""
+    excluded = () if include_sources else SOURCE_SUFFIXES
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            return [
+                n for n in zf.namelist()
+                if not n.endswith("/")
+                and not n.endswith(".class")
+                and PurePosixPath(n).suffix.lower() not in ARCHIVE_EXTS
+                and not n.endswith(excluded)
+            ]
+    except (zipfile.BadZipFile, OSError):
+        return []
 
 
 class MergeWriter:
@@ -134,12 +151,19 @@ class MergeWriter:
                     collisions.append({"path": rel, "kept": existing[0], "dropped": sort_key})
         return java, resources, collisions
 
+    def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
+        return 0, len(_resource_members(archive, include_sources))
+
+    def add_blob(self, zip_path: Path, member: str, rel: str) -> tuple[int, int]:
+        return 0, 1
+
 
 class MirrorWriter:
     """Copies each artifact's full output tree under out_root/<rel with '!' removed>."""
 
-    def __init__(self, out_root: Path) -> None:
+    def __init__(self, out_root: Path, resources: bool = True) -> None:
         self.root = out_root
+        self.resources = resources
 
     def dest_for(self, rel: str) -> Path:
         return self.root / rel.replace("!", "")
@@ -160,6 +184,27 @@ class MirrorWriter:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(p, target)
         return java, resources, []
+
+    def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
+        names = _resource_members(archive, include_sources)
+        if not names:
+            return 0, 0
+        if not self.resources:
+            return 0, len(names)
+        return safe_extract_zip(archive, self.dest_for(rel), members=names), 0
+
+    def add_blob(self, zip_path: Path, member: str, rel: str) -> tuple[int, int]:
+        if not self.resources:
+            return 0, 1
+        target = self.dest_for(rel)
+        try:
+            with zipfile.ZipFile(zip_path) as zf, zf.open(member) as src:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+        except (KeyError, zipfile.BadZipFile, OSError):
+            return 0, 0
+        return 1, 0
 
 
 @dataclass
@@ -186,6 +231,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
             1 for r in reports if r.method not in (None, "maven", "extracted")
         ),
         "java_files": sum(r.java_files for r in reports),
+        "resources_copied": sum(r.resources_copied for r in reports),
         "collisions": sum(len(r.collisions) for r in reports),
         "network_misses": sum(
             1 for r in reports if (r.sources_miss or "").startswith("network:")
