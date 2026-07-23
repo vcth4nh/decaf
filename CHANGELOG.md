@@ -4,6 +4,30 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `--no-resource`: mirror the input layout with decompiled/extracted sources
+  only, no resource files. Rejected with `--merge`, which never writes
+  resources (#57).
+- Resource-only jars are now mirrored instead of skipped, so an empty
+  "tombstone" jar (e.g. a relocated dependency shipping only `META-INF/`)
+  is visible as such in the output (#57).
+- Nested archives beyond `--max-depth` are copied through as files in the
+  mirror output instead of silently vanishing (#57).
+- New additive `resources_copied` report field and a `Resources` summary
+  row (#57).
+
+### Changed
+
+- Mirror mode is now faithful to the input: resources always come from the
+  original archive on every path. Maven hits and sources-jar artifacts
+  include the original's resources (previously sources only), solo
+  decompiles no longer inherit whatever extra files the engine emitted, and
+  artifacts whose engines all failed still carry their resources (#57).
+- `resources_skipped` in decaf-report.json now means original-archive
+  resources counted but not written (merge mode, or mirror with
+  `--no-resource`) instead of its previous path-dependent meanings (#57).
+
 ## [1.5.0] - 2026-07-22
 
 ### Added
