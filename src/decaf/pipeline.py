@@ -24,7 +24,7 @@ import httpx
 
 from . import engines, maven
 from .engines import ENGINES
-from .maven import extract_java
+from .maven import extract_sources
 from .scanner import (
     ARCHIVE_EXTS,
     Artifact,
@@ -495,7 +495,7 @@ def _fetch_stage(
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             tmp = _tmp_dir(ctx)
-            extract_java(artifact.path, tmp)
+            extract_sources(artifact.path, tmp)
             java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
             report.java_files = java
             report.collisions = collisions
@@ -524,7 +524,7 @@ def _fetch_stage(
             done = False
             if resolution is not None and resolution.sources_jar is not None:
                 tmp = _tmp_dir(ctx)
-                if extract_java(resolution.sources_jar, tmp) > 0:
+                if extract_sources(resolution.sources_jar, tmp) > 0:
                     java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
                     report.method = "maven"
                     report.repo = resolution.repo

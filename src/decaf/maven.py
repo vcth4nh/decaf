@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from .scanner import safe_extract_zip
+from .scanner import SOURCE_SUFFIXES, safe_extract_zip
 
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
 
@@ -552,9 +552,9 @@ def _download(
     raise _exhausted(net, log, host, kind)
 
 
-def extract_java(sources_jar: Path, dest: Path) -> int:
+def extract_sources(sources_jar: Path, dest: Path) -> int:
     try:
-        return safe_extract_zip(sources_jar, dest, suffixes=(".java",))
+        return safe_extract_zip(sources_jar, dest, suffixes=SOURCE_SUFFIXES)
     except (zipfile.BadZipFile, OSError):
         return 0
 

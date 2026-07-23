@@ -15,7 +15,7 @@ from decaf.maven import (
     _fetched,
     candidate_coords,
     candidate_groups,
-    extract_java,
+    extract_sources,
     fetch_sources,
     gav_from_central_sha1,
     gav_from_pom_properties,
@@ -187,14 +187,15 @@ def test_fetch_sources_rejects_non_zip_payload(tmp_path: Path):
     assert not (tmp_path / "cache" / "g_a_1-sources.jar").exists()
 
 
-def test_extract_java_only_java_files(make_jar, tmp_path: Path):
+def test_extract_sources_java_and_kt(make_jar, tmp_path: Path):
     jar = make_jar(
         "s.jar",
-        {"com/x/A.java": "class A {}", "META-INF/MANIFEST.MF": "m", "com/x/B.java": "class B {}"},
+        {"com/x/A.java": "class A {}", "META-INF/MANIFEST.MF": "m", "com/x/B.kt": "fun b() {}"},
     )
     out = tmp_path / "out"
-    assert extract_java(jar, out) == 2
+    assert extract_sources(jar, out) == 2
     assert (out / "com/x/A.java").is_file()
+    assert (out / "com/x/B.kt").is_file()
     assert not (out / "META-INF/MANIFEST.MF").exists()
 
 
@@ -251,7 +252,7 @@ def test_real_sources_roundtrip(tmp_path: Path):
         res = resolve_sources(jar, [MAVEN_CENTRAL], client, tmp_path / "cache")
         assert str(res.gav) == "org.slf4j:slf4j-api:2.0.13"
         assert res.repo == MAVEN_CENTRAL
-        assert extract_java(res.sources_jar, tmp_path / "out") > 10
+        assert extract_sources(res.sources_jar, tmp_path / "out") > 10
 
 
 @pytest.mark.network
@@ -266,7 +267,7 @@ def test_real_verified_guess_post_freeze_artifact(tmp_path: Path):
         assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
         assert res.resolved_by == "verified-guess"
         assert res.repo == MAVEN_CENTRAL
-        assert extract_java(res.sources_jar, tmp_path / "out") > 10
+        assert extract_sources(res.sources_jar, tmp_path / "out") > 10
 
 
 @pytest.mark.parametrize(
