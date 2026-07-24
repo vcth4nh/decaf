@@ -6,14 +6,16 @@ import shutil
 import threading
 from enum import Enum
 from pathlib import Path
+from time import monotonic
 from typing import Annotated, Optional
 
 import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn
+from rich.progress import Progress, ProgressColumn, SpinnerColumn, TaskID
 from rich.table import Column, Table
+from rich.text import Text
 from typer.core import TyperGroup
 
 from . import __version__, engines
@@ -199,7 +201,6 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(code=2)
 
 
-_STAGE_VERBS = {"fetch": "fetching", "decompile": "decompiling"}
 _STAGE_RANK = {"header": 0, "engines": 1, "fetch": 2, "decompile": 3}
 
 
@@ -214,6 +215,27 @@ def _shorten(rel: str, limit: int = 60) -> str:
     if "/" in prefix:
         prefix = prefix.rsplit("/", 1)[0]
     return f"{prefix}/…/{leaf}" if prefix else f"…/{leaf}"
+
+
+def _elapsed(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60}m"
+
+
+class _RowColumn(ProgressColumn):
+    """Task description, plus a live '(engine · N classes · elapsed)' suffix on
+    decompiling rows — recomputed each render, so it ticks with the spinner."""
+
+    def render(self, task) -> Text:
+        since = task.fields.get("since")
+        if since is None:
+            return Text(task.description)
+        detail = task.fields["detail"]
+        return Text(f"{task.description} ({detail} · {_elapsed(monotonic() - since)})")
 
 
 class _GroupedProgress(Progress):
@@ -270,11 +292,13 @@ class _RunDisplay:
                 self._engines_event(subject, detail)
             elif kind == "queued":
                 self._drop(subject)
-            elif kind in _STAGE_VERBS:
-                text = f"{_STAGE_VERBS[kind]:<11} {_shorten(subject)}"
-                if kind == "decompile" and detail:
-                    text += f" ({detail})"
-                self._upsert(subject, text, kind)
+            elif kind == "fetch":
+                verb = detail or "fetching"
+                self._upsert(subject, f"{verb:<17} {_shorten(subject)}", kind)
+            elif kind == "decompile":
+                self._upsert(
+                    subject, f"{'decompiling':<17} {_shorten(subject)}", kind, detail=detail
+                )
             self._refresh_header()
 
     # -- internals; every method below expects the lock to be held --
@@ -299,12 +323,13 @@ class _RunDisplay:
         else:
             self._p.update(self._engines, description=text)
 
-    def _upsert(self, rel: str, text: str, stage: str) -> None:
+    def _upsert(self, rel: str, text: str, stage: str, detail: str = "") -> None:
         self._stage[rel] = stage
+        fields = {"detail": detail, "since": monotonic() if detail else None}
         if rel in self._rows:
-            self._p.update(self._rows[rel], description=text, stage=stage)
+            self._p.update(self._rows[rel], description=text, stage=stage, **fields)
         else:
-            self._rows[rel] = self._p.add_task(text, total=None, stage=stage)
+            self._rows[rel] = self._p.add_task(text, total=None, stage=stage, **fields)
 
     def _drop(self, rel: str) -> None:
         self._stage.pop(rel, None)
@@ -443,7 +468,7 @@ def main(
 
     progress = _GroupedProgress(
         SpinnerColumn(),
-        TextColumn("{task.description}", table_column=Column(no_wrap=True)),
+        _RowColumn(table_column=Column(no_wrap=True)),
         console=console,
         transient=True,
         disable=quiet,

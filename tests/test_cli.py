@@ -329,11 +329,11 @@ def make_display():
     import io
 
     from rich.console import Console
-    from rich.progress import SpinnerColumn, TextColumn
+    from rich.progress import SpinnerColumn
 
     console = Console(file=io.StringIO(), force_terminal=True, width=120)
     progress = cli._GroupedProgress(
-        SpinnerColumn(), TextColumn("{task.description}"),
+        SpinnerColumn(), cli._RowColumn(),
         console=console, transient=True,
     )
     return progress, cli._RunDisplay(progress)
@@ -341,6 +341,11 @@ def make_display():
 
 def descriptions(progress):
     return [t.description for t in progress._ordered_tasks()]
+
+
+def rendered(progress):
+    col = progress.columns[1]
+    return [str(col.render(t)) for t in progress._ordered_tasks()]
 
 
 def test_display_row_lifecycle():
@@ -354,14 +359,15 @@ def test_display_row_lifecycle():
     # regex used for CliRunner output elsewhere in this file).
     plain = ANSI.sub("", progress.console.file.getvalue())
     assert "found 3 artifacts (2 top-level + 1 nested)" in plain
-    disp.on_event("fetch", "a.jar", "")
-    assert any("fetching" in d and "a.jar" in d for d in descriptions(progress))
+    disp.on_event("fetch", "a.jar", "resolving")
+    assert any(d.startswith("resolving ") and "a.jar" in d for d in descriptions(progress))
     assert descriptions(progress)[0] == "0/3 done · 1 fetching · 0 decompiling · 2 queued"
     disp.on_event("queued", "a.jar", "")
     assert not any("a.jar" in d for d in descriptions(progress))  # between stages: queued only
-    disp.on_event("decompile", "a.jar", "vineflower")
-    # "decompiling" is exactly 11 chars, so :<11 adds no padding — single space
-    assert any(d.strip() == "decompiling a.jar (vineflower)" for d in descriptions(progress))
+    disp.on_event("decompile", "a.jar", "vineflower · 3 classes")
+    # 'decompiling' is 11 chars padded to 17, plus the separator space: 7 spaces total
+    assert any(d == "decompiling       a.jar" for d in descriptions(progress))
+    assert any("(vineflower · 3 classes · " in r for r in rendered(progress))
     disp.on_done(ArtifactReport(rel="a.jar", kind="archive", outcome="ok"))
     assert not any("a.jar" in d for d in descriptions(progress))
     assert descriptions(progress)[0] == "1/3 done · 0 fetching · 0 decompiling · 2 queued"
@@ -566,3 +572,33 @@ def test_cache_clean_nothing_to_clean(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["cache", "clean"])
     assert result.exit_code == 0
     assert "nothing to clean" in result.output
+
+
+def test_elapsed_format():
+    assert cli._elapsed(5) == "5s"
+    assert cli._elapsed(42) == "42s"
+    assert cli._elapsed(61) == "1m01s"
+    assert cli._elapsed(102) == "1m42s"
+    assert cli._elapsed(3720) == "1h2m"
+
+
+def test_row_column_elapsed_ticks_and_resets(monkeypatch):
+    progress, disp = make_display()
+    now = {"t": 1000.0}
+    monkeypatch.setattr(cli, "monotonic", lambda: now["t"])
+    disp.on_event("decompile", "a.jar", "vineflower · 13,271 classes")
+    now["t"] += 102
+    row = [r for r in rendered(progress) if "a.jar" in r]
+    assert row == ["decompiling       a.jar (vineflower · 13,271 classes · 1m42s)"]
+    disp.on_event("decompile", "a.jar", "cfr · 13,271 classes")  # fallback attempt: clock resets
+    now["t"] += 5
+    row = [r for r in rendered(progress) if "a.jar" in r]
+    assert row == ["decompiling       a.jar (cfr · 13,271 classes · 5s)"]
+
+
+def test_fetch_rows_have_no_elapsed(monkeypatch):
+    progress, disp = make_display()
+    monkeypatch.setattr(cli, "monotonic", lambda: 0.0)
+    disp.on_event("fetch", "a.jar", "downloading")
+    row = [r for r in rendered(progress) if "a.jar" in r]
+    assert row == ["downloading       a.jar"]
