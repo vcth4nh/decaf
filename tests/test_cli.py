@@ -302,9 +302,24 @@ def test_status_line_cached_suffix():
         rel="a.jar", kind="archive", outcome="ok", method="maven",
         gav="com.example:lib:1.2", sources_cached=True,
     )
-    assert cli._status_line(r) == "[green]✓[/] a.jar (maven sources, com.example:lib:1.2, cached)"
+    assert cli._status_line(r) == (
+        "[dim][green]✓[/] a.jar (maven sources, com.example:lib:1.2, cached)[/]"
+    )
     r.sources_cached = False
     assert "cached" not in cli._status_line(r)
+
+
+def test_status_line_dim_only_for_cached_maven():
+    fresh = ArtifactReport(
+        rel="a.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1"
+    )
+    assert not cli._status_line(fresh).startswith("[dim]")
+    decompiled = ArtifactReport(rel="b.jar", kind="archive", outcome="ok", method="vineflower")
+    assert not cli._status_line(decompiled).startswith("[dim]")
+    extracted = ArtifactReport(rel="c.jar", kind="sources_jar", outcome="ok", method="extracted")
+    assert not cli._status_line(extracted).startswith("[dim]")
+    failed = ArtifactReport(rel="d.jar", kind="archive", outcome="failed", failure="boom")
+    assert cli._status_line(failed).startswith("[red]")
 
 
 def test_summary_counts_cached_sources(tmp_path: Path, make_jar, monkeypatch):

@@ -366,7 +366,10 @@ def _status_line(r: ArtifactReport) -> str:
             detail = f"{r.method}, {r.classes} classes"
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
-        return f"[green]✓[/] {r.rel} ({detail})"
+        line = f"[green]✓[/] {r.rel} ({detail})"
+        if r.method == "maven" and r.sources_cached:
+            return f"[dim]{line}[/]"
+        return line
     if r.outcome == "skipped":
         return f"[yellow]-[/] {r.rel} ({r.failure or 'resource-only'}, skipped)"
     reason = (r.failure or "failed").splitlines()[-1]
