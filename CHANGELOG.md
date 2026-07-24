@@ -4,6 +4,8 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-24
+
 ### Added
 
 - Decompiling rows in the live display show the engine, class count, and a
@@ -255,6 +257,7 @@ First public release.
 - Exit codes: `0` all succeeded · `1` some failed · `2` usage/environment
   error · `130` interrupted.
 
+[1.7.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.7.0
 [1.6.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.6.0
 [1.5.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.5.0
 [1.4.1]: https://github.com/vcth4nh/decaf/releases/tag/v1.4.1
