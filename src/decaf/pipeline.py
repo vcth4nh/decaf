@@ -379,7 +379,7 @@ def _retry_missing_classes(
             break
         dest = _tmp_dir(ctx)
         if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, name)
+            ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(missing):,} classes")
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
@@ -410,7 +410,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             break
         dest = _tmp_dir(ctx)
         if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, name)
+            ctx.on_event("decompile", artifact.rel, f"{name} · {len(expected):,} classes")
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
@@ -473,15 +473,20 @@ def _fetch_stage(
     decompile target for stage 2 — None when the artifact completed here.
     """
     report = ArtifactReport(rel=artifact.rel, kind=artifact.kind.value, outcome="ok")
-    if ctx.on_event is not None:
-        ctx.on_event("fetch", artifact.rel, "")
+
+    def state(sub: str) -> None:
+        if ctx.on_event is not None:
+            ctx.on_event("fetch", artifact.rel, sub)
+
     nested: list[Artifact] = []
     try:
         if artifact.kind is ArtifactKind.CORRUPT:
             report.outcome = "failed"
             report.failure = "unreadable archive"
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
+            state("scanning")
             nested = _discover_nested(artifact, ctx)  # e.g. a war bundling only jars
+            state("copying resources")
             copied, skipped = ctx.writer.add_resources(
                 artifact.path, artifact.rel, include_sources=True
             )
@@ -489,6 +494,7 @@ def _fetch_stage(
             report.resources_skipped += skipped
             report.outcome = "ok" if copied else "skipped"
         elif artifact.kind is ArtifactKind.BEYOND_DEPTH:
+            state("copying resources")
             member = artifact.rel.rsplit("!/", 1)[1]
             copied, skipped = ctx.writer.add_blob(artifact.path, member, artifact.rel)
             report.resources_copied += copied
@@ -496,11 +502,13 @@ def _fetch_stage(
             report.outcome = "skipped"
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
+            state("extracting")
             tmp = _tmp_dir(ctx)
             extract_sources(artifact.path, tmp)
             java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
             report.java_files = java
             report.collisions = collisions
+            state("copying resources")
             copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
             report.resources_copied += copied
             report.resources_skipped += skipped
@@ -510,21 +518,27 @@ def _fetch_stage(
             else:
                 report.method = "extracted"
         elif artifact.kind is ArtifactKind.CLASS_TREE:
+            state("copying classes")
             tmp = _tmp_dir(ctx)
             copy_class_tree(artifact.path, tmp)
             return report, nested, tmp
         else:  # ARCHIVE
+            state("scanning")
             nested = _discover_nested(artifact, ctx)
+            state("copying resources")
             copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
             report.resources_copied += copied
             report.resources_skipped += skipped
             resolution = None
             if ctx.settings.maven and ctx.client is not None:
+                state("resolving")
                 resolution = ctx.resolver(
-                    artifact.path, list(ctx.settings.repos), ctx.client, ctx.sources_cache
+                    artifact.path, list(ctx.settings.repos), ctx.client, ctx.sources_cache,
+                    **({} if ctx.on_event is None else {"on_state": state}),
                 )
             done = False
             if resolution is not None and resolution.sources_jar is not None:
+                state("extracting")
                 tmp = _tmp_dir(ctx)
                 if extract_sources(resolution.sources_jar, tmp) > 0:
                     java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
@@ -583,8 +597,8 @@ def _decompile_batch(
     name = ctx.chain[0]
     dest = _tmp_dir(ctx)
     if ctx.on_event is not None:
-        for a, _, _, _ in members:
-            ctx.on_event("decompile", a.rel, name)
+        for a, _, _, exp in members:
+            ctx.on_event("decompile", a.rel, f"{name} · {len(exp):,} classes")
     try:
         res = ctx.batch_runner(
             ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _ in members], dest,
