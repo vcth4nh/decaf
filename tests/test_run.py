@@ -718,9 +718,10 @@ def test_run_emits_artifact_stage_events(fake_env, make_jar, tmp_path: Path):
         runner=perfect_engine,
     )
     assert [e for e in events if e[1] == "a.jar"] == [
-        ("fetch", "a.jar", ""),
+        ("fetch", "a.jar", "scanning"),
+        ("fetch", "a.jar", "copying resources"),
         ("queued", "a.jar", ""),
-        ("decompile", "a.jar", "vineflower"),
+        ("decompile", "a.jar", "vineflower · 1 classes"),
     ]
 
 
@@ -747,7 +748,12 @@ def test_run_maven_hit_emits_no_decompile_events_and_carries_cached(
         resolver=hit_resolver,
         on_event=lambda k, s, d: events.append((k, s, d)),
     )
-    assert [e[0] for e in events if e[1] == "lib-1.2.jar"] == ["fetch"]
+    assert [(e[0], e[2]) for e in events if e[1] == "lib-1.2.jar"] == [
+        ("fetch", "scanning"),
+        ("fetch", "copying resources"),
+        ("fetch", "resolving"),
+        ("fetch", "extracting"),
+    ]
     rels = {r.rel: r for r in report.artifacts}
     assert rels["lib-1.2.jar"].sources_cached is True
 
@@ -767,7 +773,10 @@ def test_run_fallback_refires_decompile_event(fake_env, make_jar, tmp_path: Path
         runner=flaky_engine,
         on_event=lambda k, s, d: events.append((k, s, d)),
     )
-    assert [e[2] for e in events if e[0] == "decompile"] == ["vineflower", "cfr"]
+    assert [e[2] for e in events if e[0] == "decompile"] == [
+        "vineflower · 1 classes",
+        "cfr · 1 classes",
+    ]
 
 
 def test_report_json_carries_sources_cached(fake_env, make_jar, tmp_path: Path):
@@ -1024,8 +1033,11 @@ def test_run_batches_ready_smalls_into_one_jvm(fake_env, make_jar, tmp_path):
     batches: list[list[str]] = []
     all_queued = threading.Event()
     queued_count = [0]
+    decompile_details: list[tuple[str, str]] = []
 
     def on_event(kind, subject, detail):
+        if kind == "decompile":
+            decompile_details.append((subject, detail))
         if kind == "queued":
             queued_count[0] += 1
             if queued_count[0] == 3:
@@ -1048,6 +1060,8 @@ def test_run_batches_ready_smalls_into_one_jvm(fake_env, make_jar, tmp_path):
     )
     assert report.totals["ok"] == 3
     assert batches == [["s0.jar", "s1.jar"]]
+    assert ("big.jar!/lib/s0.jar", "vineflower · 1 classes") in decompile_details
+    assert ("big.jar!/lib/s1.jar", "vineflower · 1 classes") in decompile_details
     rels = {r.rel: r for r in report.artifacts}
     for i in range(2):
         assert rels[f"big.jar!/lib/s{i}.jar"].attempts[0].level == "batch"
@@ -1235,3 +1249,145 @@ def test_run_binds_verdict_cache(fake_env, make_jar, tmp_path: Path, monkeypatch
     )
     assert captured["verdicts"].fresh is True
     assert report2.settings["fresh_maven"] is True
+
+
+def test_run_sources_jar_emits_extract_then_copy(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("lib-sources.jar", {"com/x/A.java": "class A {}"}, base=input_dir)
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    assert [e[2] for e in events if e[1] == "lib-sources.jar" and e[0] == "fetch"] == [
+        "extracting",
+        "copying resources",
+    ]
+
+
+def test_run_resource_only_emits_scan_then_copy(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("res.jar", {"META-INF/MANIFEST.MF": "Manifest-Version: 1.0\n"}, base=input_dir)
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    assert [e[2] for e in events if e[1] == "res.jar" and e[0] == "fetch"] == [
+        "scanning",
+        "copying resources",
+    ]
+
+
+def test_run_beyond_depth_and_class_tree_events(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    make_jar("app.war", {"WEB-INF/lib/dep.jar": inner.read_bytes()}, base=input_dir)
+    (input_dir / "com").mkdir(parents=True)
+    (input_dir / "com" / "L.class").write_bytes(b"x")
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, max_depth=0),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    beyond = "app.war!/WEB-INF/lib/dep.jar"
+    assert [e[2] for e in events if e[1] == beyond and e[0] == "fetch"] == ["copying resources"]
+    assert [e[2] for e in events if e[1] == "_classes" and e[0] == "fetch"] == ["copying classes"]
+
+
+def test_run_maven_miss_emits_resolving_without_extracting(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out"),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+        resolver=lambda *a, **kw: Resolution(miss="no pom.properties; 0 candidates"),
+    )
+    assert [e[2] for e in events if e[1] == "a.jar" and e[0] == "fetch"] == [
+        "scanning",
+        "copying resources",
+        "resolving",
+    ]
+
+
+def test_run_corrupt_artifact_emits_no_fetch_events(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    (input_dir / "bad.jar").write_bytes(b"not a zip")
+    events: list[tuple[str, str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+    )
+    assert [e for e in events if e[1] == "bad.jar"] == []
+    assert report.totals["failed"] == 1
+
+
+def test_run_retry_event_reports_missing_count(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x", "com/x/B.class": b"y"}, base=input_dir)
+
+    def half_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name == "vineflower":
+            dest = Path(dest)
+            out = dest / "com/x/A.java"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("class A {}")
+            return EngineResult(spec.name, 0, False, 1, "")
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=half_engine,
+    )
+    assert [e[2] for e in events if e[0] == "decompile"] == [
+        "vineflower · 2 classes",
+        "cfr · retry 1 classes",
+    ]
+
+
+def test_run_without_on_event_never_passes_on_state(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    def strict_resolver(jar_path, repos, client, cache_dir):  # no **kw: must not get on_state
+        return Resolution(miss="no pom.properties; sha1 skipped")
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out"),
+        runner=perfect_engine,
+        resolver=strict_resolver,
+    )
+    assert report.totals["ok"] == 1
+
+
+def test_run_binds_on_state_into_resolver(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    def downloading_resolver(jar_path, repos, client, cache_dir, **kw):
+        assert "on_state" in kw
+        kw["on_state"]("downloading")
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out"),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+        resolver=downloading_resolver,
+    )
+    assert [e[2] for e in events if e[1] == "lib-1.2.jar" and e[0] == "fetch"] == [
+        "scanning",
+        "copying resources",
+        "resolving",
+        "downloading",
+    ]

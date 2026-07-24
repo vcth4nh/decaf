@@ -472,6 +472,7 @@ def fetch_sources(
     net: NetState | None = None,
     log: ResolutionLog | None = None,
     verdicts: VerdictCache | None = None,
+    on_state: Callable[[str], None] | None = None,
 ) -> tuple[Path, str, bool] | None:
     if net is None:
         net = NetState()
@@ -487,6 +488,8 @@ def fetch_sources(
         log.cached_no_sources = True
         return None
     verified_misses = 0
+    if on_state is not None and repos:
+        on_state("downloading")
     for repo in repos:
         url = f"{repo}/{gav.sources_path()}"
         try:
@@ -616,6 +619,7 @@ def resolve_sources(
     allow_sha1: bool = True,
     net: NetState | None = None,
     verdicts: VerdictCache | None = None,
+    on_state: Callable[[str], None] | None = None,
 ) -> Resolution:
     if net is None:
         net = NetState()
@@ -623,7 +627,7 @@ def resolve_sources(
 
     gav = gav_from_pom_properties(jar_path)
     if gav is not None:
-        fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts)
+        fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
         msg = _no_sources(
             f"found {gav} in pom.properties", "no -sources.jar in any repo", log
         )
@@ -636,7 +640,7 @@ def resolve_sources(
         if known is not None:
             if known.gav is not None:
                 gav = Gav(*known.gav)
-                fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts)
+                fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
                 msg = _no_sources(
                     f"cached verdict {gav} ({known.resolved_by})",
                     "no -sources.jar in any repo",
@@ -652,7 +656,7 @@ def resolve_sources(
                 verdicts.record_sha1(
                     sha1, (gav.group, gav.artifact, gav.version), "sha1-index"
                 )
-            fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts)
+            fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
             msg = _no_sources(
                 f"sha1 matched {gav} in Central index", "no -sources.jar in any repo", log
             )
@@ -696,7 +700,7 @@ def resolve_sources(
                     "verified-guess",
                 )
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(candidate, ordered, client, cache_dir, net, log, verdicts)
+            fetched = fetch_sources(candidate, ordered, client, cache_dir, net, log, verdicts, on_state)
             msg = _no_sources(
                 f"verified {candidate} via {repo}", "no -sources.jar published", log
             )

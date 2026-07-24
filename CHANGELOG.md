@@ -4,6 +4,24 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Decompiling rows in the live display show the engine, class count, and a
+  live per-attempt elapsed time (`vineflower · 13,271 classes · 1m42s`);
+  the clock resets when a fallback engine or per-class retry starts, so it
+  tracks progress toward `--timeout` (#65).
+
+### Changed
+
+- Live stage-1 rows now show truthful sub-states — `scanning`,
+  `copying resources`, `resolving`, `downloading`, `extracting`,
+  `copying classes` — instead of a blanket `fetching`; `downloading`
+  appears only while a network GET is actually running, so warm cached
+  runs no longer imply network traffic (#65).
+- Routine cached-maven ✓ lines render dim, so decompiled, extracted, and
+  failed artifacts stand out in scrollback. Emphasis only — still exactly
+  one line per jar (#65).
+
 ## [1.6.0] - 2026-07-23
 
 ### Added

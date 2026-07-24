@@ -1303,3 +1303,62 @@ def test_download_abort_mid_backoff_gives_up_quietly(tmp_path: Path):
     assert exc.value.kind == "HTTP 503"
     assert warnings == [] and log.failed_hosts == set()  # quiet give-up: no warn, no strike
     assert not list(tmp_path.glob("*.part"))
+
+
+def test_fetch_sources_on_state_fires_only_on_real_download(tmp_path: Path, make_jar):
+    gav = Gav("com.example", "lib", "1.2")
+    payload = make_jar("payload.jar", {"com/example/A.java": "class A {}"}).read_bytes()
+    states: list[str] = []
+    with make_client(lambda r: httpx.Response(200, content=payload)) as c:
+        got = fetch_sources(
+            gav, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
+        )
+        assert got is not None
+        assert states == ["downloading"]
+        states.clear()
+        again = fetch_sources(
+            gav, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
+        )
+        assert again is not None and again[2] is True
+        assert states == []  # disk-cache hit: no download, no event
+
+
+def test_fetch_sources_on_state_fires_when_all_repos_miss(tmp_path: Path):
+    states: list[str] = []
+    with make_client(lambda r: httpx.Response(404)) as c:
+        got = fetch_sources(
+            Gav("g", "a", "1"), ["https://x.test"], c, tmp_path, on_state=states.append
+        )
+    assert got is None
+    assert states == ["downloading"]  # the GETs were real network attempts
+
+
+def test_fetch_sources_on_state_silent_on_cached_no_sources_verdict(tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    verdicts.record_no_sources(("g", "a", "1"), ["https://x.test"])
+    states: list[str] = []
+
+    def explode(request):
+        raise AssertionError("verdict should have short-circuited")
+
+    with make_client(explode) as c:
+        got = fetch_sources(
+            Gav("g", "a", "1"), ["https://x.test"], c, tmp_path / "cache",
+            verdicts=verdicts, on_state=states.append,
+        )
+    assert got is None
+    assert states == []
+
+
+def test_resolve_sources_forwards_on_state(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+    payload = make_jar("payload.jar", {"com/example/A.java": "class A {}"}).read_bytes()
+    states: list[str] = []
+    with make_client(lambda r: httpx.Response(200, content=payload)) as c:
+        res = resolve_sources(
+            jar, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
+        )
+    assert res.sources_jar is not None
+    assert states == ["downloading"]
