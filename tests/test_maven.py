@@ -1093,6 +1093,47 @@ def test_resolve_sources_download_network_failure_reachable_wording(make_jar, tm
     )
 
 
+def test_resolve_sources_warning_names_subject(make_jar, tmp_path: Path):
+    jar = make_jar("dep-1.0.jar", {"com/d/D.class": b"x"})
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            raise httpx.ReadTimeout("stalled")
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(
+            jar,
+            ["https://r.test/m2"],
+            c,
+            tmp_path / "cache",
+            net=net,
+            subject="app.jar!/lib/dep-1.0.jar",
+        )
+    assert res.sources_jar is None
+    assert len(warnings) == 1
+    assert "timeout persisted after 3 attempts" in warnings[0]
+    assert "(while resolving app.jar!/lib/dep-1.0.jar)" in warnings[0]
+
+
+def test_resolve_sources_warning_subject_defaults_to_basename(make_jar, tmp_path: Path):
+    jar = make_jar("dep-1.0.jar", {"com/d/D.class": b"x"})
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            raise httpx.ReadTimeout("stalled")
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", net=net)
+    assert len(warnings) == 1
+    assert "(while resolving dep-1.0.jar)" in warnings[0]
+
+
 def test_fetch_sources_retries_mid_stream_failure(make_jar, tmp_path: Path):
     payload = make_jar("p.jar", {"A.java": "class A {}"}).read_bytes()
     state = {"n": 0}

@@ -4,6 +4,12 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Exhausted-retry network warnings name the artifact being resolved, full
+  nested path included (`maven: search.maven.org: timeout persisted after
+  3 attempts (while resolving app.jar!/lib/dep.jar); …`) (#68).
+
 ## [1.7.0] - 2026-07-24
 
 ### Added

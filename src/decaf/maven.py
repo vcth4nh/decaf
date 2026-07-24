@@ -195,6 +195,7 @@ class NetState:
 class ResolutionLog:
     """Per-resolve_sources accumulation (owned by one call, no lock needed)."""
 
+    subject: str = ""
     events: list[str] = field(default_factory=list)
     failed_hosts: set[str] = field(default_factory=set)
     ok_hosts: set[str] = field(default_factory=set)
@@ -245,10 +246,11 @@ def _check_alive(net: NetState, host: str) -> None:
 def _exhausted(net: NetState, log: ResolutionLog, host: str, kind: str) -> NetworkFailure:
     if kind in ("timeout", "connection error"):
         log.failed_hosts.add(host)  # only transport-class failures strike the breaker
+    where = f" (while resolving {log.subject})" if log.subject else ""
     net.warn_once(
         host,
         _kind_class(kind),
-        f"maven: {host}: {_kind_class(kind)} persisted after {RETRY_ATTEMPTS} attempts; "
+        f"maven: {host}: {_kind_class(kind)} persisted after {RETRY_ATTEMPTS} attempts{where}; "
         "artifacts may fall back to decompilation without sources",
     )
     return NetworkFailure(host, kind, f"{host}: {kind}")
@@ -620,10 +622,11 @@ def resolve_sources(
     net: NetState | None = None,
     verdicts: VerdictCache | None = None,
     on_state: Callable[[str], None] | None = None,
+    subject: str | None = None,
 ) -> Resolution:
     if net is None:
         net = NetState()
-    log = ResolutionLog()
+    log = ResolutionLog(subject=subject if subject is not None else jar_path.name)
 
     gav = gav_from_pom_properties(jar_path)
     if gav is not None:
