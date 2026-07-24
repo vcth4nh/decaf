@@ -4,6 +4,13 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Batched decompiles report live per-member progress: batch rows are labeled
+  `batch of N` and update in place while the batch JVM runs — `87/123 classes`
+  for tree-writing engines, `queued in batch`/`decompiling`/`done, pending split`
+  for fernflower — without resetting the per-attempt elapsed clock (#71).
+
 ### Changed
 
 - Exhausted-retry network warnings name the artifact being resolved, full

@@ -299,6 +299,10 @@ class _RunDisplay:
                 self._upsert(
                     subject, f"{'decompiling':<17} {_shorten(subject)}", kind, detail=detail
                 )
+            elif kind == "progress":
+                row = self._rows.get(subject)
+                if row is not None and self._stage.get(subject) == "decompile":
+                    self._p.update(row, detail=detail)  # detail only: clock and verb untouched
             self._refresh_header()
 
     # -- internals; every method below expects the lock to be held --
