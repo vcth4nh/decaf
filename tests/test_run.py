@@ -1367,3 +1367,27 @@ def test_run_without_on_event_never_passes_on_state(fake_env, make_jar, tmp_path
         resolver=strict_resolver,
     )
     assert report.totals["ok"] == 1
+
+
+def test_run_binds_on_state_into_resolver(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+
+    def downloading_resolver(jar_path, repos, client, cache_dir, **kw):
+        assert "on_state" in kw
+        kw["on_state"]("downloading")
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    events: list[tuple[str, str, str]] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out"),
+        on_event=lambda k, s, d: events.append((k, s, d)),
+        runner=perfect_engine,
+        resolver=downloading_resolver,
+    )
+    assert [e[2] for e in events if e[1] == "lib-1.2.jar" and e[0] == "fetch"] == [
+        "scanning",
+        "copying resources",
+        "resolving",
+        "downloading",
+    ]
