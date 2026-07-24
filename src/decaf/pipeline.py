@@ -64,6 +64,18 @@ def normalize_java_rel(rel: str) -> str:
     return rel
 
 
+def _owner_index(stem: str, owners: dict[str, int]) -> int | None:
+    """Batch attribution: which member owns a produced source stem.
+
+    Inner classes ride with their outer class (split on the first ``$``).
+    Shared by the post-batch split and the live watcher so they can't diverge.
+    """
+    i = owners.get(stem)
+    if i is None:
+        i = owners.get(stem.split("$", 1)[0])
+    return i
+
+
 @dataclass
 class EngineAttempt:
     engine: str
@@ -596,6 +608,10 @@ def _decompile_batch(
         return [], [(a, t, r) for a, t, r, _ in members]
     name = ctx.chain[0]
     dest = _tmp_dir(ctx)
+    owners: dict[str, int] = {}
+    for i, (_, _, _, stems) in enumerate(members):
+        for s in stems:
+            owners[s] = i
     if ctx.on_event is not None:
         for a, _, _, exp in members:
             ctx.on_event("decompile", a.rel, f"{name} · {len(exp):,} classes")
@@ -611,19 +627,13 @@ def _decompile_batch(
     trees: dict[int, Path] = {}
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
     try:
-        owners: dict[str, int] = {}
-        for i, (_, _, _, stems) in enumerate(members):
-            for s in stems:
-                owners[s] = i
         if res.returncode == 0 and not res.timed_out:
             for p in sorted(dest.rglob("*")):
                 if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
                     continue
                 rel = p.relative_to(dest).as_posix()
                 stem = normalize_java_rel(rel)[: -len(p.suffix)]
-                i = owners.get(stem)
-                if i is None:
-                    i = owners.get(stem.split("$", 1)[0])  # inner classes ride with their outer
+                i = _owner_index(stem, owners)
                 if i is None:
                     continue  # engine banner/stray file; real resources come from the member jar
                 tree = trees.setdefault(i, _tmp_dir(ctx))

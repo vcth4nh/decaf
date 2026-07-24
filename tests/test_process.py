@@ -677,3 +677,14 @@ def test_corrupt_resource_member_does_not_block_decompile(make_jar, tmp_path: Pa
     assert report.outcome == "ok"
     assert report.resources_copied == 0
     assert (tmp_path / "out/app.jar/com/x/A.java").is_file()
+
+
+def test_owner_index_direct_inner_and_miss():
+    from decaf.pipeline import _owner_index
+
+    owners = {"com/a/A": 0, "com/b/B": 1}
+    assert _owner_index("com/a/A", owners) == 0
+    assert _owner_index("com/a/A$Inner", owners) == 0  # inner rides with outer
+    assert _owner_index("com/b/B$1$2", owners) == 1  # only the first $ splits
+    assert _owner_index("com/zz/Nope", owners) is None
+    assert _owner_index("com/a/A2", owners) is None  # no prefix guessing
