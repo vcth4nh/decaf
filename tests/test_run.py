@@ -1391,3 +1391,27 @@ def test_run_binds_on_state_into_resolver(fake_env, make_jar, tmp_path: Path):
         "resolving",
         "downloading",
     ]
+
+
+def test_run_binds_subject_into_resolver(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    make_jar(
+        "app.jar",
+        {"com/a/A.class": b"a", "lib/dep.jar": inner.read_bytes()},
+        base=input_dir,
+    )
+
+    subjects: list[str] = []
+
+    def recording_resolver(jar_path, repos, client, cache_dir, **kw):
+        subjects.append(kw["subject"])
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    run(
+        Settings(input=input_dir, output=tmp_path / "out"),
+        on_event=lambda k, s, d: None,
+        runner=perfect_engine,
+        resolver=recording_resolver,
+    )
+    assert sorted(subjects) == ["app.jar", "app.jar!/lib/dep.jar"]

@@ -534,7 +534,7 @@ def _fetch_stage(
                 state("resolving")
                 resolution = ctx.resolver(
                     artifact.path, list(ctx.settings.repos), ctx.client, ctx.sources_cache,
-                    **({} if ctx.on_event is None else {"on_state": state}),
+                    **({} if ctx.on_event is None else {"on_state": state, "subject": artifact.rel}),
                 )
             done = False
             if resolution is not None and resolution.sources_jar is not None:
