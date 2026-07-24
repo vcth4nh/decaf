@@ -614,7 +614,10 @@ def _decompile_batch(
             owners[s] = i
     if ctx.on_event is not None:
         for a, _, _, exp in members:
-            ctx.on_event("decompile", a.rel, f"{name} · {len(exp):,} classes")
+            ctx.on_event(
+                "decompile", a.rel,
+                f"{name} · batch of {len(members)} · {len(exp):,} classes",
+            )
     try:
         res = ctx.batch_runner(
             ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _ in members], dest,
