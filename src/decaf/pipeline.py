@@ -46,6 +46,8 @@ _SMALL_CLASSES = 800  # below this, an archive is batchable
 _BATCH_MAX_JARS = 16
 _BATCH_MAX_CLASSES = 2000
 
+_PROGRESS_INTERVAL = 1.0  # seconds between batch-dest polls (display only)
+
 
 def _decompile_weight(artifact: Artifact) -> int:
     return 2 if artifact.classes >= _WHALE_CLASSES else 1
@@ -301,7 +303,7 @@ class Ctx:
     cpu_budget: int | None = None  # visible cores per engine JVM
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
-    on_event: Callable[[str, str, str], None] | None = None  # live progress events
+    on_event: Callable[[str, str, str], None] | None = None  # live progress events (scan/engines/fetch/queued/decompile/progress)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -595,6 +597,74 @@ def _decompile_stage(
     return report
 
 
+def _watch_batch(
+    dest: Path,
+    members: list[tuple[Artifact, Path, ArtifactReport, set[str]]],
+    owners: dict[str, int],
+    name: str,
+    on_event: Callable[[str, str, str], None],
+    stop: threading.Event,
+    interval: float,
+) -> None:
+    """Display-only batch progress: poll the dest, attribute output to members.
+
+    Outcomes are decided exclusively by the post-batch split; any exception
+    here just ends the watcher. Tree-writing engines get per-member
+    ``done/total classes``; fernflower (sequential per-member output archives,
+    unreadable while partial) gets a 3-state lifecycle instead.
+    """
+    k = len(members)
+    try:
+        if name == "fernflower":
+            arch: dict[str, int] = {}
+            ambiguous: set[str] = set()
+            for i, (_, target, _, _) in enumerate(members):
+                if target.name in arch:
+                    ambiguous.add(target.name)
+                arch[target.name] = i
+            seen: list[int] = []  # member indices in order of archive appearance
+            state: dict[int, str] = {}
+            while not stop.wait(interval):
+                for p in sorted(dest.glob("*")):
+                    i = arch.get(p.name)
+                    if i is not None and p.name not in ambiguous and i not in seen:
+                        seen.append(i)
+                for i, (a, target, _, _) in enumerate(members):
+                    if target.name in ambiguous:
+                        continue  # two members share a basename: attribution is a guess, make none
+                    if i not in seen:
+                        label = "queued in batch"
+                    elif i == seen[-1]:
+                        label = "decompiling"
+                    else:
+                        label = "done, pending split"
+                    if state.get(i) != label:
+                        state[i] = label
+                        on_event("progress", a.rel, f"{name} · batch of {k} · {label}")
+        else:
+            totals = {i: len(stems) for i, (_, _, _, stems) in enumerate(members)}
+            last: dict[int, int] = {}
+            while not stop.wait(interval):
+                produced: dict[int, set[str]] = {i: set() for i in range(k)}
+                for p in dest.rglob("*"):
+                    if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                        continue
+                    stem = normalize_java_rel(p.relative_to(dest).as_posix())[: -len(p.suffix)]
+                    i = _owner_index(stem, owners)
+                    if i is not None:
+                        produced[i].add(stem)
+                for i, (a, _, _, _) in enumerate(members):
+                    done = min(len(produced[i]), totals[i])
+                    if done and done != last.get(i):
+                        last[i] = done
+                        on_event(
+                            "progress", a.rel,
+                            f"{name} · batch of {k} · {done:,}/{totals[i]:,} classes",
+                        )
+    except Exception:
+        return  # display-only: a watcher failure must never affect the batch
+
+
 def _decompile_batch(
     members: list[tuple[Artifact, Path, ArtifactReport, set[str]]], ctx: Ctx
 ) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
@@ -618,6 +688,16 @@ def _decompile_batch(
                 "decompile", a.rel,
                 f"{name} · batch of {len(members)} · {len(exp):,} classes",
             )
+    stop = threading.Event()
+    watcher: threading.Thread | None = None
+    if ctx.on_event is not None:
+        watcher = threading.Thread(
+            target=_watch_batch,
+            args=(dest, members, owners, name, ctx.on_event, stop, _PROGRESS_INTERVAL),
+            name="decaf-batch-watch",
+            daemon=True,
+        )
+        watcher.start()
     try:
         res = ctx.batch_runner(
             ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _ in members], dest,
@@ -626,6 +706,10 @@ def _decompile_batch(
         )
     except Exception:
         res = engines.EngineResult(name, -1, False, 0, traceback.format_exc()[-2000:])
+    finally:
+        stop.set()
+        if watcher is not None:
+            watcher.join()
 
     trees: dict[int, Path] = {}
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}

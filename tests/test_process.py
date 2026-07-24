@@ -358,7 +358,7 @@ def test_discover_nested_carries_class_counts(make_jar, tmp_path):
     assert [(n.rel, n.classes) for n in nested] == [("app.war!/WEB-INF/lib/dep.jar", 2)]
 
 
-def _batch_ctx(tmp_path, batch_runner, chain=None):
+def _batch_ctx(tmp_path, batch_runner, chain=None, on_event=None):
     from decaf.pipeline import Ctx, MergeWriter, Settings
 
     tmp_root = tmp_path / "tmp"
@@ -367,10 +367,15 @@ def _batch_ctx(tmp_path, batch_runner, chain=None):
         settings=Settings(input=tmp_path, output=tmp_path / "out"),
         writer=MergeWriter(tmp_path / "out" / "src"),
         chain=chain or ["vineflower"],
-        engine_jars={"vineflower": Path("/fake/vf.jar"), "cfr": Path("/fake/cfr.jar")},
+        engine_jars={
+            "vineflower": Path("/fake/vf.jar"),
+            "cfr": Path("/fake/cfr.jar"),
+            "fernflower": Path("/fake/ff.jar"),
+        },
         java="java", tmp_root=tmp_root, client=None,
         sources_cache=tmp_path / "s", runner=None, resolver=None,
         batch_runner=batch_runner,
+        on_event=on_event,
     )
 
 
@@ -688,3 +693,158 @@ def test_owner_index_direct_inner_and_miss():
     assert _owner_index("com/b/B$1$2", owners) == 1  # only the first $ splits
     assert _owner_index("com/zz/Nope", owners) is None
     assert _owner_index("com/a/A2", owners) is None  # no prefix guessing
+
+
+def test_batch_watcher_reports_tree_progress(make_jar, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from decaf import pipeline
+    from decaf.engines import EngineResult
+
+    monkeypatch.setattr(pipeline, "_PROGRESS_INTERVAL", 0.01)
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "com/a/B.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    events: list[tuple[str, str, str]] = []
+    waits: dict[tuple[str, str], threading.Event] = {}
+
+    def _ev(subject, detail):
+        return waits.setdefault((subject, detail), threading.Event())
+
+    def on_event(kind, subject, detail):
+        events.append((kind, subject, detail))
+        if kind == "progress":
+            _ev(subject, detail).set()
+
+    def stepped_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        dest = Path(dest)
+        (dest / "com/a").mkdir(parents=True)
+        (dest / "com/a/A.java").write_text("class A {}\n")
+        assert _ev("a.jar", "vineflower · batch of 2 · 1/2 classes").wait(10)
+        (dest / "com/a/B.java").write_text("class B {}\n")
+        (dest / "com/b").mkdir(parents=True)
+        (dest / "com/b/B.java").write_text("class B {}\n")
+        assert _ev("a.jar", "vineflower · batch of 2 · 2/2 classes").wait(10)
+        assert _ev("b.jar", "vineflower · batch of 2 · 1/1 classes").wait(10)
+        return EngineResult(spec.name, 0, False, 3, "")
+
+    ctx = _batch_ctx(tmp_path, stepped_batch, on_event=on_event)
+    done, requeue = pipeline._decompile_batch([m1, m2], ctx)
+    assert requeue == [] and sorted(r.rel for r in done) == ["a.jar", "b.jar"]
+    a_details = [d for k, s, d in events if k == "progress" and s == "a.jar"]
+    assert a_details == [
+        "vineflower · batch of 2 · 1/2 classes",
+        "vineflower · batch of 2 · 2/2 classes",
+    ]
+    assert ("progress", "b.jar", "vineflower · batch of 2 · 1/1 classes") in events
+    n = len(events)
+    time.sleep(0.05)  # ~5 poll intervals: the watcher must be gone after the runner returns
+    assert len(events) == n
+
+
+def test_batch_watcher_fernflower_states(make_jar, tmp_path, monkeypatch):
+    import threading
+
+    from decaf import pipeline
+    from decaf.engines import EngineResult
+
+    monkeypatch.setattr(pipeline, "_PROGRESS_INTERVAL", 0.01)
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    events: list[tuple[str, str, str]] = []
+    waits: dict[tuple[str, str], threading.Event] = {}
+
+    def _ev(subject, detail):
+        return waits.setdefault((subject, detail), threading.Event())
+
+    def on_event(kind, subject, detail):
+        events.append((kind, subject, detail))
+        if kind == "progress":
+            _ev(subject, detail).set()
+
+    def ff_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        dest = Path(dest)
+        (dest / "a.jar").write_bytes(b"partial zip")
+        assert _ev("a.jar", "fernflower · batch of 2 · decompiling").wait(10)
+        assert _ev("b.jar", "fernflower · batch of 2 · queued in batch").wait(10)
+        (dest / "b.jar").write_bytes(b"partial zip")
+        assert _ev("a.jar", "fernflower · batch of 2 · done, pending split").wait(10)
+        assert _ev("b.jar", "fernflower · batch of 2 · decompiling").wait(10)
+        return EngineResult(spec.name, 1, False, 0, "boom")
+
+    ctx = _batch_ctx(tmp_path, ff_batch, chain=["fernflower"], on_event=on_event)
+    done, requeue = pipeline._decompile_batch([m1, m2], ctx)
+    assert done == [] and len(requeue) == 2  # rc=1: normal requeue flow, watcher already proven
+
+
+def test_batch_watcher_skips_colliding_basenames(make_jar, tmp_path, monkeypatch):
+    import time
+
+    from decaf import pipeline
+    from decaf.engines import EngineResult
+    from decaf.pipeline import ArtifactReport, expected_class_stems
+    from decaf.scanner import Artifact, ArtifactKind
+
+    monkeypatch.setattr(pipeline, "_PROGRESS_INTERVAL", 0.01)
+    j1 = make_jar("dep.jar", {"com/x/A.class": b"x"}, base=tmp_path / "p1")
+    j2 = make_jar("dep.jar", {"com/y/B.class": b"y"}, base=tmp_path / "p2")
+    m1 = (Artifact(j1, "app1!/dep.jar", ArtifactKind.ARCHIVE, 1),
+          j1, ArtifactReport(rel="app1!/dep.jar", kind="archive", outcome="ok"),
+          expected_class_stems(j1))
+    m2 = (Artifact(j2, "app2!/dep.jar", ArtifactKind.ARCHIVE, 1),
+          j2, ArtifactReport(rel="app2!/dep.jar", kind="archive", outcome="ok"),
+          expected_class_stems(j2))
+    events: list[tuple[str, str, str]] = []
+
+    def ff_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        (Path(dest) / "dep.jar").write_bytes(b"partial zip")
+        time.sleep(0.1)  # ~10 poll intervals: ambiguous name must never be attributed
+        return EngineResult(spec.name, 1, False, 0, "boom")
+
+    ctx = _batch_ctx(tmp_path, ff_batch, chain=["fernflower"],
+                     on_event=lambda k, s, d: events.append((k, s, d)))
+    done, requeue = pipeline._decompile_batch([m1, m2], ctx)
+    assert len(requeue) == 2
+    assert not [e for e in events if e[0] == "progress"]
+
+
+def test_batch_watcher_not_started_without_on_event(make_jar, tmp_path, monkeypatch):
+    from decaf import pipeline
+
+    calls: list[int] = []
+    monkeypatch.setattr(pipeline, "_watch_batch", lambda *a, **k: calls.append(1))
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)  # on_event defaults to None
+    done, requeue = pipeline._decompile_batch([m1], ctx)
+    assert [r.outcome for r in done] == ["ok"] and requeue == []
+    assert calls == []
+
+
+def test_batch_watcher_exception_never_taints_outcome(make_jar, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from decaf import pipeline
+    from decaf.engines import EngineResult
+
+    monkeypatch.setattr(pipeline, "_PROGRESS_INTERVAL", 0.01)
+    real = pipeline._owner_index
+
+    def boom(stem, owners):
+        if threading.current_thread().name.startswith("decaf-batch-watch"):
+            raise RuntimeError("watcher tick blew up")
+        return real(stem, owners)
+
+    monkeypatch.setattr(pipeline, "_owner_index", boom)
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    events: list[tuple[str, str, str]] = []
+
+    def slow_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        time.sleep(0.1)  # give the watcher ticks a chance to hit the poisoned helper
+        return res
+
+    ctx = _batch_ctx(tmp_path, slow_batch, on_event=lambda k, s, d: events.append((k, s, d)))
+    done, requeue = pipeline._decompile_batch([m1], ctx)
+    assert [r.outcome for r in done] == ["ok"] and requeue == []  # split ran on this thread, unpoisoned
+    assert not [e for e in events if e[0] == "progress"]
