@@ -6,6 +6,8 @@ nested inside archives — one level deep by default, `--max-depth` to change)
 into a source tree that mirrors your input, or one merged package tree with
 `--merge`.
 
+![decaf demo — sources-first resolution and live decompile progress](docs/demo.gif)
+
 - **Sources first:** artifacts that resolve to a Maven GAV (embedded
   `pom.properties`, SHA-1 lookup on Maven Central, or coordinates guessed
   from the filename/manifest and proven against the repo's `.jar.sha1`)
