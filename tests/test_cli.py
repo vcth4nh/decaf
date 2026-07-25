@@ -617,3 +617,29 @@ def test_fetch_rows_have_no_elapsed(monkeypatch):
     disp.on_event("fetch", "a.jar", "downloading")
     row = [r for r in rendered(progress) if "a.jar" in r]
     assert row == ["downloading       a.jar"]
+
+
+def test_display_progress_updates_detail_without_clock_reset():
+    progress, disp = make_display()
+    disp.on_found(1)
+    disp.on_event("scan", "", "1 top-level + 0 nested")
+    disp.on_event("decompile", "a.jar", "vineflower · batch of 2 · 3 classes")
+    task = next(t for t in progress.tasks if t.description == "decompiling       a.jar")
+    before = task.fields["since"]
+    disp.on_event("progress", "a.jar", "vineflower · batch of 2 · 1/3 classes")
+    assert task.fields["since"] == before  # the per-attempt clock must NOT restart
+    assert task.fields["detail"] == "vineflower · batch of 2 · 1/3 classes"
+    assert task.description == "decompiling       a.jar"
+    assert any("(vineflower · batch of 2 · 1/3 classes · " in r for r in rendered(progress))
+
+
+def test_display_progress_ignores_unknown_and_fetch_rows():
+    progress, disp = make_display()
+    disp.on_found(2)
+    disp.on_event("scan", "", "2 top-level + 0 nested")
+    disp.on_event("progress", "ghost.jar", "vineflower · batch of 2 · 1/3 classes")
+    assert not any("ghost.jar" in d for d in descriptions(progress))
+    disp.on_event("fetch", "b.jar", "resolving")
+    disp.on_event("progress", "b.jar", "vineflower · batch of 2 · 1/3 classes")
+    task = next(t for t in progress.tasks if "b.jar" in t.description)
+    assert task.fields["detail"] == "" and task.fields["since"] is None

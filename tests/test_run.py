@@ -1060,8 +1060,8 @@ def test_run_batches_ready_smalls_into_one_jvm(fake_env, make_jar, tmp_path):
     )
     assert report.totals["ok"] == 3
     assert batches == [["s0.jar", "s1.jar"]]
-    assert ("big.jar!/lib/s0.jar", "vineflower · 1 classes") in decompile_details
-    assert ("big.jar!/lib/s1.jar", "vineflower · 1 classes") in decompile_details
+    assert ("big.jar!/lib/s0.jar", "vineflower · batch of 2 · 1 classes") in decompile_details
+    assert ("big.jar!/lib/s1.jar", "vineflower · batch of 2 · 1 classes") in decompile_details
     rels = {r.rel: r for r in report.artifacts}
     for i in range(2):
         assert rels[f"big.jar!/lib/s{i}.jar"].attempts[0].level == "batch"
