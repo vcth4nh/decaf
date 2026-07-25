@@ -1468,7 +1468,14 @@ def test_run_batches_with_new_primary_engines(fake_env, make_jar, tmp_path, engi
 
 
 def test_run_batch_eligibility_boundary_at_whale_threshold(fake_env, make_jar, tmp_path):
-    """2,999 classes batches; 3,000 is a whale and never enters a batch (#74)."""
+    """2,999 classes batches; 3,000 is a whale and never enters a batch (#74).
+
+    The gate holds WHALE.jar (not big.jar): with four artifacts against the
+    in-flight admission cap of 3 (jobs + 2*jobs at jobs=1), buddy.jar is only
+    admissible after big's solo slot frees — and the gated whale, dispatched
+    next off `ready`, cannot finish before buddy is queued, so edge and buddy
+    are both waiting in ready_small when the weight frees and batch together.
+    """
     edge = make_jar("edge.jar", {f"com/e/C{i}.class": b"x" for i in range(2999)})
     whale = make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)})
     buddy = make_jar("buddy.jar", {"com/b/A.class": b"x"})
@@ -1494,7 +1501,7 @@ def test_run_batch_eligibility_boundary_at_whale_threshold(fake_env, make_jar, t
                 all_queued.set()
 
     def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
-        if Path(target).name == "big.jar":
+        if Path(target).name == "whale.jar":
             all_queued.wait(timeout=30)
         return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
 
