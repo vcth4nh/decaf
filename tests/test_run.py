@@ -1415,3 +1415,101 @@ def test_run_binds_subject_into_resolver(fake_env, make_jar, tmp_path: Path):
         resolver=recording_resolver,
     )
     assert sorted(subjects) == ["app.jar", "app.jar!/lib/dep.jar"]
+
+
+@pytest.mark.parametrize("engine", ["cfr", "procyon"])
+def test_run_batches_with_new_primary_engines(fake_env, make_jar, tmp_path, engine):
+    """chain[0] in {cfr, procyon} passes batch eligibility now (#74)."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    batches: list[list[str]] = []
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        assert spec.name == engine
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False,
+                 jobs=1, cpus=1, engine=engine),
+        runner=gated_solo,
+        batch_runner=recording_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3
+    assert batches == [["s0.jar", "s1.jar"]]
+    rels = {r.rel: r for r in report.artifacts}
+    for i in range(2):
+        assert rels[f"big.jar!/lib/s{i}.jar"].attempts[0].level == "batch"
+        assert rels[f"big.jar!/lib/s{i}.jar"].method == engine
+
+
+def test_run_batch_eligibility_boundary_at_whale_threshold(fake_env, make_jar, tmp_path):
+    """2,999 classes batches; 3,000 is a whale and never enters a batch (#74)."""
+    edge = make_jar("edge.jar", {f"com/e/C{i}.class": b"x" for i in range(2999)})
+    whale = make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)})
+    buddy = make_jar("buddy.jar", {"com/b/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/edge.jar": edge.read_bytes(),
+            "lib/whale.jar": whale.read_bytes(),
+            "lib/buddy.jar": buddy.read_bytes(),
+        },
+        base=input_dir,
+    )
+    batches: list[list[str]] = []
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 4:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+        runner=gated_solo,
+        batch_runner=recording_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 4
+    assert batches == [["buddy.jar", "edge.jar"]]
+    rels = {r.rel: r for r in report.artifacts}
+    assert rels["big.jar!/lib/edge.jar"].attempts[0].level == "batch"
+    assert rels["big.jar!/lib/whale.jar"].attempts[0].level == "archive"
