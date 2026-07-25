@@ -42,9 +42,9 @@ _CONTAINER_ROOTS = ("WEB-INF/classes/", "BOOT-INF/classes/")
 
 _WHALE_CLASSES = 3000  # artifacts at/above this class count get scheduling headroom
 
-_SMALL_CLASSES = 800  # below this, an archive is batchable
-_BATCH_MAX_JARS = 16
-_BATCH_MAX_CLASSES = 2000
+_SMALL_CLASSES = 3000  # below this, an archive is batchable (== _WHALE_CLASSES; #74 sweep)
+_BATCH_MAX_JARS = 32
+_BATCH_MAX_CLASSES = 8000  # ceilings picked at the measured plateau (#74)
 
 _PROGRESS_INTERVAL = 1.0  # seconds between batch-dest polls (display only)
 

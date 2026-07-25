@@ -848,3 +848,26 @@ def test_batch_watcher_exception_never_taints_outcome(make_jar, tmp_path, monkey
     done, requeue = pipeline._decompile_batch([m1], ctx)
     assert [r.outcome for r in done] == ["ok"] and requeue == []  # split ran on this thread, unpoisoned
     assert not [e for e in events if e[0] == "progress"]
+
+
+def test_form_batch_respects_raised_caps():
+    from collections import deque
+    from types import SimpleNamespace
+
+    from decaf.pipeline import _BATCH_MAX_CLASSES, _BATCH_MAX_JARS, _form_batch
+
+    def member(i, classes):
+        return (SimpleNamespace(classes=classes), None, None, {f"s{i}"})
+
+    # Jar cap: 33 one-class members -> exactly 32 taken, 1 left queued.
+    q = deque(member(i, 1) for i in range(33))
+    batch = _form_batch(q)
+    assert len(batch) == _BATCH_MAX_JARS == 32
+    assert len(q) == 1
+
+    # Class cap: 500-class members -> 16 fill 8,000; the rest stay queued in order.
+    q = deque(member(i, 500) for i in range(20))
+    batch = _form_batch(q)
+    assert len(batch) == 16
+    assert sum(a.classes for a, _, _, _ in batch) == _BATCH_MAX_CLASSES == 8000
+    assert len(q) == 4
