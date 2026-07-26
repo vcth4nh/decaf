@@ -11,7 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -278,6 +278,7 @@ def build_command(
     java: str = "java",
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
+    engine_args: Sequence[str] = (),
 ) -> list[str]:
     t, d, jar = str(target), str(dest), str(jar_path)
     # ActiveProcessorCount caps the JVM's visible cores, which sizes the
@@ -288,18 +289,21 @@ def build_command(
             "-XX:+AutoCreateSharedArchive",
             f"-XX:SharedArchiveFile={cds_dir / f'{spec.name}-{spec.version}.jsa'}",
         ]
+    # vineflower/fernflower parse options only BEFORE the positionals; the
+    # flag-anywhere dialects (cfr/procyon/jd) get them appended after the
+    # built-ins, so a user token wins where the engine takes the last value (#70).
     if spec.name == "vineflower":
-        return [*prefix, "-jar", jar, t, d]
+        return [*prefix, "-jar", jar, *engine_args, t, d]
     if spec.name == "cfr":
-        return [*prefix, "-jar", jar, t, "--outputdir", d, "--silent", "true"]
+        return [*prefix, "-jar", jar, t, "--outputdir", d, "--silent", "true", *engine_args]
     if spec.name == "procyon":
         if target.suffix.lower() in ARCHIVE_EXTS:
-            return [*prefix, "-jar", jar, "-jar", t, "-o", d]
-        return [*prefix, "-jar", jar, "-o", d, t]
+            return [*prefix, "-jar", jar, "-jar", t, "-o", d, *engine_args]
+        return [*prefix, "-jar", jar, "-o", d, t, *engine_args]
     if spec.name == "fernflower":
-        return [*prefix, "-cp", jar, str(spec.main_class), t, d]
+        return [*prefix, "-cp", jar, str(spec.main_class), *engine_args, t, d]
     if spec.name == "jd":
-        return [*prefix, "-jar", jar, t, "-od", d]
+        return [*prefix, "-jar", jar, t, "-od", d, *engine_args]
     raise EngineError(f"unknown engine {spec.name!r}")
 
 
@@ -311,6 +315,7 @@ def build_batch_command(
     java: str = "java",
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
+    engine_args: Sequence[str] = (),
 ) -> list[str]:
     if spec.name not in BATCH_ENGINES:
         raise EngineError(f"engine {spec.name!r} cannot batch")
@@ -322,15 +327,15 @@ def build_batch_command(
         ]
     t = [str(p) for p in targets]
     if spec.name == "vineflower":
-        return [*prefix, "-jar", str(jar_path), *t, str(dest)]
+        return [*prefix, "-jar", str(jar_path), *engine_args, *t, str(dest)]
     if spec.name == "cfr":
-        return [*prefix, "-jar", str(jar_path), *t, "--outputdir", str(dest), "--silent", "true"]
+        return [*prefix, "-jar", str(jar_path), *t, "--outputdir", str(dest), "--silent", "true", *engine_args]
     if spec.name == "procyon":
-        return [*prefix, "-jar", str(jar_path), *t, "-o", str(dest)]
+        return [*prefix, "-jar", str(jar_path), *t, "-o", str(dest), *engine_args]
     if spec.name == "fernflower":
-        return [*prefix, "-cp", str(jar_path), str(spec.main_class), *t, str(dest)]
+        return [*prefix, "-cp", str(jar_path), str(spec.main_class), *engine_args, *t, str(dest)]
     if spec.name == "jd":
-        return [*prefix, "-jar", str(jar_path), *t, "-od", str(dest)]
+        return [*prefix, "-jar", str(jar_path), *t, "-od", str(dest), *engine_args]
     raise EngineError(f"unknown engine {spec.name!r}")
 
 
@@ -344,12 +349,13 @@ def run_engine(
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
+    engine_args: Sequence[str] = (),
 ) -> EngineResult:
     dest.mkdir(parents=True, exist_ok=True)
     if target.is_dir() and spec.name not in NATIVE_DIR_ENGINES:
-        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line)
+        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args)
     else:
-        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line)
+        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args)
     _unpack_emitted_archives(dest)
     result.java_files = sum(
         1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES
@@ -367,12 +373,14 @@ def _run_once(
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
+    engine_args: Sequence[str] = (),
 ) -> EngineResult:
     if PROCESSES.closed:
         return EngineResult(spec.name, -1, False, 0, "interrupted")
     cmd = build_command(
         spec, jar_path, target, dest, java=java, cpu_budget=cpu_budget,
         **({"cds_dir": cds_dir} if cds_dir is not None else {}),
+        **({"engine_args": engine_args} if engine_args else {}),
     )
     return _exec_command(spec, cmd, timeout, on_stderr_line)
 
@@ -431,12 +439,14 @@ def run_engine_batch(
     java: str = "java",
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
+    engine_args: Sequence[str] = (),
 ) -> EngineResult:
     """One JVM, many source archives, merged output tree (BATCH_ENGINES only)."""
     dest.mkdir(parents=True, exist_ok=True)
     cmd = build_batch_command(
         spec, jar_path, targets, dest, java=java, cpu_budget=cpu_budget,
         **({"cds_dir": cds_dir} if cds_dir is not None else {}),
+        **({"engine_args": engine_args} if engine_args else {}),
     )
     result = _exec_command(spec, cmd, timeout, None)
     _unpack_emitted_archives(dest)
@@ -456,6 +466,7 @@ def _run_per_class(
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
+    engine_args: Sequence[str] = (),
 ) -> EngineResult:
     returncode = 0
     timed_out = False
@@ -463,7 +474,7 @@ def _run_per_class(
     for f in sorted(root.rglob("*.class")):
         if "$" in f.name:
             continue  # inner classes ride along with their outer class
-        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line)
+        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args)
         returncode = returncode or r.returncode
         timed_out = timed_out or r.timed_out
         if r.stderr_tail:

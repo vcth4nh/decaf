@@ -10,6 +10,13 @@ All notable changes to decaf are documented here.
   `batch of N` and update in place while the batch JVM runs — `87/123 classes`
   for tree-writing engines, `queued in batch`/`decompiling`/`done, pending split`
   for fernflower — without resetting the per-attempt elapsed clock (#71).
+- Raw engine options pass through after `--`: everything after the separator
+  is handed verbatim to the engine invocation, solo and batched alike
+  (`decaf ./libs --engine cfr --no-fallback -- --renameillegalidents true`).
+  Requires `--no-fallback`, since option dialects are engine-specific.
+  Tokens are user-owned — decaf does not validate them, and colliding with
+  decaf-managed flags is unsupported. Echoed as `engine_args` in the report
+  settings (#70).
 
 ### Changed
 

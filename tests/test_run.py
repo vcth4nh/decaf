@@ -1578,3 +1578,79 @@ def test_run_batch_eligibility_boundary_at_whale_threshold(fake_env, make_jar, t
     rels = {r.rel: r for r in report.artifacts}
     assert rels["big.jar!/lib/edge.jar"].attempts[0].level == "batch"
     assert rels["big.jar!/lib/whale.jar"].attempts[0].level == "archive"
+
+
+def test_run_engine_args_require_no_fallback(tmp_path):
+    """engine_args are primary-engine-only by contract: fallback must be off (#70)."""
+    (tmp_path / "in").mkdir()
+    with pytest.raises(DecafError, match="fallback"):
+        run(Settings(input=tmp_path / "in", output=tmp_path / "out", engine_args=("-dgs=1",)))
+
+
+def test_run_engine_args_reach_solo_runner(fake_env, make_jar, tmp_path):
+    """The decompile call site forwards Settings.engine_args to the runner and
+    the report settings echo them. (The missing-class retry site never runs
+    with engine_args: retries go to LATER chain engines, and the no-fallback
+    contract makes the chain a single engine.)"""
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    calls = []
+
+    def recording(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, engine_args=None):
+        calls.append(engine_args)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, mirror=False,
+                 fallback=False, engine_args=("-dgs=1",)),
+        runner=recording,
+    )
+    assert report.totals["ok"] == 1
+    assert calls == [("-dgs=1",)]
+    assert report.settings["engine_args"] == ["-dgs=1"]
+
+
+def test_run_engine_args_reach_batch_runner(fake_env, make_jar, tmp_path):
+    """The batch_runner call site forwards engine_args too — batch ≡ solo (#70)."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    seen = {}
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, engine_args=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        seen.setdefault("solo", engine_args)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None, engine_args=None):
+        seen["batch"] = engine_args
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False,
+                 jobs=1, cpus=1, fallback=False, engine_args=("-dgs=1",)),
+        runner=gated_solo,
+        batch_runner=recording_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3
+    assert seen["batch"] == ("-dgs=1",)
+    assert seen["solo"] == ("-dgs=1",)

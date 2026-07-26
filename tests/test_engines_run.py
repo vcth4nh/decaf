@@ -396,3 +396,85 @@ def test_build_command_cds_follows_cpu_budget():
         "-XX:+AutoCreateSharedArchive",
         f"-XX:SharedArchiveFile={cds / ('cfr-' + ENGINES['cfr'].version + '.jsa')}",
     ]
+
+
+EA = ["--renameillegalidents", "true"]  # opaque tokens; position is what's under test
+
+
+def test_build_command_splices_engine_args():
+    # vineflower/fernflower dialects take options BEFORE the positionals
+    assert build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), *EA, str(APP), str(OUT),
+    ]
+    ff = ENGINES["fernflower"]
+    assert build_command(ff, JAR, APP, OUT, java=J, engine_args=EA) == [
+        J, "-cp", str(JAR), ff.main_class, *EA, str(APP), str(OUT),
+    ]
+    # cfr/procyon/jd take flags anywhere: appended after the built-ins (last wins)
+    assert build_command(ENGINES["cfr"], JAR, APP, OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), str(APP), "--outputdir", str(OUT), "--silent", "true", *EA,
+    ]
+    assert build_command(ENGINES["procyon"], JAR, APP, OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), "-jar", str(APP), "-o", str(OUT), *EA,
+    ]
+    cls = Path("/in/Foo.class")
+    assert build_command(ENGINES["procyon"], JAR, cls, OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), "-o", str(OUT), str(cls), *EA,
+    ]
+    assert build_command(ENGINES["jd"], JAR, APP, OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), str(APP), "-od", str(OUT), *EA,
+    ]
+
+
+def test_build_batch_command_splices_engine_args():
+    from decaf.engines import build_batch_command
+
+    a, b = Path("/in/a.jar"), Path("/in/b.jar")
+    ff = ENGINES["fernflower"]
+    assert build_batch_command(ENGINES["vineflower"], JAR, [a, b], OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), *EA, str(a), str(b), str(OUT),
+    ]
+    assert build_batch_command(ff, JAR, [a, b], OUT, java=J, engine_args=EA) == [
+        J, "-cp", str(JAR), ff.main_class, *EA, str(a), str(b), str(OUT),
+    ]
+    assert build_batch_command(ENGINES["cfr"], JAR, [a, b], OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), str(a), str(b), "--outputdir", str(OUT), "--silent", "true", *EA,
+    ]
+    assert build_batch_command(ENGINES["procyon"], JAR, [a, b], OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), str(a), str(b), "-o", str(OUT), *EA,
+    ]
+    assert build_batch_command(ENGINES["jd"], JAR, [a, b], OUT, java=J, engine_args=EA) == [
+        J, "-jar", str(JAR), str(a), str(b), "-od", str(OUT), *EA,
+    ]
+
+
+def test_run_engine_threads_engine_args(tmp_path: Path, monkeypatch):
+    PROCESSES.reset()
+    seen = {}
+
+    def fake_exec(spec, cmd, timeout, on_stderr_line):
+        seen["cmd"] = cmd
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    monkeypatch.setattr(engines, "_exec_command", fake_exec)
+    target = tmp_path / "app.jar"
+    target.write_bytes(b"")
+    run_engine(ENGINES["vineflower"], JAR, target, tmp_path / "out", 10.0, java=J, engine_args=["-dgs=1"])
+    assert "-dgs=1" in seen["cmd"]
+
+
+def test_run_engine_batch_threads_engine_args(tmp_path: Path, monkeypatch):
+    from decaf.engines import run_engine_batch
+
+    seen = {}
+
+    def fake_exec(spec, cmd, timeout, on_stderr_line):
+        seen["cmd"] = cmd
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    monkeypatch.setattr(engines, "_exec_command", fake_exec)
+    run_engine_batch(
+        ENGINES["vineflower"], JAR, [tmp_path / "a.jar", tmp_path / "b.jar"],
+        tmp_path / "out", 10.0, java=J, engine_args=["-dgs=1"],
+    )
+    assert "-dgs=1" in seen["cmd"]
