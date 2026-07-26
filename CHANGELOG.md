@@ -16,6 +16,10 @@ All notable changes to decaf are documented here.
 - Exhausted-retry network warnings name the artifact being resolved, full
   nested path included (`maven: search.maven.org: timeout persisted after
   3 attempts (while resolving app.jar!/lib/dep.jar); …`) (#68).
+- All five engines now batch small jars (cfr and procyon join vineflower,
+  fernflower, and jd), and batches got bigger: archives below 3,000 classes
+  are batch-eligible (was 800), up to 32 jars / 8,000 classes per batch
+  (was 16 / 2,000) (#74).
 
 ## [1.7.0] - 2026-07-24
 

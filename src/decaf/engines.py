@@ -188,7 +188,7 @@ def find_java() -> tuple[str, int] | None:
 NATIVE_DIR_ENGINES = {"vineflower", "fernflower", "jd"}
 
 
-BATCH_ENGINES = {"vineflower", "fernflower", "jd"}  # verified multi-source CLIs
+BATCH_ENGINES = {"vineflower", "cfr", "fernflower", "procyon", "jd"}  # all five verified multi-source (#74); cfr/procyon positional
 
 
 @dataclass
@@ -321,11 +321,17 @@ def build_batch_command(
             f"-XX:SharedArchiveFile={cds_dir / f'{spec.name}-{spec.version}.jsa'}",
         ]
     t = [str(p) for p in targets]
+    if spec.name == "vineflower":
+        return [*prefix, "-jar", str(jar_path), *t, str(dest)]
+    if spec.name == "cfr":
+        return [*prefix, "-jar", str(jar_path), *t, "--outputdir", str(dest), "--silent", "true"]
+    if spec.name == "procyon":
+        return [*prefix, "-jar", str(jar_path), *t, "-o", str(dest)]
     if spec.name == "fernflower":
         return [*prefix, "-cp", str(jar_path), str(spec.main_class), *t, str(dest)]
     if spec.name == "jd":
         return [*prefix, "-jar", str(jar_path), *t, "-od", str(dest)]
-    return [*prefix, "-jar", str(jar_path), *t, str(dest)]  # vineflower
+    raise EngineError(f"unknown engine {spec.name!r}")
 
 
 def run_engine(

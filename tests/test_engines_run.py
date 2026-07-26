@@ -329,13 +329,26 @@ def test_build_batch_command_multi_source():
     assert build_batch_command(ENGINES["jd"], JAR, [a, b], OUT, java=J) == [
         J, "-jar", str(JAR), str(a), str(b), "-od", str(OUT),
     ]
+    assert build_batch_command(ENGINES["cfr"], JAR, [a, b], OUT, java=J) == [
+        J, "-jar", str(JAR), str(a), str(b), "--outputdir", str(OUT), "--silent", "true",
+    ]
+    assert build_batch_command(ENGINES["procyon"], JAR, [a, b], OUT, java=J) == [
+        J, "-jar", str(JAR), str(a), str(b), "-o", str(OUT),
+    ]
 
 
-def test_build_batch_command_rejects_single_input_engines():
+def test_build_batch_command_rejects_non_batch_engines(monkeypatch):
+    from dataclasses import replace
+
     from decaf.engines import EngineError, build_batch_command
 
+    bogus = replace(ENGINES["cfr"], name="bogus")
     with pytest.raises(EngineError, match="cannot batch"):
-        build_batch_command(ENGINES["cfr"], JAR, [Path("/in/a.jar")], OUT, java=J)
+        build_batch_command(bogus, JAR, [Path("/in/a.jar")], OUT, java=J)
+    # In BATCH_ENGINES but with no dispatch arm: loud failure, no fallthrough.
+    monkeypatch.setattr(engines, "BATCH_ENGINES", engines.BATCH_ENGINES | {"bogus"})
+    with pytest.raises(EngineError, match="unknown engine"):
+        build_batch_command(bogus, JAR, [Path("/in/a.jar")], OUT, java=J)
 
 
 def test_run_engine_batch_counts_merged_sources(tmp_path: Path, monkeypatch):
