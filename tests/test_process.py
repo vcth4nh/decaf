@@ -380,13 +380,13 @@ def _batch_ctx(tmp_path, batch_runner, chain=None, on_event=None):
 
 
 def _member(make_jar, name, entries):
-    from decaf.pipeline import ArtifactReport, expected_class_stems
+    from decaf.pipeline import ArtifactReport, _stems_and_claims
     from decaf.scanner import Artifact, ArtifactKind
 
     jar = make_jar(name, entries)
     a = Artifact(jar, name, ArtifactKind.ARCHIVE, len(entries))
     report = ArtifactReport(rel=name, kind="archive", outcome="ok")
-    return (a, jar, report, expected_class_stems(jar))
+    return (a, jar, report, *_stems_and_claims(jar))
 
 
 def merged_batch_engine(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
@@ -539,6 +539,66 @@ def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
     out = tmp_path / "out" / "src"
     assert (out / "com/a/A.java").is_file()
     assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped
+
+
+def test_stems_and_claims_split_metadata_from_classes(make_jar, tmp_path):
+    from decaf.pipeline import _stems_and_claims, expected_class_stems
+
+    jar = make_jar(
+        "m.jar",
+        {
+            "com/a/A.class": b"x",
+            "com/a/A$1.class": b"i",
+            "com/a/package-info.class": b"p",
+            "module-info.class": b"m",
+            "META-INF/versions/9/module-info.class": b"m9",
+        },
+    )
+    stems, claims = _stems_and_claims(jar)
+    assert stems == {"com/a/A"}
+    # The versioned entry normalizes onto the same root claim.
+    assert claims == {"com/a/package-info", "module-info"}
+    assert expected_class_stems(jar) == stems
+
+
+def test_decompile_batch_attributes_package_info_to_claiming_member(make_jar, tmp_path):
+    """#75: a member's own package-info.class claims the emitted source."""
+    from decaf.pipeline import MirrorWriter, _decompile_batch
+
+    m1 = _member(
+        make_jar, "a.jar",
+        {"org/alpha/Foo.class": b"x", "org/alpha/package-info.class": b"p"},
+    )
+    m2 = _member(make_jar, "b.jar", {"org/beta/Bar.class": b"y"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)
+    ctx.writer = MirrorWriter(tmp_path / "out")
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    a = next(r for r in done if r.rel == "a.jar")
+    assert a.outcome == "ok"
+    assert (tmp_path / "out/a.jar/org/alpha/package-info.java").is_file()
+    assert not (tmp_path / "out/b.jar/org/alpha/package-info.java").exists()
+    assert a.java_files == 2  # Foo.java + package-info.java, same as a solo run
+    assert a.classes == 1  # accounting stays class-only: claims never join expectations
+    assert a.missing_classes == 0
+    assert [at.level for at in a.attempts] == ["batch"]  # no retry fires for metadata
+
+
+def test_decompile_batch_attributes_module_info_to_sole_claimant(make_jar, tmp_path):
+    """#75: root-level module-info.java goes to the one member that has module-info.class."""
+    from decaf.pipeline import MirrorWriter, _decompile_batch
+
+    m1 = _member(make_jar, "a.jar", {"module-info.class": b"m", "com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)
+    ctx.writer = MirrorWriter(tmp_path / "out")
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    a = next(r for r in done if r.rel == "a.jar")
+    assert a.outcome == "ok"
+    assert (tmp_path / "out/a.jar/module-info.java").is_file()
+    assert not (tmp_path / "out/b.jar/module-info.java").exists()
+    assert a.java_files == 2 and a.classes == 1 and a.missing_classes == 0
 
 
 def test_maven_hit_mirror_carries_original_resources(make_jar, tmp_path: Path):
@@ -782,7 +842,7 @@ def test_batch_watcher_skips_colliding_basenames(make_jar, tmp_path, monkeypatch
 
     from decaf import pipeline
     from decaf.engines import EngineResult
-    from decaf.pipeline import ArtifactReport, expected_class_stems
+    from decaf.pipeline import ArtifactReport, _stems_and_claims
     from decaf.scanner import Artifact, ArtifactKind
 
     monkeypatch.setattr(pipeline, "_PROGRESS_INTERVAL", 0.01)
@@ -790,10 +850,10 @@ def test_batch_watcher_skips_colliding_basenames(make_jar, tmp_path, monkeypatch
     j2 = make_jar("dep.jar", {"com/y/B.class": b"y"}, base=tmp_path / "p2")
     m1 = (Artifact(j1, "app1!/dep.jar", ArtifactKind.ARCHIVE, 1),
           j1, ArtifactReport(rel="app1!/dep.jar", kind="archive", outcome="ok"),
-          expected_class_stems(j1))
+          *_stems_and_claims(j1))
     m2 = (Artifact(j2, "app2!/dep.jar", ArtifactKind.ARCHIVE, 1),
           j2, ArtifactReport(rel="app2!/dep.jar", kind="archive", outcome="ok"),
-          expected_class_stems(j2))
+          *_stems_and_claims(j2))
     events: list[tuple[str, str, str]] = []
 
     def ff_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
@@ -857,7 +917,7 @@ def test_form_batch_respects_raised_caps():
     from decaf.pipeline import _BATCH_MAX_CLASSES, _BATCH_MAX_JARS, _form_batch
 
     def member(i, classes):
-        return (SimpleNamespace(classes=classes), None, None, {f"s{i}"})
+        return (SimpleNamespace(classes=classes), None, None, {f"s{i}"}, set())
 
     # Jar cap: 33 one-class members -> exactly 32 taken, 1 left queued.
     q = deque(member(i, 1) for i in range(33))
@@ -869,5 +929,36 @@ def test_form_batch_respects_raised_caps():
     q = deque(member(i, 500) for i in range(20))
     batch = _form_batch(q)
     assert len(batch) == 16
-    assert sum(a.classes for a, _, _, _ in batch) == _BATCH_MAX_CLASSES == 8000
+    assert sum(a.classes for a, *_ in batch) == _BATCH_MAX_CLASSES == 8000
     assert len(q) == 4
+
+
+def test_form_batch_defers_metadata_claim_overlap():
+    """#75: members claiming the same metadata rel never co-batch, exactly like
+    overlapping class stems — the second claimant stays queued for the next batch."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    from decaf.pipeline import _form_batch
+
+    def member(stems, claims):
+        return (SimpleNamespace(classes=1), None, None, stems, claims)
+
+    # Two modular jars both claim "module-info".
+    q = deque([
+        member({"com/a/A"}, {"module-info"}),
+        member({"com/b/B"}, {"module-info"}),
+        member({"com/c/C"}, set()),
+    ])
+    batch = _form_batch(q)
+    assert [stems for _, _, _, stems, _ in batch] == [{"com/a/A"}, {"com/c/C"}]
+    assert [stems for _, _, _, stems, _ in q] == [{"com/b/B"}]
+
+    # Two jars sharing a package both claim its package-info.
+    q = deque([
+        member({"com/x/A"}, {"com/x/package-info"}),
+        member({"com/x/B"}, {"com/x/package-info"}),
+    ])
+    batch = _form_batch(q)
+    assert [stems for _, _, _, stems, _ in batch] == [{"com/x/A"}]
+    assert [stems for _, _, _, stems, _ in q] == [{"com/x/B"}]

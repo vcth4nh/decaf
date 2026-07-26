@@ -314,8 +314,14 @@ def _class_stem(entry: str) -> str:
     return normalize_java_rel(entry)[: -len(".class")]
 
 
-def expected_class_stems(source: Path) -> set[str]:
-    """Top-level class names (no $-inner, no module/package-info) a decompile should yield."""
+def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
+    """One pass over the class entries: (top-level class stems, metadata claims).
+
+    Claims are the module-info/package-info source rels this archive could
+    yield. They attribute batch output back to its member and keep claimants
+    from sharing a batch, but never join expectations (#75): metadata is
+    copied when an engine emits it, exactly like a solo run — never retried.
+    """
     if source.is_dir():
         entries = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
     else:
@@ -323,14 +329,21 @@ def expected_class_stems(source: Path) -> set[str]:
             with zipfile.ZipFile(source) as zf:
                 entries = [n for n in zf.namelist() if n.endswith(".class")]
         except (zipfile.BadZipFile, OSError):
-            return set()
-    stems = set()
+            return set(), set()
+    stems: set[str] = set()
+    claims: set[str] = set()
     for e in entries:
         base = e.rsplit("/", 1)[-1]
-        if "$" in base or base in ("module-info.class", "package-info.class"):
-            continue
-        stems.add(_class_stem(e))
-    return stems
+        if base in ("module-info.class", "package-info.class"):
+            claims.add(_class_stem(e))
+        elif "$" not in base:
+            stems.add(_class_stem(e))
+    return stems, claims
+
+
+def expected_class_stems(source: Path) -> set[str]:
+    """Top-level class names (no $-inner, no module/package-info) a decompile should yield."""
+    return _stems_and_claims(source)[0]
 
 
 def produced_stems(dest: Path) -> set[str]:
@@ -599,7 +612,7 @@ def _decompile_stage(
 
 def _watch_batch(
     dest: Path,
-    members: list[tuple[Artifact, Path, ArtifactReport, set[str]]],
+    members: list[tuple[Artifact, Path, ArtifactReport, set[str], set[str]]],
     owners: dict[str, int],
     name: str,
     on_event: Callable[[str, str, str], None],
@@ -618,7 +631,7 @@ def _watch_batch(
         if name == "fernflower":
             arch: dict[str, int] = {}
             ambiguous: set[str] = set()
-            for i, (_, target, _, _) in enumerate(members):
+            for i, (_, target, _, _, _) in enumerate(members):
                 if target.name in arch:
                     ambiguous.add(target.name)
                 arch[target.name] = i
@@ -629,7 +642,7 @@ def _watch_batch(
                     i = arch.get(p.name)
                     if i is not None and p.name not in ambiguous and i not in seen:
                         seen.append(i)
-                for i, (a, target, _, _) in enumerate(members):
+                for i, (a, target, _, _, _) in enumerate(members):
                     if target.name in ambiguous:
                         continue  # two members share a basename: attribution is a guess, make none
                     if i not in seen:
@@ -642,7 +655,7 @@ def _watch_batch(
                         state[i] = label
                         on_event("progress", a.rel, f"{name} · batch of {k} · {label}")
         else:
-            totals = {i: len(stems) for i, (_, _, _, stems) in enumerate(members)}
+            totals = {i: len(stems) for i, (_, _, _, stems, _) in enumerate(members)}
             last: dict[int, int] = {}
             while not stop.wait(interval):
                 produced: dict[int, set[str]] = {i: set() for i in range(k)}
@@ -653,7 +666,7 @@ def _watch_batch(
                     i = _owner_index(stem, owners)
                     if i is not None:
                         produced[i].add(stem)
-                for i, (a, _, _, _) in enumerate(members):
+                for i, (a, _, _, _, _) in enumerate(members):
                     done = min(len(produced[i]), totals[i])
                     if done and done != last.get(i):
                         last[i] = done
@@ -666,24 +679,24 @@ def _watch_batch(
 
 
 def _decompile_batch(
-    members: list[tuple[Artifact, Path, ArtifactReport, set[str]]], ctx: Ctx
+    members: list[tuple[Artifact, Path, ArtifactReport, set[str], set[str]]], ctx: Ctx
 ) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
     """Stage 2 for a batch: one primary-engine JVM over several small jars.
 
     Returns (completed reports, members to requeue for solo processing).
-    Members' expected-stem sets are disjoint (enforced at formation), so every
-    produced source file belongs to exactly one member.
+    Members' expected-stem and metadata-claim sets are disjoint (enforced at
+    formation), so every produced source file belongs to exactly one member.
     """
     if engines.PROCESSES.closed:
-        return [], [(a, t, r) for a, t, r, _ in members]
+        return [], [(a, t, r) for a, t, r, _, _ in members]
     name = ctx.chain[0]
     dest = _tmp_dir(ctx)
     owners: dict[str, int] = {}
-    for i, (_, _, _, stems) in enumerate(members):
-        for s in stems:
+    for i, (_, _, _, stems, claims) in enumerate(members):
+        for s in stems | claims:
             owners[s] = i
     if ctx.on_event is not None:
-        for a, _, _, exp in members:
+        for a, _, _, exp, _ in members:
             ctx.on_event(
                 "decompile", a.rel,
                 f"{name} · batch of {len(members)} · {len(exp):,} classes",
@@ -700,7 +713,7 @@ def _decompile_batch(
         watcher.start()
     try:
         res = ctx.batch_runner(
-            ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _ in members], dest,
+            ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _, _ in members], dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
         )
@@ -733,7 +746,7 @@ def _decompile_batch(
 
     done: list[ArtifactReport] = []
     requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
-    for i, (a, target, report, stems) in enumerate(members):
+    for i, (a, target, report, stems, _) in enumerate(members):
         report.attempts.append(
             EngineAttempt(name, "batch", res.returncode, res.timed_out,
                           len(produced[i]), res.stderr_tail)
@@ -814,10 +827,10 @@ def _preflight_engines(
 
 
 def _form_batch(ready_small: deque) -> list:
-    """Greedy prefix of ready smalls with disjoint stems, bounded by the caps.
+    """Greedy prefix of ready smalls with disjoint stems and claims, bounded by the caps.
 
-    Skipped members (stem overlap / class cap) stay queued in order for the
-    next batch. Always takes at least one member, so the queue drains.
+    Skipped members (stem/claim overlap / class cap) stay queued in order for
+    the next batch. Always takes at least one member, so the queue drains.
     """
     batch: list = []
     taken: set[str] = set()
@@ -825,12 +838,13 @@ def _form_batch(ready_small: deque) -> list:
     kept: list = []
     while ready_small and len(batch) < _BATCH_MAX_JARS:
         item = ready_small.popleft()
-        a, _, _, stems = item
-        if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (stems & taken)):
+        a, _, _, stems, claims = item
+        footprint = stems | claims
+        if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (footprint & taken)):
             kept.append(item)
             continue
         batch.append(item)
-        taken |= stems
+        taken |= footprint
         total_classes += a.classes
     ready_small.extendleft(reversed(kept))
     return batch
@@ -933,7 +947,7 @@ def run(
                 fetch_futs: dict = {}  # Future -> Artifact, kept for the stage-2 hand-off
                 dec_futs: dict = {}  # Future -> (kind, weight)
                 ready: list[tuple] = []  # (-classes, seq, artifact, target, report)
-                ready_small: deque = deque()  # batch-eligible: (artifact, target, report, stems)
+                ready_small: deque = deque()  # batch-eligible: (artifact, target, report, stems, claims)
                 dec_weight = 0
                 try:
                     while todo or fetch_futs or dec_futs or ready or ready_small:
@@ -964,7 +978,7 @@ def run(
                             batch = _form_batch(ready_small)
                             dec_weight += 1
                             if len(batch) == 1:
-                                a, target, report, _ = batch[0]
+                                a, target, report, _, _ = batch[0]
                                 dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", 1)
                             else:
                                 dec_futs[dec_pool.submit(_decompile_batch, batch, ctx)] = ("batch", 1)
@@ -1005,7 +1019,7 @@ def run(
                                         and chain[0] in engines.BATCH_ENGINES
                                     ):
                                         ready_small.append(
-                                            (a, target, report, expected_class_stems(target))
+                                            (a, target, report, *_stems_and_claims(target))
                                         )
                                     else:
                                         heappush(ready, (-a.classes, next(seq), a, target, report))
