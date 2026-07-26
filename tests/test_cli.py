@@ -643,3 +643,43 @@ def test_display_progress_ignores_unknown_and_fetch_rows():
     disp.on_event("progress", "b.jar", "vineflower · batch of 2 · 1/3 classes")
     task = next(t for t in progress.tasks if "b.jar" in t.description)
     assert task.fields["detail"] == "" and task.fields["since"] is None
+
+
+def test_cli_engine_args_passthrough(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    captured = {}
+
+    def capture(settings, **kw):
+        captured["s"] = settings
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+                                 "--engine", "cfr", "--no-fallback", "--",
+                                 "--renameillegalidents", "true"])
+    assert result.exit_code == 0
+    assert captured["s"].engine_args == ("--renameillegalidents", "true")
+    assert captured["s"].engine == "cfr" and captured["s"].fallback is False
+
+    # tokens after -- never bind to decaf options, even lookalikes
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2"),
+                                 "--no-fallback", "--", "--engine", "procyon"])
+    assert result.exit_code == 0
+    assert captured["s"].engine == "vineflower"
+    assert captured["s"].engine_args == ("--engine", "procyon")
+
+    # DefaultGroup re-attachment keeps -- working with options before INPUT
+    result = runner.invoke(app, ["--engine", "cfr", str(tmp_path / "in"),
+                                 "-o", str(tmp_path / "out3"), "--no-fallback", "--", "-dgs=1"])
+    assert result.exit_code == 0
+    assert captured["s"].engine == "cfr"
+    assert captured["s"].engine_args == ("-dgs=1",)
+
+
+def test_cli_engine_args_require_no_fallback(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+                                 "--", "-dgs=1"])
+    assert result.exit_code == 2
+    assert "--no-fallback" in ANSI.sub("", result.output)

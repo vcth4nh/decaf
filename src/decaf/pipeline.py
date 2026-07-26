@@ -260,6 +260,7 @@ class Settings:
     output: Path
     engine: str = "vineflower"
     fallback: bool = True
+    engine_args: tuple[str, ...] = ()  # raw tokens for the primary engine; requires fallback=False
     mirror: bool = True  # mirror the input layout; False = one merged src/ tree
     resources: bool = True  # mirror mode: also carry the original archives' resources
     maven: bool = True
@@ -442,6 +443,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             ENGINES[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+            **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
         report.attempts.append(
@@ -716,6 +718,7 @@ def _decompile_batch(
             ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _, _ in members], dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+            **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
         )
     except Exception:
         res = engines.EngineResult(name, -1, False, 0, traceback.format_exc()[-2000:])
@@ -862,6 +865,8 @@ def run(
     resolver: Callable | None = None,
     batch_runner: Callable | None = None,
 ) -> RunReport:
+    if settings.engine_args and settings.fallback:
+        raise DecafError("engine_args require fallback disabled (engine option dialects don't transfer)")
     start = time.monotonic()
     engines.PROCESSES.reset()
     found = engines.find_java()
@@ -1043,6 +1048,7 @@ def run(
                     "output": str(settings.output),
                     "engine": settings.engine,
                     "fallback": settings.fallback,
+                    "engine_args": list(settings.engine_args),
                     "mirror": settings.mirror,
                     "resources": settings.resources,
                     "maven": settings.maven,

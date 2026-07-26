@@ -52,6 +52,7 @@ decaf ./libs                        # one folder per archive under ./decaf-out
 decaf app.war -o out --merge        # single merged source tree in out/src
 decaf ./libs --no-resource          # mirrored layout, sources only
 decaf ./libs --engine cfr --no-fallback
+decaf ./libs --engine cfr --no-fallback -- --renameillegalidents true
 decaf ./libs --no-maven -j 8 --timeout 120
 decaf ./libs --cpus 8               # cap total CPU (shared machine)
 decaf ./libs --max-depth 2          # also unpack jars nested two archives deep
@@ -60,6 +61,14 @@ decaf ./libs --repo https://nexus.mycorp.com/repository/maven-public
 
 Exit codes: `0` all artifacts succeeded · `1` some failed (see
 `decaf-out/decaf-report.json`) · `2` usage/environment error.
+
+Everything after a literal `--` is passed verbatim to the engine invocation
+— the escape hatch for the engines' own option surfaces (CFR's
+`--renameillegalidents true`, fernflower's `-dgs=1`, …). It requires
+`--no-fallback`: option dialects are engine-specific, and a fallback engine
+would not understand them. Passthrough tokens are yours — decaf does not
+validate them, and colliding with the flags decaf manages itself (like CFR's
+`--outputdir`) is unsupported.
 
 Archive nesting is capped by `--max-depth` (default 1: jars inside a war or
 fat jar are processed, but not jars inside those). Deeper archives are listed

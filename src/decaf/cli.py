@@ -437,6 +437,10 @@ def main(
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Only print the final summary")] = False,
+    engine_args: Annotated[Optional[list[str]], typer.Argument(
+        help="Engine options after -- , passed verbatim to the primary engine (requires --no-fallback)",
+        show_default=False,
+    )] = None,
 ) -> None:
     """Decompile every Java artifact under INPUT, preferring real Maven sources."""
     if not input.exists():
@@ -449,6 +453,8 @@ def main(
         raise _fail("--no-resource only applies to mirror mode (remove --merge)")
     if fresh_maven and no_maven:
         raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
+    if engine_args and not no_fallback:
+        raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
     try:
         cfg = load_config(config, extra_repos=repo or [])
     except ConfigError as exc:
@@ -459,6 +465,7 @@ def main(
         output=output,
         engine=engine.value,
         fallback=not no_fallback,
+        engine_args=tuple(engine_args or ()),
         mirror=not merge,
         resources=not no_resource,
         maven=not no_maven,
