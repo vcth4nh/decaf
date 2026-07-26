@@ -243,15 +243,19 @@ def _check_alive(net: NetState, host: str) -> None:
         raise NetworkFailure(host, "skipped", f"{host} skipped (unreachable this run)")
 
 
-def _exhausted(net: NetState, log: ResolutionLog, host: str, kind: str) -> NetworkFailure:
+def _exhausted(
+    net: NetState, log: ResolutionLog, host: str, kind: str, step: str
+) -> NetworkFailure:
     if kind in ("timeout", "connection error"):
         log.failed_hosts.add(host)  # only transport-class failures strike the breaker
     where = f" (while resolving {log.subject})" if log.subject else ""
     net.warn_once(
         host,
-        _kind_class(kind),
-        f"maven: {host}: {_kind_class(kind)} persisted after {RETRY_ATTEMPTS} attempts{where}; "
-        "artifacts may fall back to decompilation without sources",
+        _kind_class(kind),  # step is display context, never a dedup dimension (#73)
+        f"maven: {host}: {step} {_kind_class(kind)} persisted after "
+        f"{RETRY_ATTEMPTS} attempts{where}; "
+        "affected artifacts may still resolve via other lookups, "
+        "or fall back to decompilation without sources",
     )
     return NetworkFailure(host, kind, f"{host}: {kind}")
 
@@ -262,12 +266,14 @@ def _get_retry(
     *,
     net: NetState,
     log: ResolutionLog,
+    step: str,
     params: dict[str, str] | None = None,
     timeout: float = 10.0,
     follow_redirects: bool = False,
 ) -> httpx.Response:
     """GET with transient-error retries; returns any non-transient response.
 
+    `step` names the resolution step in the exhausted-retry warning.
     Raises NetworkFailure when the host is breaker-dead, retries exhaust, or
     the run aborts mid-backoff.
     """
@@ -291,7 +297,7 @@ def _get_retry(
             retry_after = _retry_after_seconds(resp)
         if attempt < RETRY_ATTEMPTS and _wait_before_retry(net, attempt, retry_after):
             raise NetworkFailure(host, kind, f"{host}: {kind}")  # aborted: quiet give-up
-    raise _exhausted(net, log, host, kind)
+    raise _exhausted(net, log, host, kind, step)
 
 
 def _groups_from_index(
@@ -307,6 +313,7 @@ def _groups_from_index(
             SEARCH_URL,
             net=net,
             log=log,
+            step="index lookup",
             params={"q": f'a:"{artifact}"', "rows": str(MAX_INDEX_GROUPS), "wt": "json"},
             follow_redirects=True,
         )
@@ -405,6 +412,7 @@ def verify_gav(
                 f"{repo}/{gav.jar_path()}.sha1",
                 net=net,
                 log=log,
+                step="candidate probe",
                 follow_redirects=True,
             )
         except NetworkFailure as nf:
@@ -445,6 +453,7 @@ def gav_from_central_sha1(
             SEARCH_URL,
             net=net,
             log=log,
+            step="sha1 lookup",
             params={"q": f'1:"{sha1}"', "rows": "1", "wt": "json"},
             follow_redirects=True,
         )
@@ -565,7 +574,7 @@ def _download(
             return cached
         if attempt < RETRY_ATTEMPTS and _wait_before_retry(net, attempt, retry_after):
             raise NetworkFailure(host, kind, f"{host}: {kind}")  # aborted: quiet give-up
-    raise _exhausted(net, log, host, kind)
+    raise _exhausted(net, log, host, kind, "sources download")
 
 
 def extract_sources(sources_jar: Path, dest: Path) -> int:
