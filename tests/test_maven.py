@@ -821,8 +821,9 @@ def test_resolve_sources_survives_poisoned_package_names(make_jar, tmp_path: Pat
 
 
 EXHAUST_WARN = (
-    "maven: r.test: connection error persisted after 3 attempts; "
-    "artifacts may fall back to decompilation without sources"
+    "maven: r.test: sha1 lookup connection error persisted after 3 attempts; "
+    "affected artifacts may still resolve via other lookups, "
+    "or fall back to decompilation without sources"
 )
 
 
@@ -837,7 +838,7 @@ def test_get_retry_retries_transport_errors_then_succeeds():
 
     net, log = NetState(), ResolutionLog()
     with make_client(handler) as c:
-        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert resp.status_code == 200 and calls["n"] == 3
     assert log.ok_hosts == {"r.test"} and log.failed_hosts == set()
 
@@ -854,9 +855,9 @@ def test_get_retry_exhausts_strikes_and_warns_once():
 
     with make_client(handler) as c:
         with pytest.raises(NetworkFailure) as exc:
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
         with pytest.raises(NetworkFailure):
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert calls["n"] == 6  # RETRY_ATTEMPTS per request
     assert exc.value.host == "r.test"
     assert exc.value.kind == "connection error"
@@ -876,13 +877,31 @@ def test_get_retry_different_kind_warns_again():
 
     with make_client(handler) as c:
         with pytest.raises(NetworkFailure):
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
         mode["exc"] = httpx.ReadTimeout
         with pytest.raises(NetworkFailure) as exc:
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert exc.value.kind == "timeout"
     assert len(warnings) == 2
     assert "timeout persisted after 3 attempts" in warnings[1]
+
+
+def test_get_retry_step_is_display_only_first_label_wins():
+    """#73: the step names the warning but never joins the dedup key."""
+    warnings: list[str] = []
+    net = NetState(warn=warnings.append)
+    log = ResolutionLog()
+
+    def handler(request):
+        raise httpx.ConnectError("boom")
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="index lookup")
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="candidate probe")
+    assert len(warnings) == 1  # same (host, kind class): step is not a dedup dimension
+    assert "index lookup connection error persisted" in warnings[0]
 
 
 def test_get_retry_429_uses_retry_after_and_never_strikes(monkeypatch):
@@ -897,7 +916,7 @@ def test_get_retry_429_uses_retry_after_and_never_strikes(monkeypatch):
 
     with make_client(handler) as c:
         with pytest.raises(NetworkFailure) as exc:
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert waits == [7.0, 7.0]
     assert exc.value.kind == "HTTP 429"
     assert log.failed_hosts == set()  # 429 taints but never strikes
@@ -917,7 +936,7 @@ def test_get_retry_retry_after_capped_and_malformed(monkeypatch):
         ]
     )
     with make_client(lambda r: next(responses)) as c:
-        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert resp.status_code == 200
     assert waits == [15.0, None]  # capped; malformed falls back to backoff
 
@@ -945,7 +964,7 @@ def test_get_retry_pre_set_abort_gives_up_after_first_failure():
 
     with make_client(handler) as c:
         with pytest.raises(NetworkFailure):
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert calls["n"] == 1
     assert log.failed_hosts == set()  # aborted give-up: no strike, no warn
 
@@ -959,7 +978,7 @@ def test_get_retry_non_transient_status_passes_through():
 
     net, log = NetState(), ResolutionLog()
     with make_client(handler) as c:
-        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log)
+        resp = maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert resp.status_code == 404 and calls["n"] == 1
     assert log.ok_hosts == {"r.test"}
 
@@ -993,7 +1012,7 @@ def test_get_retry_skips_dead_host_without_request():
 
     with make_client(handler) as c:
         with pytest.raises(NetworkFailure) as exc:
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert exc.value.kind == "skipped"
     assert exc.value.detail == "r.test skipped (unreachable this run)"
 
@@ -1075,7 +1094,9 @@ def test_resolve_sources_probe_network_failures_noted_in_miss(make_jar, tmp_path
         "no pom.properties; sha1 not in Central index; "
         "2 candidates, none verified (2 probe(s) errored)"
     )
-    assert len([w for w in warnings if "persisted after 3 attempts" in w]) == 1
+    assert len(
+        [w for w in warnings if "candidate probe connection error persisted after 3 attempts" in w]
+    ) == 1
 
 
 def test_resolve_sources_download_network_failure_reachable_wording(make_jar, tmp_path: Path):
@@ -1114,7 +1135,7 @@ def test_resolve_sources_warning_names_subject(make_jar, tmp_path: Path):
         )
     assert res.sources_jar is None
     assert len(warnings) == 1
-    assert "timeout persisted after 3 attempts" in warnings[0]
+    assert "sha1 lookup timeout persisted after 3 attempts" in warnings[0]
     assert "(while resolving app.jar!/lib/dep-1.0.jar)" in warnings[0]
 
 
@@ -1298,11 +1319,11 @@ def test_exhausted_5xx_folds_to_one_warning():
 
     with make_client(handler) as c:
         with pytest.raises(NetworkFailure):
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
         with pytest.raises(NetworkFailure):
-            maven._get_retry(c, "https://r.test/x", net=net, log=log)
+            maven._get_retry(c, "https://r.test/x", net=net, log=log, step="sha1 lookup")
     assert len(warnings) == 1  # HTTP 500 and HTTP 502 fold to the "HTTP 5xx" class
-    assert "r.test: HTTP 5xx persisted after 3 attempts" in warnings[0]
+    assert "r.test: sha1 lookup HTTP 5xx persisted after 3 attempts" in warnings[0]
     assert log.failed_hosts == set()  # 5xx exhausts taint but never strike
 
 
@@ -1321,7 +1342,9 @@ def test_download_429_exhausts_and_warns(tmp_path: Path):
             maven._download(c, "https://r.test/m2/a-1-sources.jar", tmp_path / "a.jar", net, log)
     assert calls["n"] == 3
     assert exc.value.kind == "HTTP 429"
-    assert len(warnings) == 1 and "r.test: HTTP 429 persisted after 3 attempts" in warnings[0]
+    assert len(warnings) == 1 and (
+        "r.test: sources download HTTP 429 persisted after 3 attempts" in warnings[0]
+    )
     assert log.failed_hosts == set()
     assert not list(tmp_path.glob("*.part"))  # every failed attempt's temp file removed
 
