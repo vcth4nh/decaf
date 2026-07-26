@@ -1144,6 +1144,57 @@ def test_run_batch_failure_requeues_members_solo(fake_env, make_jar, tmp_path):
     assert sorted(n for n in solo if n != "big.jar") == ["s0.jar", "s1.jar"]
 
 
+def test_run_metadata_claimants_never_share_a_batch(fake_env, make_jar, tmp_path):
+    """#75: two modular smalls both claim module-info, so they must not share a
+    batch — each keeps its module-info.java exactly as a solo run would. Same
+    gated-big structure as the formation test above."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x", "module-info.class": b"m"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x", "module-info.class": b"m"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    batches: list[list[str]] = []
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+        runner=gated_solo,
+        batch_runner=recording_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3
+    assert batches == []  # claim overlap defers; a 1-member batch submits solo
+    rels = {r.rel: r for r in report.artifacts}
+    for i in range(2):
+        assert rels[f"big.jar!/lib/s{i}.jar"].attempts[0].level == "archive"
+    assert (tmp_path / "out/src/module-info.java").is_file()
+    assert (tmp_path / "out/src/com/s0/A.java").is_file()
+    assert (tmp_path / "out/src/com/s1/A.java").is_file()
+
+
 def test_run_passes_cds_dir_to_default_runner(monkeypatch, make_jar, tmp_path):
     monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
     monkeypatch.setattr(

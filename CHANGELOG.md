@@ -21,6 +21,15 @@ All notable changes to decaf are documented here.
   are batch-eligible (was 800), up to 32 jars / 8,000 classes per batch
   (was 16 / 2,000) (#74).
 
+### Fixed
+
+- Batched decompiles no longer drop `package-info.java` / `module-info.java`
+  that solo runs preserve: the post-batch split now attributes metadata
+  sources to the member whose archive contains the matching class, and two
+  members claiming the same metadata file (two modular jars, or two jars
+  sharing a package) never share a batch — batch output is now identical to
+  solo output (#75).
+
 ## [1.7.0] - 2026-07-24
 
 ### Added
