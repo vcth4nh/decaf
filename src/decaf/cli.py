@@ -64,7 +64,7 @@ app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-console = Console()
+console = Console(emoji=False)
 
 
 @app.callback()
@@ -422,7 +422,7 @@ def main(
     machine = format is not Format.human
     prior_console = console
     if machine:
-        console = Console(stderr=True)
+        console = Console(stderr=True, emoji=False)
     try:
         if not input.exists():
             raise _fail(f"input {input} does not exist")

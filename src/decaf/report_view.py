@@ -74,7 +74,7 @@ def _bucket_groups(failed: list[ArtifactReport]) -> dict[str, list[ArtifactRepor
 def _status_line(r: ArtifactReport) -> str:
     if r.outcome == "ok":
         if r.method == "maven":
-            detail = f"maven sources, {r.gav}"
+            detail = f"maven sources, {escape(str(r.gav))}"
             if r.sources_cached:
                 detail += ", cached"
         elif r.method == "extracted":
@@ -86,14 +86,14 @@ def _status_line(r: ArtifactReport) -> str:
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
         glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
-        line = f"{glyph} {r.rel} ({detail})"
+        line = f"{glyph} {escape(r.rel)} ({detail})"
         if r.method == "maven" and r.sources_cached:
             return f"[dim]{line}[/]"
         return line
     if r.outcome == "skipped":
-        return f"[yellow]-[/] {r.rel} ({r.failure or 'resource-only'}, skipped)"
-    reason = (r.failure or "failed").splitlines()[-1]
-    return f"[red]✗[/] {r.rel} ({reason})"
+        return f"[yellow]-[/] {escape(r.rel)} ({escape(r.failure or 'resource-only')}, skipped)"
+    reason = escape((r.failure or "failed").splitlines()[-1])
+    return f"[red]✗[/] {escape(r.rel)} ({reason})"
 
 
 def _fmt_duration(seconds: float) -> str:
