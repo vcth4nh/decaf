@@ -511,8 +511,10 @@ def main(
                     pass
 
         t0 = monotonic()
+        thread = None
         if not quiet and format is Format.human and not console.is_terminal:
-            threading.Thread(target=heartbeat, daemon=True).start()
+            thread = threading.Thread(target=heartbeat, daemon=True)
+            thread.start()
 
         try:
             with progress:
@@ -524,6 +526,8 @@ def main(
             raise _fail(str(exc))
         finally:
             stop.set()
+            if thread is not None:
+                thread.join(timeout=2.0)
 
         report_view.render_ending(console, report, output=output, report_path=output / "decaf-report.json", verbose=verbose)
         if format is Format.json:
