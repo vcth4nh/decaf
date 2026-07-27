@@ -322,6 +322,43 @@ def test_status_line_dim_only_for_cached_maven():
     assert cli._status_line(failed).startswith("[red]")
 
 
+def test_summary_prints_paths_footer(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    out = tmp_path / "out"
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out)])
+    plain = ANSI.sub("", result.output)
+    assert f"output: {out}" in plain
+    assert f"report: {out / 'decaf-report.json'}" in plain
+
+
+def test_failure_recap_names_remainder(tmp_path: Path, make_jar, monkeypatch):
+    rep = ok_report()
+    rep.artifacts = [
+        ArtifactReport(rel=f"f{i:02d}.jar", kind="archive", outcome="failed", failure="boom")
+        for i in range(25)
+    ]
+    rep.totals = dict(rep.totals, artifacts=25, ok=0, failed=25)
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "…and 5 more failures (see report)" in plain
+    assert result.exit_code == 1
+
+
+def test_interrupted_summary_shows_denominator(tmp_path: Path, make_jar, monkeypatch):
+    rep = ok_report()
+    rep.interrupted = True
+    rep.discovered = 10
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "interrupted — 2/10 artifacts completed, partial results written" in plain
+    assert result.exit_code == 130
+
+
 def test_status_line_partial_glyph():
     r = ArtifactReport(
         rel="a.jar", kind="archive", outcome="ok", method="cfr",

@@ -104,6 +104,14 @@ def test_run_kotlin_sources_jar_extracted(fake_env, make_jar, tmp_path: Path):
     assert (out / "kt-lib-sources.jar/com/k/K.kt").is_file()
 
 
+def test_report_discovered_counts_nested(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_inputs(make_jar, tmp_path)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    assert report.discovered == 3 == report.totals["artifacts"]
+    assert json.loads((out / "decaf-report.json").read_text())["discovered"] == 3
+
+
 def test_report_settings_repos_redacted(fake_env, make_jar, tmp_path: Path):
     input_dir = tmp_path / "in"
     make_jar("app.jar", {"com/x/A.class": b"x"}, base=input_dir)
@@ -349,6 +357,8 @@ def test_interrupt_during_submission_still_writes_report(fake_env, make_jar, tmp
     report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
     assert report.interrupted is True
     assert (out / "decaf-report.json").is_file()
+    assert report.discovered == 3  # denominator survives the interrupt
+    assert report.totals["artifacts"] < 3
 
 
 def test_run_streams_engine_stderr_with_prefix(fake_env, make_jar, tmp_path: Path):

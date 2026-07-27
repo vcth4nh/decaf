@@ -235,6 +235,7 @@ class RunReport:
     artifacts: list[ArtifactReport]
     totals: dict
     duration_seconds: float
+    discovered: int = 0  # scan-found artifacts, incl. never-started ones on interrupt
     interrupted: bool = False
 
     def to_json(self) -> str:
@@ -885,8 +886,9 @@ def run(
         raise DecafError(f"Java {java_major} is too old (Java {engines.JAVA_MIN}+ required)")
 
     artifacts, nested_counts = scan_counted(settings.input)
+    discovered = len(artifacts) + sum(nested_counts.values())
     if on_found is not None:
-        on_found(len(artifacts) + sum(nested_counts.values()))
+        on_found(discovered)
     if on_event is not None:
         on_event(
             "scan", "",
@@ -1020,6 +1022,7 @@ def run(
                                 for n in nested:
                                     heappush(todo, (-n.classes, next(seq), n))
                                 delta = len(nested) - nested_counts.pop(a.rel, 0)
+                                discovered += delta
                                 if delta and on_found is not None:
                                     on_found(delta)
                                 if target is not None:
@@ -1075,6 +1078,7 @@ def run(
                 artifacts=reports,
                 totals=compute_totals(reports),
                 duration_seconds=round(time.monotonic() - start, 2),
+                discovered=discovered,
                 interrupted=interrupted,
             )
             settings.output.mkdir(parents=True, exist_ok=True)
