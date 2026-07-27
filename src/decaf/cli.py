@@ -454,6 +454,49 @@ def main(
     raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
 
 
+@app.command(name="report")
+def report_cmd(
+    path: Annotated[Path, typer.Argument(help="Report file, or an output directory containing decaf-report.json")] = Path("decaf-out"),
+    problems: Annotated[bool, typer.Option("--problems", help="List failed and partial artifacts, grouped by cause")] = False,
+    artifact: Annotated[Optional[list[str]], typer.Option("--artifact", help="Show full detail for artifacts matching this glob (repeatable)")] = None,
+    network_fallbacks: Annotated[bool, typer.Option("--network-fallbacks", help="List artifacts that lost sources to network failures")] = False,
+) -> None:
+    """Inspect a decaf-report.json offline."""
+    try:
+        report, resolved = report_view.load_report(path)
+    except report_view.ReportError as exc:
+        raise _fail(str(exc))
+
+    schema = report.schema_version or 0
+    console.print(
+        f"[dim]{resolved} · schema {schema} · decaf {report.decaf_version or 'unknown'} · "
+        f"{report.ended_at or 'no timestamp'}[/]"
+    )
+    if schema > 1:
+        console.print(
+            f"[yellow]warning: schema {schema} is newer than this decaf understands; "
+            f"rendering is best-effort[/]"
+        )
+
+    if not (problems or artifact or network_fallbacks):
+        report_view.render_ending(
+            console, report,
+            output=report.settings.get("output", str(resolved.parent)),
+            report_path=resolved,
+            verbose=False,
+        )
+        return
+
+    if problems:
+        report_view.render_problems(console, report)
+    if artifact:
+        matches = sum(report_view.render_artifact(console, report, pattern) for pattern in artifact)
+        if matches == 0:
+            console.print("no artifacts match")
+    if network_fallbacks:
+        report_view.render_network_fallbacks(console, report)
+
+
 @engines_app.command("update")
 def engines_update(
     names: Annotated[Optional[list[Engine]], typer.Argument(help="Engines to update (default: all)")] = None,

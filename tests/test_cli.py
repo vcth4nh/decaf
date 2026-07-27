@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 
 import decaf.cli as cli
 from decaf.cli import app
-from decaf.pipeline import ArtifactReport, RunReport
+from decaf.pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
@@ -756,3 +756,119 @@ def test_cli_engine_args_require_no_fallback(tmp_path: Path, make_jar, monkeypat
                                  "--", "-dgs=1"])
     assert result.exit_code == 2
     assert "--no-fallback" in ANSI.sub("", result.output)
+
+
+def _mixed_report(**over) -> RunReport:
+    """1 ok / 1 partial / 1 failed / 1 network fallback, for `decaf report` CLI tests."""
+    artifacts = [
+        ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="maven",
+                        gav="com.example:a:1.0", classes=3, java_files=3),
+        ArtifactReport(rel="foo.jar", kind="archive", outcome="ok", method="cfr",
+                        classes=5, java_files=4, missing_classes=1),  # partial
+        ArtifactReport(
+            rel="legacy.jar", kind="archive", outcome="failed",
+            failure="engine timeout after 5 attempts",
+            attempts=[EngineAttempt("vineflower", "archive", -1, True, 0, "engine crashed: boom")],
+        ),
+        ArtifactReport(rel="net.jar", kind="archive", outcome="ok", method="cfr",
+                        sources_miss="network: sources download 503"),
+    ]
+    base = dict(
+        settings={"chain": ["vineflower"]},
+        artifacts=artifacts,
+        totals=compute_totals(artifacts),
+        duration_seconds=42.0,
+        schema_version=1,
+        decaf_version="1.8.0",
+        ended_at="2026-07-27T00:00:42Z",
+    )
+    base.update(over)
+    return RunReport(**base)
+
+
+def _write_report(dir_path: Path, rep: RunReport) -> Path:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "decaf-report.json").write_text(rep.to_json())
+    return dir_path
+
+
+def test_report_resolves_dir_and_file(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert str(out / "decaf-report.json") in plain
+    assert "schema 1" in plain
+    assert "decaf 1.8.0" in plain
+    assert "2026-07-27T00:00:42Z" in plain
+    assert "Completed" in plain
+
+    result_file = runner.invoke(app, ["report", str(out / "decaf-report.json")])
+    assert result_file.exit_code == 0
+    plain_file = ANSI.sub("", result_file.output)
+    assert str(out / "decaf-report.json") in plain_file
+    assert "Completed" in plain_file
+
+
+def test_report_problems_groups_failures(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--problems"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "engine timeout" in plain
+    assert "legacy.jar" in plain
+    assert "foo.jar" in plain  # partial artifact listed too
+
+
+def test_report_artifact_glob_shows_detail(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--artifact", "f*"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "foo.jar" in plain
+    assert "missing_classes=1" in plain
+
+
+def test_report_artifact_no_match_prints_message(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--artifact", "nope*"])
+    assert result.exit_code == 0
+    assert "no artifacts match" in ANSI.sub("", result.output)
+
+
+def test_report_network_fallbacks_lists_misses(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--network-fallbacks"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "net.jar" in plain
+    assert "network: sources download 503" in plain
+
+
+def test_report_missing_dir_exits_2(tmp_path: Path):
+    result = runner.invoke(app, ["report", str(tmp_path / "nope")])
+    assert result.exit_code == 2
+    plain = ANSI.sub("", result.output)
+    assert "error:" in plain
+    assert "report not found" in plain  # ReportError text, not run's "input ... does not exist"
+
+
+def test_report_schema_version_warns(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report(schema_version=99))
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "schema 99" in plain
+    assert "warning" in plain.lower()
+
+
+def test_report_word_is_command_not_input_path(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "report").mkdir()  # a literal folder named 'report' in cwd
+    result = runner.invoke(app, ["report"])  # must hit report_cmd, not scan ./report as run's input
+    assert result.exit_code == 2
+    plain = ANSI.sub("", result.output)
+    assert "error:" in plain
+    assert "decaf-out" in plain
+    assert "input report does not exist" not in plain

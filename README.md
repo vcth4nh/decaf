@@ -86,6 +86,19 @@ sources downloads run on a separate IO-sized fetch stage feeding the
 decompile workers through a bounded queue, so network waits don't idle
 decompile slots.
 
+### Inspecting a report
+
+```bash
+decaf report                          # ./decaf-out/decaf-report.json, outcome-led ending
+decaf report out --problems           # failed + partial artifacts, grouped by cause
+decaf report out --artifact '*.jar'   # full detail for artifacts matching a glob (repeatable)
+decaf report out --network-fallbacks  # artifacts that lost sources to network failures
+```
+
+`decaf report` re-renders a `decaf-report.json` offline, without re-running anything —
+no flags reprints the same outcome-led ending shown at the end of a run. `PATH` may be
+the output directory or the JSON file itself (default: `decaf-out`).
+
 ## Output layouts
 
 **Mirror (default):** the output mirrors the input tree, one directory per
@@ -148,8 +161,8 @@ decaf engines update --reset   # back to built-in pins
 sha1 with a warning when that's all the repo offers; an engine publishing no checksum at all fails closed — reported with a red ✗ and exit code 1 — keeping its current pin) and records the new pin under `[engines.NAME]`
 in your config file — note that rewriting drops hand-written comments there.
 Every later run verifies the cached jar against that pin, exactly like the
-built-in ones. Like folders named `engines` or `cache`, a folder literally named `run`
-needs an explicit path (`decaf ./run`).
+built-in ones. Like folders named `engines`, `cache`, or `report`, a folder literally
+named `run` needs an explicit path (`decaf ./run`).
 
 ## Development
 
