@@ -363,6 +363,16 @@ def test_emoji_shortcode_gavs_render_verbatim():
     assert "com.x:id:1[x]" in cap.get()
 
 
+def test_report_tolerates_null_fields(tmp_path: Path):
+    p = tmp_path / "decaf-report.json"
+    p.write_text(json.dumps({
+        "settings": None, "totals": None, "artifacts": None, "duration_seconds": None,
+    }))
+    result = runner.invoke(app, ["report", str(p)])
+    assert result.exit_code == 0
+    assert "Completed" in ANSI.sub("", result.output)
+
+
 def test_status_line_cached_suffix():
     r = ArtifactReport(
         rel="a.jar", kind="archive", outcome="ok", method="maven",

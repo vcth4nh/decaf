@@ -34,10 +34,17 @@ def _artifact(d: dict) -> ArtifactReport:
 
 def _run_report(d: dict) -> RunReport:
     kwargs = {k: v for k, v in d.items() if k in _RR and k != "artifacts"}
-    kwargs["settings"] = d.get("settings", {})
-    kwargs["totals"] = d.get("totals", {})
-    kwargs["duration_seconds"] = d.get("duration_seconds", 0.0)
-    kwargs["artifacts"] = [_artifact(a) for a in d.get("artifacts", [])]
+    settings = d.get("settings")
+    totals = d.get("totals")
+    duration = d.get("duration_seconds")
+    artifacts = d.get("artifacts")
+    kwargs["settings"] = settings if isinstance(settings, dict) else {}
+    kwargs["totals"] = totals if isinstance(totals, dict) else {}
+    kwargs["duration_seconds"] = duration if isinstance(duration, (int, float)) else 0.0
+    kwargs["artifacts"] = (
+        [_artifact(a) for a in artifacts if isinstance(a, dict)]
+        if isinstance(artifacts, list) else []
+    )
     return RunReport(**kwargs)
 
 
