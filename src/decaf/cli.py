@@ -442,6 +442,7 @@ def main(
             disable=quiet or machine,
         )
         display = None if machine else _RunDisplay(progress)
+        scan_sent = False
 
         def on_done(r: ArtifactReport) -> None:
             if display is not None:
@@ -452,9 +453,14 @@ def main(
                 progress.console.print(_status_line(r))
 
         def on_found(count: int) -> None:
+            nonlocal scan_sent
             if display is not None:
                 display.on_found(count)
-            if format is Format.ndjson:
+            # pipeline calls on_found more than once: the initial discovered
+            # total, then bare deltas as fetch-time nested discovery diverges
+            # from the scan estimate. Only the first call is a true total.
+            if format is Format.ndjson and not scan_sent:
+                scan_sent = True
                 print(json.dumps({"event": "scan", "artifacts": count}), flush=True)
 
         def on_stderr(text: str) -> None:

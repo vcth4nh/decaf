@@ -801,6 +801,30 @@ def test_format_ndjson_streams_events(tmp_path: Path, make_jar, monkeypatch):
     assert summary["report"] == str(tmp_path / "out" / "decaf-report.json")
 
 
+def test_format_ndjson_scan_event_fires_once(tmp_path: Path, make_jar, monkeypatch):
+    """pipeline.run() calls on_found more than once by design: the initial
+    discovered total, then bare deltas when fetch-time nested discovery
+    diverges from the scan_counted estimate. Only the first call is a true
+    total, so only it may become a scan event."""
+    rep = ok_report()
+
+    def fake_run(settings, **kw):
+        kw["on_found"](3)
+        kw["on_found"](1)  # a later delta, not a total — must not re-emit "scan"
+        return rep
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "ndjson"]
+    )
+    assert result.exit_code == 0
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line]
+    scan_events = [line for line in lines if line["event"] == "scan"]
+    assert len(scan_events) == 1
+    assert scan_events[0]["artifacts"] == 3
+
+
 def test_format_ndjson_quiet_still_streams_events(tmp_path: Path, make_jar, monkeypatch):
     """-q is orthogonal to --format: it silences stderr narration only, same as
     today — ndjson's stdout event stream keeps flowing regardless."""
