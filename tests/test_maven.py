@@ -19,6 +19,7 @@ from decaf.maven import (
     fetch_sources,
     gav_from_central_sha1,
     gav_from_pom_properties,
+    redact_url,
     resolve_sources,
     sha1_of,
     verify_gav,
@@ -35,6 +36,20 @@ def make_client(handler) -> httpx.Client:
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
     monkeypatch.setattr(maven, "RETRY_BACKOFF", tuple(0.0 for _ in maven.RETRY_BACKOFF))
+
+
+def test_redact_url_strips_userinfo():
+    assert (
+        redact_url("https://deploy:s3cr3t@nexus.example/repository/maven-public")
+        == "https://nexus.example/repository/maven-public"
+    )
+    assert redact_url("https://user@host/m2") == "https://host/m2"
+
+
+def test_redact_url_passthrough():
+    assert redact_url("https://repo1.maven.org/maven2") == "https://repo1.maven.org/maven2"
+    assert redact_url("not a url") == "not a url"
+    assert redact_url("") == ""
 
 
 def test_gav_from_single_pom_properties(make_jar):

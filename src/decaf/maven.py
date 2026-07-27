@@ -13,6 +13,7 @@ import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -20,6 +21,21 @@ from .scanner import SOURCE_SUFFIXES, safe_extract_zip
 from .verdicts import VerdictCache
 
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
+
+
+def redact_url(url: str) -> str:
+    """Strip user[:pass]@ userinfo for display/persistence; never raises."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+
+
+def _redacted(repos: Sequence[str]) -> list[str]:
+    return [redact_url(r) for r in repos]
 
 
 @dataclass(frozen=True)
