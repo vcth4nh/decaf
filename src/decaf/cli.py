@@ -19,9 +19,9 @@ from rich.text import Text
 from typer.core import TyperGroup
 
 from . import __version__, engines
-from . import update
+from . import report_view, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
-from .pipeline import ArtifactReport, DecafError, RunReport, Settings, run
+from .pipeline import ArtifactReport, DecafError, Settings, run
 from .report_view import _status_line
 from .scanner import ScanError
 
@@ -357,53 +357,6 @@ class _RunDisplay:
         )
 
 
-def _print_summary(report: RunReport, verbose: bool, output: Path) -> None:
-    t = report.totals
-    table = Table(title="decaf summary", show_header=False)
-    table.add_row("Artifacts", str(t["artifacts"]))
-    cached = sum(1 for r in report.artifacts if r.sources_cached)
-    maven_part = f"maven {t['maven_sources']}"
-    if cached:
-        maven_part += f" ({cached} cached)"
-    resource_only_ok = sum(
-        1 for r in report.artifacts if r.outcome == "ok" and r.method is None
-    )
-    ok_detail = f"{maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']}"
-    if resource_only_ok:
-        ok_detail += f", resource-only {resource_only_ok}"
-    table.add_row("OK", f"{t['ok']} ({ok_detail})")
-    if t.get("partial"):
-        table.add_row("Partial", str(t["partial"]))
-    table.add_row("Skipped", str(t["skipped"]))
-    table.add_row("Failed", str(t["failed"]))
-    table.add_row("Java files", str(t["java_files"]))
-    table.add_row("Resources", str(t["resources_copied"]))
-    table.add_row("Collisions", str(t["collisions"]))
-    table.add_row("Duration", f"{report.duration_seconds}s")
-    console.print(table)
-    failed = [r for r in report.artifacts if r.outcome == "failed"]
-    for r in failed[:20]:
-        console.print(_status_line(r))
-        if verbose:
-            for a in r.attempts:
-                if a.stderr_tail:
-                    console.print(f"    [dim]{a.engine} ({a.level}): {a.stderr_tail[-300:]}[/]")
-    if len(failed) > 20:
-        console.print(f"…and {len(failed) - 20} more failures (see report)")
-    if t["network_misses"]:
-        console.print(
-            f"[yellow]{t['network_misses']} artifact(s) fell back to decompilation "
-            "without sources due to network failures[/]"
-        )
-    if report.interrupted:
-        console.print(
-            f"[yellow]interrupted — {t['artifacts']}/{report.discovered} artifacts completed, "
-            "partial results written[/]"
-        )
-    console.print(f"[dim]output: {output}[/]")
-    console.print(f"[dim]report: {output / 'decaf-report.json'}[/]")
-
-
 @app.command(name="run")
 def main(
     input: Annotated[Path, typer.Argument(help="Folder to scan recursively, or a single archive", show_default=False)],
@@ -495,7 +448,7 @@ def main(
     except (DecafError, ScanError) as exc:
         raise _fail(str(exc))
 
-    _print_summary(report, verbose, output)
+    report_view.render_ending(console, report, output=output, report_path=output / "decaf-report.json", verbose=verbose)
     if report.interrupted:
         raise typer.Exit(code=130)
     raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)

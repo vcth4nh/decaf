@@ -251,6 +251,15 @@ def test_bare_decaf_shows_group_help():
     assert result.exit_code in (0, 2)  # click's no_args_is_help exit code varies by version
 
 
+def test_verdict_line_clean_run(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "Completed in " in plain
+    assert "with" not in plain
+
+
 def test_summary_warns_on_network_misses(tmp_path: Path, make_jar, monkeypatch):
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     totals = dict(ok_report().totals, network_misses=2)
@@ -258,14 +267,14 @@ def test_summary_warns_on_network_misses(tmp_path: Path, make_jar, monkeypatch):
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
-    assert "2 artifact(s) fell back to decompilation without sources due to network failures" in plain
+    assert "2 network fallbacks" in plain
 
 
 def test_summary_silent_when_no_network_misses(tmp_path: Path, make_jar, monkeypatch):
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
-    assert "network failures" not in ANSI.sub("", result.output)
+    assert "network fallbacks" not in ANSI.sub("", result.output)
 
 
 def test_on_warn_wired_unless_quiet(tmp_path: Path, make_jar, monkeypatch):
@@ -328,8 +337,10 @@ def test_summary_prints_paths_footer(tmp_path: Path, make_jar, monkeypatch):
     out = tmp_path / "out"
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out)])
     plain = ANSI.sub("", result.output)
-    assert f"output: {out}" in plain
-    assert f"report: {out / 'decaf-report.json'}" in plain
+    assert "Output" in plain
+    assert str(out) in plain
+    assert "Report" in plain
+    assert str(out / "decaf-report.json") in plain
 
 
 def test_failure_recap_names_remainder(tmp_path: Path, make_jar, monkeypatch):
@@ -351,11 +362,13 @@ def test_interrupted_summary_shows_denominator(tmp_path: Path, make_jar, monkeyp
     rep = ok_report()
     rep.interrupted = True
     rep.discovered = 10
+    rep.duration_seconds = 250.0
     monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "interrupted — 2/10 artifacts completed, partial results written" in plain
+    assert "Interrupted after" in plain
+    assert "2/10 artifacts completed" in plain
     assert result.exit_code == 130
 
 
@@ -382,7 +395,7 @@ def test_summary_partial_row_only_when_nonzero(tmp_path: Path, make_jar, monkeyp
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "Partial" not in plain
+    assert " partial" not in plain
 
     rep2 = ok_report()
     rep2.artifacts[1].missing_classes = 1
@@ -390,7 +403,7 @@ def test_summary_partial_row_only_when_nonzero(tmp_path: Path, make_jar, monkeyp
     monkeypatch.setattr(cli, "run", lambda settings, **kw: rep2)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2")])
     plain = ANSI.sub("", result.output)
-    assert "Partial" in plain
+    assert "1 partial" in plain
 
 
 def test_summary_counts_cached_sources(tmp_path: Path, make_jar, monkeypatch):
@@ -400,7 +413,7 @@ def test_summary_counts_cached_sources(tmp_path: Path, make_jar, monkeypatch):
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "maven 1 (1 cached), decompiled 1, extracted 0" in plain
+    assert "1 Maven (1 cached) · 1 decompiled · 0 extracted" in plain
 
 
 def test_summary_wording_unchanged_without_cache_hits(tmp_path: Path, make_jar, monkeypatch):
@@ -408,7 +421,7 @@ def test_summary_wording_unchanged_without_cache_hits(tmp_path: Path, make_jar, 
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "maven 1, decompiled 1, extracted 0" in plain
+    assert "1 Maven · 1 decompiled · 0 extracted" in plain
 
 
 def make_display():
@@ -581,17 +594,6 @@ def test_status_line_resource_only_mirrored():
     assert cli._status_line(r) == "[green]✓[/] r.jar (resources only, 3 files)"
 
 
-def test_summary_shows_resources_row(tmp_path: Path, make_jar, monkeypatch):
-    rep = ok_report()
-    rep.totals = {**rep.totals, "resources_copied": 7}
-    monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
-    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
-    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
-    plain = ANSI.sub("", result.output)
-    assert "Resources" in plain
-    assert "7" in plain
-
-
 def test_summary_ok_row_counts_mirrored_resource_only(tmp_path: Path, make_jar, monkeypatch):
     rep = ok_report()
     rep.artifacts.append(
@@ -602,7 +604,7 @@ def test_summary_ok_row_counts_mirrored_resource_only(tmp_path: Path, make_jar, 
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "maven 1, decompiled 1, extracted 0, resource-only 1" in plain
+    assert "· 1 resource-only" in plain
 
 
 def test_fresh_maven_flag_wiring(tmp_path: Path, make_jar, monkeypatch):
