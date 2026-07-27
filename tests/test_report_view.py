@@ -108,8 +108,8 @@ def test_ending_footer_escapes_bracketed_paths():
     Task 4's `decaf report`) or just a directory a user happened to name with brackets
     for the live run path — must render verbatim, not raise MarkupError."""
     console = _console()
-    render_ending(console, report(), output=Path("out[/bold]"),
-                  report_path=Path("out[/bold]/decaf-report.json"), verbose=False)  # must not raise
+    render_ending(console, report(), output="out[/bold]",
+                  report_path="out[/bold]/decaf-report.json", verbose=False)  # must not raise
     plain = console.file.getvalue()
     assert "out[/bold]" in plain
 
