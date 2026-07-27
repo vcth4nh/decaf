@@ -1107,7 +1107,7 @@ def run(
             settings.output.mkdir(parents=True, exist_ok=True)
             report_path = settings.output / "decaf-report.json"
             tmp_path_ = report_path.with_suffix(".json.tmp")
-            tmp_path_.write_text(run_report.to_json())
+            tmp_path_.write_text(run_report.to_json() + "\n")
             os.replace(tmp_path_, report_path)
     finally:
         client.close()

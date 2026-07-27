@@ -124,6 +124,25 @@ def test_ending_verbose_shows_stderr_tail():
     assert "engine crashed: boom" not in console2.file.getvalue()
 
 
+def test_ending_verbose_escapes_bracketed_stderr_tail():
+    """Engine stderr routinely contains rich-lookalike markup; an interrupted -v
+    run's stderr_tail containing e.g. '[/bold]' must render verbatim, not raise
+    rich.errors.MarkupError (which would turn exit 130 into exit 1)."""
+    artifacts = [
+        ArtifactReport(
+            rel="noisy.jar", kind="archive", outcome="failed", failure="all engines failed",
+            attempts=[EngineAttempt("vineflower", "archive", 1, False, 0,
+                                     "[main] boom [/bold] more text")],
+        ),
+    ]
+    console = _console()
+    rep = report(artifacts=artifacts, totals=compute_totals(artifacts))
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"),
+                  verbose=True)  # must not raise
+    plain = console.file.getvalue()
+    assert "[main] boom [/bold] more text" in plain
+
+
 def test_failure_bucket_table():
     timeout = ArtifactReport(
         rel="t.jar", kind="archive", outcome="failed", failure="all engines failed",

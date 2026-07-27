@@ -1701,7 +1701,8 @@ def test_report_schema_v1_fields(fake_env, make_jar, tmp_path: Path):
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
     out = tmp_path / "out"
     report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
-    on_disk = json.loads((out / "decaf-report.json").read_text())
+    raw = (out / "decaf-report.json").read_text()
+    on_disk = json.loads(raw)
     assert on_disk["schema_version"] == 1
     assert on_disk["decaf_version"] == report.decaf_version != ""
     assert on_disk["status"] == "completed"
@@ -1709,6 +1710,7 @@ def test_report_schema_v1_fields(fake_env, make_jar, tmp_path: Path):
     ts = _re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
     assert ts.match(on_disk["started_at"]) and ts.match(on_disk["ended_at"])
     assert not list(out.glob("*.tmp"))  # atomic write leaves no droppings
+    assert raw.endswith("}\n")  # trailing newline: byte-identical to stdout's print(to_json())
 
 
 def test_report_status_reflects_failures(fake_env, make_jar, tmp_path: Path):

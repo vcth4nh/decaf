@@ -1060,3 +1060,44 @@ def test_report_footer_escapes_bracketed_output_setting(tmp_path: Path):
     result = runner.invoke(app, ["report", str(out)])
     assert result.exit_code == 0
     assert "out[/bold]" in ANSI.sub("", result.output)
+
+
+def test_report_tolerates_pre_1_8_totals(tmp_path: Path):
+    """decaf <=1.7 reports have a totals dict without 'network_misses' (added in
+    1.8.0) or 'partial', and lack the schema/status/discovered fields entirely.
+    render_ending must render best-effort, not KeyError."""
+    data = {
+        "settings": {"chain": ["vineflower"]},
+        "artifacts": [
+            {"rel": "a.jar", "kind": "archive", "outcome": "ok", "method": "maven",
+             "classes": 3, "java_files": 3},
+        ],
+        "totals": {
+            "artifacts": 1, "ok": 1, "failed": 0, "skipped": 0,
+            "maven_sources": 1, "extracted": 0, "decompiled": 0,
+            "java_files": 3, "collisions": 0,
+            # no "partial", no "network_misses" -- both postdate this report
+        },
+        "duration_seconds": 10.0,
+        # no schema_version/decaf_version/status/started_at/ended_at/discovered
+    }
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "decaf-report.json").write_text(json.dumps(data))
+
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    assert "Completed" in ANSI.sub("", result.output)
+
+
+def test_report_empty_json_object_renders_zeros(tmp_path: Path):
+    """A parseable-but-junk report ({}) must render best-effort zeros, not crash."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "decaf-report.json").write_text("{}")
+
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "Completed" in plain
+    assert "0 processed · 0 complete" in plain

@@ -10,11 +10,13 @@ from pathlib import Path
 from rich.console import Console
 from rich.markup import escape
 
-from .pipeline import ArtifactReport, EngineAttempt, RunReport
+from .pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
 
 _AR = {f.name for f in dataclasses.fields(ArtifactReport)}
 _EA = {f.name for f in dataclasses.fields(EngineAttempt)}
 _RR = {f.name for f in dataclasses.fields(RunReport)}
+
+_TOTALS_DEFAULTS = compute_totals([])  # every key compute_totals emits, zeroed
 
 _BODY_LABEL_WIDTH = max(len(s) for s in ("Artifacts", "Sources", "Warnings"))
 _FOOTER_LABEL_WIDTH = max(len(s) for s in ("Output", "Report"))
@@ -107,7 +109,7 @@ def render_ending(
     console: Console, report: RunReport, *, output: Path, report_path: Path, verbose: bool
 ) -> None:
     """Print the outcome-led run ending: verdict, body lines, failures, footer."""
-    t = report.totals
+    t = {**_TOTALS_DEFAULTS, **report.totals}  # tolerate pre-1.8.0 / junk-but-parseable reports
     partial = t.get("partial", 0)
     dur = _fmt_duration(report.duration_seconds)
     if report.interrupted:
@@ -165,7 +167,7 @@ def render_ending(
             if verbose:
                 for a in r.attempts:
                     if a.stderr_tail:
-                        console.print(f"    [dim]{a.engine} ({a.level}): {a.stderr_tail[-300:]}[/]")
+                        console.print(f"    [dim]{a.engine} ({a.level}): {escape(a.stderr_tail[-300:])}[/]")
         if len(failed) > 20:
             console.print(f"…and {len(failed) - 20} more failures (see report)")
 
