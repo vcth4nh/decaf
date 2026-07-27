@@ -98,6 +98,62 @@ def test_legacy_credentialed_marker_sanitized_on_read(make_jar, tmp_path: Path):
     assert got == (cached, "https://r.test/m2", True)
 
 
+def test_sources_download_auth_failure_taints_and_skips_verdict(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    def handler(request):
+        return httpx.Response(401)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    log = ResolutionLog()
+    with make_client(handler) as c:
+        got = fetch_sources(
+            Gav("com.e", "lib", "1"), ["https://r.test/m2"], c, tmp_path / "cache",
+            log=log, verdicts=verdicts,
+        )
+    assert got is None
+    assert any("HTTP 401" in e and "sources download" in e for e in log.events)
+    assert not [f for f in (tmp_path / "verdicts").rglob("*") if f.is_file()]
+
+    def handler_404(request):
+        return httpx.Response(404)
+
+    with make_client(handler_404) as c:
+        got = fetch_sources(
+            Gav("com.e", "other", "1"), ["https://r.test/m2"], c, tmp_path / "cache",
+            verdicts=verdicts,
+        )
+    assert got is None
+    assert [f for f in (tmp_path / "verdicts").rglob("*") if f.is_file()]  # 404 still records
+
+
+def test_probe_decoding_error_taints_miss_and_skips_verdict(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/A.class": b"x"})
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        if request.url.path.endswith(".jar.sha1"):
+            return httpx.Response(
+                200, content=b"not actually gzip", headers={"Content-Encoding": "gzip"}
+            )
+        return httpx.Response(404)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.sources_jar is None
+    assert res.miss is not None and res.miss.startswith("network:")
+    assert "DecodingError" in res.miss
+
+    wrapped, calls = _counting(handler)
+    with make_client(wrapped) as c:
+        resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert calls["n"] > 0  # tainted miss was not recorded; network re-attempted
+
+
 def test_gav_from_single_pom_properties(make_jar):
     jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
     assert gav_from_pom_properties(jar) == Gav("com.example", "lib", "1.2")
