@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import shutil
 import threading
 from enum import Enum
@@ -197,6 +199,12 @@ class Engine(str, Enum):
     jd = "jd"
 
 
+class Format(str, Enum):
+    human = "human"
+    json = "json"
+    ndjson = "ndjson"
+
+
 def _fail(message: str) -> typer.Exit:
     console.print(f"[red]error:[/] {message}")
     return typer.Exit(code=2)
@@ -376,82 +384,115 @@ def main(
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Only print the final summary")] = False,
+    format: Annotated[Format, typer.Option("--format", help="Output mode: human (default), json (single report to stdout), or ndjson (streaming events to stdout)")] = Format.human,
     engine_args: Annotated[Optional[list[str]], typer.Argument(
         help="Engine options after -- , passed verbatim to the primary engine (requires --no-fallback)",
         show_default=False,
     )] = None,
 ) -> None:
     """Decompile every Java artifact under INPUT, preferring real Maven sources."""
-    if not input.exists():
-        raise _fail(f"input {input} does not exist")
-    if output.exists() and not output.is_dir():
-        raise _fail(f"output {output} exists and is not a directory")
-    if output.exists() and any(output.iterdir()) and not force:
-        raise _fail(f"output {output} is not empty (use --force to write anyway)")
-    if no_resource and merge:
-        raise _fail("--no-resource only applies to mirror mode (remove --merge)")
-    if fresh_maven and no_maven:
-        raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
-    if engine_args and not no_fallback:
-        raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
+    global console
+    machine = format is not Format.human
+    prior_console = console
+    if machine:
+        console = Console(stderr=True)
     try:
-        cfg = load_config(config, extra_repos=repo or [])
-    except ConfigError as exc:
-        raise _fail(str(exc))
+        if not input.exists():
+            raise _fail(f"input {input} does not exist")
+        if output.exists() and not output.is_dir():
+            raise _fail(f"output {output} exists and is not a directory")
+        if output.exists() and any(output.iterdir()) and not force:
+            raise _fail(f"output {output} is not empty (use --force to write anyway)")
+        if no_resource and merge:
+            raise _fail("--no-resource only applies to mirror mode (remove --merge)")
+        if fresh_maven and no_maven:
+            raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
+        if engine_args and not no_fallback:
+            raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
+        try:
+            cfg = load_config(config, extra_repos=repo or [])
+        except ConfigError as exc:
+            raise _fail(str(exc))
 
-    settings = Settings(
-        input=input,
-        output=output,
-        engine=engine.value,
-        fallback=not no_fallback,
-        engine_args=tuple(engine_args or ()),
-        mirror=not merge,
-        resources=not no_resource,
-        maven=not no_maven,
-        fresh_maven=fresh_maven,
-        max_depth=max_depth,
-        jobs=jobs,
-        cpus=cpus,
-        timeout=timeout,
-        repos=cfg.repositories,
-        verbose=verbose,
-        quiet=quiet,
-        engine_overrides=cfg.engine_overrides,
-    )
+        settings = Settings(
+            input=input,
+            output=output,
+            engine=engine.value,
+            fallback=not no_fallback,
+            engine_args=tuple(engine_args or ()),
+            mirror=not merge,
+            resources=not no_resource,
+            maven=not no_maven,
+            fresh_maven=fresh_maven,
+            max_depth=max_depth,
+            jobs=jobs,
+            cpus=cpus,
+            timeout=timeout,
+            repos=cfg.repositories,
+            verbose=verbose,
+            quiet=quiet,
+            engine_overrides=cfg.engine_overrides,
+        )
 
-    progress = _GroupedProgress(
-        SpinnerColumn(),
-        _RowColumn(table_column=Column(no_wrap=True)),
-        console=console,
-        transient=True,
-        disable=quiet,
-    )
-    display = _RunDisplay(progress)
+        progress = _GroupedProgress(
+            SpinnerColumn(),
+            _RowColumn(table_column=Column(no_wrap=True)),
+            console=console,
+            transient=True,
+            disable=quiet or machine,
+        )
+        display = None if machine else _RunDisplay(progress)
 
-    def on_done(r: ArtifactReport) -> None:
-        display.on_done(r)
-        if not quiet:
-            progress.console.print(_status_line(r))
+        def on_done(r: ArtifactReport) -> None:
+            if display is not None:
+                display.on_done(r)
+            if format is Format.ndjson:
+                print(json.dumps({"event": "artifact", **dataclasses.asdict(r)}), flush=True)
+            if not quiet:
+                progress.console.print(_status_line(r))
 
-    def on_stderr(text: str) -> None:
-        progress.console.print(f"[dim]{escape(text)}[/]")
+        def on_found(count: int) -> None:
+            if display is not None:
+                display.on_found(count)
+            if format is Format.ndjson:
+                print(json.dumps({"event": "scan", "artifacts": count}), flush=True)
 
-    def on_warn(text: str) -> None:
-        progress.console.print(f"[yellow]{escape(text)}[/]")
+        def on_stderr(text: str) -> None:
+            progress.console.print(f"[dim]{escape(text)}[/]")
 
-    try:
-        with progress:
-            report = run(settings, on_done=on_done, on_found=display.on_found,
-                         on_event=None if quiet else display.on_event,
-                         on_stderr=on_stderr if verbose else None,
-                         on_warn=on_warn if not quiet else None)
-    except (DecafError, ScanError) as exc:
-        raise _fail(str(exc))
+        def on_warn(text: str) -> None:
+            if format is Format.ndjson:
+                print(json.dumps({"event": "warning", "text": text}), flush=True)
+            if not quiet:
+                progress.console.print(f"[yellow]{escape(text)}[/]")
 
-    report_view.render_ending(console, report, output=output, report_path=output / "decaf-report.json", verbose=verbose)
-    if report.interrupted:
-        raise typer.Exit(code=130)
-    raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
+        try:
+            with progress:
+                report = run(settings, on_done=on_done, on_found=on_found,
+                             on_event=None if (quiet or machine) else display.on_event,
+                             on_stderr=on_stderr if verbose else None,
+                             on_warn=on_warn if (format is Format.ndjson or not quiet) else None)
+        except (DecafError, ScanError) as exc:
+            raise _fail(str(exc))
+
+        report_view.render_ending(console, report, output=output, report_path=output / "decaf-report.json", verbose=verbose)
+        if format is Format.json:
+            print(report.to_json(), flush=True)
+        elif format is Format.ndjson:
+            print(json.dumps({
+                "event": "summary",
+                "status": report.status,
+                "totals": report.totals,
+                "discovered": report.discovered,
+                "duration_seconds": report.duration_seconds,
+                "output": str(output),
+                "report": str(output / "decaf-report.json"),
+            }), flush=True)
+        if report.interrupted:
+            raise typer.Exit(code=130)
+        raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
+    finally:
+        console = prior_console
 
 
 @app.command(name="report")

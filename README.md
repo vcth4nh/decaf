@@ -62,6 +62,16 @@ decaf ./libs --repo https://nexus.mycorp.com/repository/maven-public
 Exit codes: `0` all artifacts succeeded · `1` some failed (see
 `decaf-out/decaf-report.json`) · `2` usage/environment error.
 
+`--format json` prints the run report as one JSON document to stdout after
+the run (byte-identical to `decaf-report.json`); `--format ndjson` streams
+one JSON object per line as the run progresses instead — `scan`, `artifact`
+(per completion), `warning`, then a final `summary` line carrying `status`
+and the report path. Both modes send all human narration (status lines, the
+ending block) to stderr instead of stdout, so stdout stays machine-parseable
+even on a usage error (empty stdout, exit `2`); `-q`/`-v` still govern that
+stderr narration exactly as in the default `human` format. Exit codes are
+unchanged across all three formats.
+
 Everything after a literal `--` is passed verbatim to the engine invocation
 — the escape hatch for the engines' own option surfaces (CFR's
 `--renameillegalidents true`, fernflower's `-dgs=1`, …). It requires

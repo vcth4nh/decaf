@@ -758,6 +758,99 @@ def test_cli_engine_args_require_no_fallback(tmp_path: Path, make_jar, monkeypat
     assert "--no-fallback" in ANSI.sub("", result.output)
 
 
+# --format json|ndjson: typer's vendored click (0.27) CliRunner has no `mix_stderr`
+# kwarg (its __init__ only takes charset/env) — but it always keeps stdout and
+# stderr separate internally and exposes both via result.stdout / result.stderr
+# (result.output is the combined stream), so no combined-output filtering
+# fallback is needed; these tests read the separated streams directly.
+
+
+def test_format_json_stdout_is_report(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["totals"]["ok"] == 2
+    assert "Completed" not in result.stdout  # ending narration went to stderr, not stdout
+
+
+def test_format_ndjson_streams_events(tmp_path: Path, make_jar, monkeypatch):
+    rep = ok_report(status="completed")
+
+    def fake_run(settings, **kw):
+        kw["on_done"](rep.artifacts[0])
+        kw["on_warn"]("net sad")
+        return rep
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "ndjson"]
+    )
+    assert result.exit_code == 0
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line]
+    events = {line["event"] for line in lines}
+    assert events >= {"artifact", "warning", "summary"}
+    artifact_event = next(line for line in lines if line["event"] == "artifact")
+    assert artifact_event["rel"] == rep.artifacts[0].rel
+    summary = next(line for line in lines if line["event"] == "summary")
+    assert summary["status"] == "completed"
+    assert summary["report"] == str(tmp_path / "out" / "decaf-report.json")
+
+
+def test_format_ndjson_quiet_still_streams_events(tmp_path: Path, make_jar, monkeypatch):
+    """-q is orthogonal to --format: it silences stderr narration only, same as
+    today — ndjson's stdout event stream keeps flowing regardless."""
+    rep = ok_report()
+
+    def fake_run(settings, **kw):
+        kw["on_warn"]("net sad")
+        return rep
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+              "--format", "ndjson", "--quiet"],
+    )
+    assert result.exit_code == 0
+    events = {json.loads(line)["event"] for line in result.stdout.splitlines() if line}
+    assert "warning" in events
+    assert "summary" in events
+
+
+def test_format_human_unchanged(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
+    assert "Completed in " in ANSI.sub("", result.stdout)
+
+
+def test_machine_usage_error_stdout_empty(tmp_path: Path):
+    result = runner.invoke(app, [str(tmp_path / "nope"), "--format", "json"])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "does not exist" in ANSI.sub("", result.stderr)
+
+
+def test_format_json_swaps_console_to_stderr_and_restores(tmp_path: Path, make_jar, monkeypatch):
+    captured = {}
+
+    def capture(settings, **kw):
+        captured["mid_run_stderr"] = cli.console.stderr
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "json"])
+    assert captured["mid_run_stderr"] is True
+    assert cli.console.stderr is False  # restored in `finally` for the next invocation
+
+
 def _mixed_report(**over) -> RunReport:
     """1 ok / 1 partial / 1 failed / 1 network fallback, for `decaf report` CLI tests."""
     artifacts = [
