@@ -303,11 +303,25 @@ def test_run_drops_fallback_engine_too_new_for_runtime(monkeypatch, make_jar, tm
         engines, "ensure_engine", lambda spec, client, cache_dir=None: Path(f"/fake/{spec.name}.jar")
     )
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    warns: list[str] = []
     report = run(
         Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
         runner=perfect_engine,
+        on_warn=warns.append,
     )
     assert report.settings["chain"] == ["vineflower", "cfr", "procyon", "jd"]  # no fernflower
+    assert "fallback chain: skipped fernflower (needs Java 21+, found 17)" in warns
+
+
+def test_dropped_fallback_warning_silent_when_chain_full(fake_env, make_jar, tmp_path: Path):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    warns: list[str] = []
+    run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+        on_warn=warns.append,
+    )
+    assert not [w for w in warns if w.startswith("fallback chain:")]
 
 
 def test_run_primary_download_failure_is_fatal(monkeypatch, make_jar, tmp_path: Path):

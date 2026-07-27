@@ -798,12 +798,15 @@ def _preflight_engines(
     java_major: int,
     client: httpx.Client,
     on_event: Callable[[str, str, str], None] | None = None,
+    *,
+    on_warn: Callable[[str], None] | None = None,
 ) -> tuple[list[str], dict[str, Path]]:
     if on_event is not None:
         on_event("engines", "", "verifying")
     wanted = chain_for(settings.engine, settings.fallback)
     specs = engines.active_specs(settings.engine_overrides)
     jars: dict[str, Path] = {}
+    skipped: list[str] = []
     for name in wanted:
         spec = specs[name]
         if spec.min_java > java_major:
@@ -811,6 +814,7 @@ def _preflight_engines(
                 raise DecafError(
                     f"engine {name} needs Java {spec.min_java}+, found Java {java_major}"
                 )
+            skipped.append(f"{name} (needs Java {spec.min_java}+, found {java_major})")
             continue
         downloaded = False
         kwargs: dict = {}
@@ -833,6 +837,8 @@ def _preflight_engines(
     chain = chain_for(settings.engine, settings.fallback, available=set(jars))
     if not chain:
         raise DecafError(f"primary engine {settings.engine!r} unavailable")
+    if skipped and on_warn is not None:
+        on_warn("fallback chain: skipped " + ", ".join(skipped))
     if on_event is not None:
         on_event("engines", "", "ready")
     return chain, jars
@@ -927,7 +933,9 @@ def run(
         affinity_base = os.sched_getaffinity(0)
         os.sched_setaffinity(0, set(sorted(affinity_base)[:total_cpus]))
     try:
-        chain, engine_jars = _preflight_engines(settings, java_major, client, on_event)
+        chain, engine_jars = _preflight_engines(
+            settings, java_major, client, on_event, on_warn=on_warn
+        )
         writer: MergeWriter | MirrorWriter
         if settings.mirror:
             writer = MirrorWriter(settings.output, resources=settings.resources)
