@@ -108,6 +108,13 @@ class ArtifactReport:
     collisions: list[dict] = field(default_factory=list)
     failure: str | None = None
 
+    @property
+    def partial(self) -> bool:
+        """ok but degraded: engine holes, or decompiled sources-less due to network."""
+        return self.outcome == "ok" and (
+            self.missing_classes > 0 or (self.sources_miss or "").startswith("network:")
+        )
+
 
 def _resource_members(archive: Path, include_sources: bool) -> list[str]:
     """Entries of the original archive that mirror mode carries through."""
@@ -240,6 +247,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "ok": sum(r.outcome == "ok" for r in reports),
         "failed": sum(r.outcome == "failed" for r in reports),
         "skipped": sum(r.outcome == "skipped" for r in reports),
+        "partial": sum(1 for r in reports if r.partial),
         "maven_sources": sum(r.method == "maven" for r in reports),
         "extracted": sum(r.method == "extracted" for r in reports),
         "decompiled": sum(

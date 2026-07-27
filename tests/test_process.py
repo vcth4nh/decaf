@@ -962,3 +962,18 @@ def test_form_batch_defers_metadata_claim_overlap():
     batch = _form_batch(q)
     assert [stems for _, _, _, stems, _ in batch] == [{"com/x/A"}]
     assert [stems for _, _, _, stems, _ in q] == [{"com/x/B"}]
+
+
+def test_partial_predicate_and_totals():
+    from dataclasses import replace
+
+    from decaf.pipeline import ArtifactReport, compute_totals
+
+    ok = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    assert not ok.partial
+    assert replace(ok, missing_classes=3).partial
+    assert replace(ok, sources_miss="network: index timeout; trail").partial
+    assert not replace(ok, sources_miss="no pom.properties").partial
+    assert not replace(ok, outcome="failed", missing_classes=3).partial
+    totals = compute_totals([ok, replace(ok, rel="b.jar", missing_classes=1)])
+    assert totals["partial"] == 1

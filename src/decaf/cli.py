@@ -370,7 +370,8 @@ def _status_line(r: ArtifactReport) -> str:
             detail = f"{r.method}, {r.classes} classes"
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
-        line = f"[green]✓[/] {r.rel} ({detail})"
+        glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
+        line = f"{glyph} {r.rel} ({detail})"
         if r.method == "maven" and r.sources_cached:
             return f"[dim]{line}[/]"
         return line
@@ -395,6 +396,8 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
     if resource_only_ok:
         ok_detail += f", resource-only {resource_only_ok}"
     table.add_row("OK", f"{t['ok']} ({ok_detail})")
+    if t.get("partial"):
+        table.add_row("Partial", str(t["partial"]))
     table.add_row("Skipped", str(t["skipped"]))
     table.add_row("Failed", str(t["failed"]))
     table.add_row("Java files", str(t["java_files"]))
