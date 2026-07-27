@@ -14,10 +14,10 @@ All notable changes to decaf are documented here.
   `artifacts`, or `duration_seconds` instead of crashing (#89).
 - `decaf report --artifact` with overlapping globs prints each matching
   artifact once (#89).
-- HTTP 401/403 during a sources download no longer records a 7-day
-  "no sources" verdict: the miss is tagged network-degraded (`!` marker) and
-  resolution is re-attempted next run — bad credentials can't poison the
-  verdict cache (#89).
+- HTTP 401/403 during a sources download or a candidate probe no longer
+  records a 7-day negative verdict: the miss is tagged network-degraded
+  (`!` marker) and resolution is re-attempted next run — bad credentials
+  can't poison the verdict cache through either path (#89).
 - Uppercase `.JAVA`/`.KT` entries in sources jars are now counted and
   written by both output writers (extraction already kept them) (#89).
 - Decode and redirect anomalies during candidate probes taint the miss like

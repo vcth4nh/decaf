@@ -443,6 +443,13 @@ def verify_gav(
             continue
         except (httpx.HTTPError, httpx.InvalidURL):
             continue
+        if resp.status_code in (401, 403):
+            # Auth failure says nothing about the candidate (same rule as the
+            # sources-download path): taint the miss so no verdict is recorded.
+            host = httpx.URL(repo).host
+            log.events.append(f"{host}: HTTP {resp.status_code} (auth) during candidate probe")
+            log.probe_failures += 1
+            continue
         if resp.status_code != 200:
             continue
         tokens = resp.text.split()

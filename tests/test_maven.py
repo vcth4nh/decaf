@@ -127,6 +127,31 @@ def test_sources_download_auth_failure_taints_and_skips_verdict(make_jar, tmp_pa
     assert [f for f in (tmp_path / "verdicts").rglob("*") if f.is_file()]  # 404 still records
 
 
+def test_probe_auth_failure_taints_miss_and_skips_verdict(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/A.class": b"x"})
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        if request.url.path.endswith(".jar.sha1"):
+            return httpx.Response(401)
+        return httpx.Response(404)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.sources_jar is None
+    assert res.miss is not None and res.miss.startswith("network:")
+    assert "HTTP 401" in res.miss
+
+    wrapped, calls = _counting(handler)
+    with make_client(wrapped) as c:
+        resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert calls["n"] > 0  # no negative sha1 verdict was recorded
+
+
 def test_probe_decoding_error_taints_miss_and_skips_verdict(make_jar, tmp_path: Path):
     from decaf.verdicts import VerdictCache
 
