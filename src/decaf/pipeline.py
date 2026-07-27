@@ -1059,7 +1059,7 @@ def run(
                     "cpus": total_cpus,
                     "cpu_budget": cpu_budget,
                     "timeout": settings.timeout,
-                    "repos": list(settings.repos),
+                    "repos": maven._redacted(settings.repos),
                     "chain": chain,
                     "java": java_exe,
                     "java_major": java_major,

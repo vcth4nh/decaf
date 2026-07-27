@@ -104,6 +104,21 @@ def test_run_kotlin_sources_jar_extracted(fake_env, make_jar, tmp_path: Path):
     assert (out / "kt-lib-sources.jar/com/k/K.kt").is_file()
 
 
+def test_report_settings_repos_redacted(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("app.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(
+        Settings(
+            input=input_dir, output=out, maven=False,
+            repos=("https://deploy:s3cr3t@r.test/m2",),
+        ),
+        runner=perfect_engine,
+    )
+    assert report.settings["repos"] == ["https://r.test/m2"]
+    assert "s3cr3t" not in (out / "decaf-report.json").read_text()
+
+
 def test_run_mirror_mode_nested_archive_resource_no_collision(fake_env, make_jar, tmp_path: Path):
     """Real engines pass a nested archive through as a resource file alongside the
     decompiled .java files; the mirror output for the nested artifact's own

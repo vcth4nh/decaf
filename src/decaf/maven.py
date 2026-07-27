@@ -509,9 +509,9 @@ def fetch_sources(
     cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar"
     marker = cached.with_suffix(".repo")
     if cached.is_file() and marker.is_file():
-        return cached, marker.read_text().strip(), True
+        return cached, redact_url(marker.read_text().strip()), True
     gav_key = (gav.group, gav.artifact, gav.version)
-    if verdicts is not None and verdicts.has_no_sources(gav_key, repos):
+    if verdicts is not None and verdicts.has_no_sources(gav_key, _redacted(repos)):
         log.cached_no_sources = True
         return None
     verified_misses = 0
@@ -530,10 +530,10 @@ def fetch_sources(
         if got is None:
             verified_misses += 1
             continue
-        marker.write_text(repo)
-        return cached, repo, False
+        marker.write_text(redact_url(repo))
+        return cached, redact_url(repo), False
     if verdicts is not None and repos and verified_misses == len(repos):
-        verdicts.record_no_sources(gav_key, repos)
+        verdicts.record_no_sources(gav_key, _redacted(repos))
     return None
 
 
@@ -664,7 +664,7 @@ def resolve_sources(
     trail = ["no pom.properties"]
     sha1 = sha1_of(jar_path)
     if verdicts is not None:
-        known = verdicts.lookup_sha1(sha1, repos)
+        known = verdicts.lookup_sha1(sha1, _redacted(repos))
         if known is not None:
             if known.gav is not None:
                 gav = Gav(*known.gav)
@@ -702,7 +702,7 @@ def resolve_sources(
         trail.append("no artifact/version hints in filename or manifest")
         miss = "; ".join(trail)
         if verdicts is not None and not log.events:
-            verdicts.record_sha1_miss(sha1, miss, repos)
+            verdicts.record_sha1_miss(sha1, miss, _redacted(repos))
         return _finish(Resolution(miss=miss), log, net)
 
     budget = MAX_PROBES
@@ -742,5 +742,5 @@ def resolve_sources(
         trail.append("no candidate groups found")
     miss = "; ".join(trail)
     if verdicts is not None and not log.events:
-        verdicts.record_sha1_miss(sha1, miss, repos)
+        verdicts.record_sha1_miss(sha1, miss, _redacted(repos))
     return _finish(Resolution(miss=miss), log, net)
