@@ -19,6 +19,7 @@ from decaf.maven import (
     fetch_sources,
     gav_from_central_sha1,
     gav_from_pom_properties,
+    redact_url,
     resolve_sources,
     sha1_of,
     verify_gav,
@@ -35,6 +36,66 @@ def make_client(handler) -> httpx.Client:
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
     monkeypatch.setattr(maven, "RETRY_BACKOFF", tuple(0.0 for _ in maven.RETRY_BACKOFF))
+
+
+def test_redact_url_strips_userinfo():
+    assert (
+        redact_url("https://deploy:s3cr3t@nexus.example/repository/maven-public")
+        == "https://nexus.example/repository/maven-public"
+    )
+    assert redact_url("https://user@host/m2") == "https://host/m2"
+
+
+def test_redact_url_passthrough():
+    assert redact_url("https://repo1.maven.org/maven2") == "https://repo1.maven.org/maven2"
+    assert redact_url("not a url") == "not a url"
+    assert redact_url("") == ""
+
+
+def test_credentialed_repo_never_persisted(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    creds_repo = "https://deploy:s3cr3t@r.test/m2"
+    sources_payload = make_jar("p.jar", {"com/e/A.java": "class A {}"}).read_bytes()
+    hit_path = "/m2/com/e/lib/1/lib-1-sources.jar"
+
+    def handler(request):
+        if request.url.path == hit_path:
+            return httpx.Response(200, content=sources_payload)
+        return httpx.Response(404)
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    cache = tmp_path / "cache"
+    with make_client(handler) as c:
+        got = fetch_sources(Gav("com.e", "lib", "1"), [creds_repo], c, cache, verdicts=verdicts)
+    assert got is not None
+    _, repo, cached = got
+    assert repo == "https://r.test/m2" and cached is False
+    marker = next(cache.glob("*.repo"))
+    assert marker.read_text().strip() == "https://r.test/m2"
+
+    with make_client(handler) as c:
+        got2 = fetch_sources(Gav("com.e", "gone", "1"), [creds_repo], c, cache, verdicts=verdicts)
+    assert got2 is None
+    verdict_files = [f for f in (tmp_path / "verdicts").rglob("*") if f.is_file()]
+    assert verdict_files
+    for f in verdict_files:
+        assert "s3cr3t" not in f.read_text()
+
+
+def test_legacy_credentialed_marker_sanitized_on_read(make_jar, tmp_path: Path):
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True)
+    cached = cache / "com.e_lib_1-sources.jar"
+    cached.write_bytes(make_jar("p.jar", {"com/e/A.java": "class A {}"}).read_bytes())
+    cached.with_suffix(".repo").write_text("https://deploy:s3cr3t@r.test/m2")
+
+    def handler(request):
+        raise AssertionError("network touched on cache hit")
+
+    with make_client(handler) as c:
+        got = fetch_sources(Gav("com.e", "lib", "1"), ["https://x.test/m2"], c, cache)
+    assert got == (cached, "https://r.test/m2", True)
 
 
 def test_gav_from_single_pom_properties(make_jar):

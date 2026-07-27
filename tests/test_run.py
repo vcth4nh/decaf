@@ -104,6 +104,29 @@ def test_run_kotlin_sources_jar_extracted(fake_env, make_jar, tmp_path: Path):
     assert (out / "kt-lib-sources.jar/com/k/K.kt").is_file()
 
 
+def test_report_discovered_counts_nested(fake_env, make_jar, tmp_path: Path):
+    input_dir = make_inputs(make_jar, tmp_path)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    assert report.discovered == 3 == report.totals["artifacts"]
+    assert json.loads((out / "decaf-report.json").read_text())["discovered"] == 3
+
+
+def test_report_settings_repos_redacted(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("app.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(
+        Settings(
+            input=input_dir, output=out, maven=False,
+            repos=("https://deploy:s3cr3t@r.test/m2",),
+        ),
+        runner=perfect_engine,
+    )
+    assert report.settings["repos"] == ["https://r.test/m2"]
+    assert "s3cr3t" not in (out / "decaf-report.json").read_text()
+
+
 def test_run_mirror_mode_nested_archive_resource_no_collision(fake_env, make_jar, tmp_path: Path):
     """Real engines pass a nested archive through as a resource file alongside the
     decompiled .java files; the mirror output for the nested artifact's own
@@ -280,11 +303,25 @@ def test_run_drops_fallback_engine_too_new_for_runtime(monkeypatch, make_jar, tm
         engines, "ensure_engine", lambda spec, client, cache_dir=None: Path(f"/fake/{spec.name}.jar")
     )
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    warns: list[str] = []
     report = run(
         Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
         runner=perfect_engine,
+        on_warn=warns.append,
     )
     assert report.settings["chain"] == ["vineflower", "cfr", "procyon", "jd"]  # no fernflower
+    assert "fallback chain: skipped fernflower (needs Java 21+, found 17)" in warns
+
+
+def test_dropped_fallback_warning_silent_when_chain_full(fake_env, make_jar, tmp_path: Path):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    warns: list[str] = []
+    run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+        on_warn=warns.append,
+    )
+    assert not [w for w in warns if w.startswith("fallback chain:")]
 
 
 def test_run_primary_download_failure_is_fatal(monkeypatch, make_jar, tmp_path: Path):
@@ -334,6 +371,8 @@ def test_interrupt_during_submission_still_writes_report(fake_env, make_jar, tmp
     report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
     assert report.interrupted is True
     assert (out / "decaf-report.json").is_file()
+    assert report.discovered == 3  # denominator survives the interrupt
+    assert report.totals["artifacts"] < 3
 
 
 def test_run_streams_engine_stderr_with_prefix(fake_env, make_jar, tmp_path: Path):

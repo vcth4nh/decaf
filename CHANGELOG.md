@@ -4,6 +4,26 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Partial results are marked honestly: a yellow `!` (instead of a green `✓`)
+  flags artifacts with missing classes or sources lost to network failures;
+  the summary and report gain a `partial` count (#83).
+- The failure recap says `…and N more failures (see report)` instead of
+  silently truncating at 20 (#83).
+- Every run prints its output and `decaf-report.json` paths, and interrupted
+  runs report `completed/discovered` artifacts — the report gains an additive
+  `discovered` field so a partial run can't pass for a complete one (#83).
+- Fallback engines dropped for Java incompatibility are named in a warning
+  instead of vanishing silently (#83).
+
+### Security
+
+- Maven repository credentials (`https://user:pass@…` config URLs) are
+  stripped from everything decaf writes or shows: report settings and
+  per-artifact `repo` fields, `-v` output, sources-cache `.repo` markers
+  (legacy markers sanitized on read), and lookup-verdict files (#83).
+
 ## [1.8.0] - 2026-07-27
 
 ### Added

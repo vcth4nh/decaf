@@ -97,6 +97,7 @@ def test_report_json_and_totals(tmp_path: Path):
         "ok": 3,
         "failed": 1,
         "skipped": 1,
+        "partial": 0,
         "maven_sources": 1,
         "extracted": 1,
         "decompiled": 1,

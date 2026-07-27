@@ -108,6 +108,13 @@ class ArtifactReport:
     collisions: list[dict] = field(default_factory=list)
     failure: str | None = None
 
+    @property
+    def partial(self) -> bool:
+        """ok but degraded: engine holes, or decompiled sources-less due to network."""
+        return self.outcome == "ok" and (
+            self.missing_classes > 0 or (self.sources_miss or "").startswith("network:")
+        )
+
 
 def _resource_members(archive: Path, include_sources: bool) -> list[str]:
     """Entries of the original archive that mirror mode carries through."""
@@ -228,6 +235,7 @@ class RunReport:
     artifacts: list[ArtifactReport]
     totals: dict
     duration_seconds: float
+    discovered: int = 0  # scan-found artifacts, incl. never-started ones on interrupt
     interrupted: bool = False
 
     def to_json(self) -> str:
@@ -240,6 +248,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "ok": sum(r.outcome == "ok" for r in reports),
         "failed": sum(r.outcome == "failed" for r in reports),
         "skipped": sum(r.outcome == "skipped" for r in reports),
+        "partial": sum(1 for r in reports if r.partial),
         "maven_sources": sum(r.method == "maven" for r in reports),
         "extracted": sum(r.method == "extracted" for r in reports),
         "decompiled": sum(
@@ -789,12 +798,15 @@ def _preflight_engines(
     java_major: int,
     client: httpx.Client,
     on_event: Callable[[str, str, str], None] | None = None,
+    *,
+    on_warn: Callable[[str], None] | None = None,
 ) -> tuple[list[str], dict[str, Path]]:
     if on_event is not None:
         on_event("engines", "", "verifying")
     wanted = chain_for(settings.engine, settings.fallback)
     specs = engines.active_specs(settings.engine_overrides)
     jars: dict[str, Path] = {}
+    skipped: list[str] = []
     for name in wanted:
         spec = specs[name]
         if spec.min_java > java_major:
@@ -802,6 +814,7 @@ def _preflight_engines(
                 raise DecafError(
                     f"engine {name} needs Java {spec.min_java}+, found Java {java_major}"
                 )
+            skipped.append(f"{name} (needs Java {spec.min_java}+, found {java_major})")
             continue
         downloaded = False
         kwargs: dict = {}
@@ -824,6 +837,8 @@ def _preflight_engines(
     chain = chain_for(settings.engine, settings.fallback, available=set(jars))
     if not chain:
         raise DecafError(f"primary engine {settings.engine!r} unavailable")
+    if skipped and on_warn is not None:
+        on_warn("fallback chain: skipped " + ", ".join(skipped))
     if on_event is not None:
         on_event("engines", "", "ready")
     return chain, jars
@@ -877,8 +892,9 @@ def run(
         raise DecafError(f"Java {java_major} is too old (Java {engines.JAVA_MIN}+ required)")
 
     artifacts, nested_counts = scan_counted(settings.input)
+    discovered = len(artifacts) + sum(nested_counts.values())
     if on_found is not None:
-        on_found(len(artifacts) + sum(nested_counts.values()))
+        on_found(discovered)
     if on_event is not None:
         on_event(
             "scan", "",
@@ -917,7 +933,9 @@ def run(
         affinity_base = os.sched_getaffinity(0)
         os.sched_setaffinity(0, set(sorted(affinity_base)[:total_cpus]))
     try:
-        chain, engine_jars = _preflight_engines(settings, java_major, client, on_event)
+        chain, engine_jars = _preflight_engines(
+            settings, java_major, client, on_event, on_warn=on_warn
+        )
         writer: MergeWriter | MirrorWriter
         if settings.mirror:
             writer = MirrorWriter(settings.output, resources=settings.resources)
@@ -1012,6 +1030,7 @@ def run(
                                 for n in nested:
                                     heappush(todo, (-n.classes, next(seq), n))
                                 delta = len(nested) - nested_counts.pop(a.rel, 0)
+                                discovered += delta
                                 if delta and on_found is not None:
                                     on_found(delta)
                                 if target is not None:
@@ -1059,7 +1078,7 @@ def run(
                     "cpus": total_cpus,
                     "cpu_budget": cpu_budget,
                     "timeout": settings.timeout,
-                    "repos": list(settings.repos),
+                    "repos": maven._redacted(settings.repos),
                     "chain": chain,
                     "java": java_exe,
                     "java_major": java_major,
@@ -1067,6 +1086,7 @@ def run(
                 artifacts=reports,
                 totals=compute_totals(reports),
                 duration_seconds=round(time.monotonic() - start, 2),
+                discovered=discovered,
                 interrupted=interrupted,
             )
             settings.output.mkdir(parents=True, exist_ok=True)

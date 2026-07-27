@@ -370,7 +370,8 @@ def _status_line(r: ArtifactReport) -> str:
             detail = f"{r.method}, {r.classes} classes"
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
-        line = f"[green]✓[/] {r.rel} ({detail})"
+        glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
+        line = f"{glyph} {r.rel} ({detail})"
         if r.method == "maven" and r.sources_cached:
             return f"[dim]{line}[/]"
         return line
@@ -380,7 +381,7 @@ def _status_line(r: ArtifactReport) -> str:
     return f"[red]✗[/] {r.rel} ({reason})"
 
 
-def _print_summary(report: RunReport, verbose: bool) -> None:
+def _print_summary(report: RunReport, verbose: bool, output: Path) -> None:
     t = report.totals
     table = Table(title="decaf summary", show_header=False)
     table.add_row("Artifacts", str(t["artifacts"]))
@@ -395,6 +396,8 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
     if resource_only_ok:
         ok_detail += f", resource-only {resource_only_ok}"
     table.add_row("OK", f"{t['ok']} ({ok_detail})")
+    if t.get("partial"):
+        table.add_row("Partial", str(t["partial"]))
     table.add_row("Skipped", str(t["skipped"]))
     table.add_row("Failed", str(t["failed"]))
     table.add_row("Java files", str(t["java_files"]))
@@ -409,13 +412,20 @@ def _print_summary(report: RunReport, verbose: bool) -> None:
             for a in r.attempts:
                 if a.stderr_tail:
                     console.print(f"    [dim]{a.engine} ({a.level}): {a.stderr_tail[-300:]}[/]")
+    if len(failed) > 20:
+        console.print(f"…and {len(failed) - 20} more failures (see report)")
     if t["network_misses"]:
         console.print(
             f"[yellow]{t['network_misses']} artifact(s) fell back to decompilation "
             "without sources due to network failures[/]"
         )
     if report.interrupted:
-        console.print("[yellow]interrupted — partial results written[/]")
+        console.print(
+            f"[yellow]interrupted — {t['artifacts']}/{report.discovered} artifacts completed, "
+            "partial results written[/]"
+        )
+    console.print(f"[dim]output: {output}[/]")
+    console.print(f"[dim]report: {output / 'decaf-report.json'}[/]")
 
 
 @app.command(name="run")
@@ -509,7 +519,7 @@ def main(
     except (DecafError, ScanError) as exc:
         raise _fail(str(exc))
 
-    _print_summary(report, verbose)
+    _print_summary(report, verbose, output)
     if report.interrupted:
         raise typer.Exit(code=130)
     raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
