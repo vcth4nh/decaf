@@ -22,6 +22,7 @@ from . import __version__, engines
 from . import update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
 from .pipeline import ArtifactReport, DecafError, RunReport, Settings, run
+from .report_view import _status_line
 from .scanner import ScanError
 
 
@@ -354,31 +355,6 @@ class _RunDisplay:
                 f" · {decompiling} decompiling · {queued} queued"
             ),
         )
-
-
-def _status_line(r: ArtifactReport) -> str:
-    if r.outcome == "ok":
-        if r.method == "maven":
-            detail = f"maven sources, {r.gav}"
-            if r.sources_cached:
-                detail += ", cached"
-        elif r.method == "extracted":
-            detail = "extracted sources jar"
-        elif r.method is None and r.kind == "resource_only":
-            detail = f"resources only, {r.resources_copied} files"
-        else:
-            detail = f"{r.method}, {r.classes} classes"
-            if r.missing_classes:
-                detail += f", [yellow]{r.missing_classes} missing[/]"
-        glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
-        line = f"{glyph} {r.rel} ({detail})"
-        if r.method == "maven" and r.sources_cached:
-            return f"[dim]{line}[/]"
-        return line
-    if r.outcome == "skipped":
-        return f"[yellow]-[/] {r.rel} ({r.failure or 'resource-only'}, skipped)"
-    reason = (r.failure or "failed").splitlines()[-1]
-    return f"[red]✗[/] {r.rel} ({reason})"
 
 
 def _print_summary(report: RunReport, verbose: bool, output: Path) -> None:
