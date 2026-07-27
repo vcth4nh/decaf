@@ -586,8 +586,7 @@ def report_cmd(
     if problems:
         report_view.render_problems(console, report)
     if artifact:
-        matches = sum(report_view.render_artifact(console, report, pattern) for pattern in artifact)
-        if matches == 0:
+        if report_view.render_artifact(console, report, artifact) == 0:
             console.print("no artifacts match")
     if network_fallbacks:
         report_view.render_network_fallbacks(console, report)

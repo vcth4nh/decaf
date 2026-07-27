@@ -209,7 +209,7 @@ def test_load_report_errors(tmp_path: Path):
 
 def test_render_artifact_glob_and_count():
     console = _console()
-    count = render_artifact(console, report(), "*lega*")
+    count = render_artifact(console, report(), ["*lega*"])
     assert count == 1
     plain = console.file.getvalue()
     assert "legacy.jar" in plain
@@ -218,7 +218,7 @@ def test_render_artifact_glob_and_count():
 
 def test_render_artifact_no_match_returns_zero():
     console = _console()
-    assert render_artifact(console, report(), "*nope*") == 0
+    assert render_artifact(console, report(), ["*nope*"]) == 0
     assert console.file.getvalue() == ""
 
 
@@ -234,7 +234,7 @@ def test_render_artifact_escapes_bracketed_stderr():
     ]
     console = _console()
     rep = report(artifacts=artifacts, totals=compute_totals(artifacts))
-    count = render_artifact(console, rep, "noisy.jar")  # must not raise
+    count = render_artifact(console, rep, ["noisy.jar"])  # must not raise
     assert count == 1
     plain = console.file.getvalue()
     assert "[main] [WARNING] bad class file" in plain
@@ -271,3 +271,21 @@ def test_fmt_duration_matches_elapsed_shapes():
 def test_status_line_still_works_moved():
     r = ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1")
     assert _status_line(r) == "[green]✓[/] a.jar (maven sources, g:a:1)"
+
+
+def test_render_artifact_overlapping_globs_dedupe():
+    console = _console()
+    count = render_artifact(console, report(), ["*lega*", "leg*", "*.jar"])
+    plain = console.file.getvalue()
+    assert count == len(report().artifacts)  # *.jar matches all, each rendered once
+    assert plain.count("legacy.jar") == 1  # bold header appears exactly once per artifact
+
+
+def test_render_artifact_bracketed_rel_renders_verbatim():
+    artifacts = [
+        ArtifactReport(rel="x[main].jar", kind="archive", outcome="failed", failure="boom"),
+    ]
+    console = _console()
+    rep = report(artifacts=artifacts, totals=compute_totals(artifacts))
+    assert render_artifact(console, rep, ["x*"]) == 1  # must not raise
+    assert "x[main].jar" in console.file.getvalue()

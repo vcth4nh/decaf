@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import fnmatch
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from rich.console import Console
@@ -199,13 +200,16 @@ def render_problems(console: Console, report: RunReport) -> None:
             console.print(_status_line(r))
 
 
-def render_artifact(console: Console, report: RunReport, pattern: str) -> int:
-    """Print full detail for artifacts whose rel matches the glob; return match count."""
-    matches = [r for r in report.artifacts if fnmatch.fnmatch(r.rel, pattern)]
+def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]) -> int:
+    """Print full detail for artifacts whose rel matches any glob, once each; return match count."""
+    matches = [
+        r for r in report.artifacts
+        if any(fnmatch.fnmatch(r.rel, p) for p in patterns)
+    ]
     for i, r in enumerate(matches):
         if i:
             console.print()
-        console.print(f"[bold]{r.rel}[/]")
+        console.print(f"[bold]{escape(r.rel)}[/]")
         console.print(f"  kind={r.kind} outcome={r.outcome} method={r.method}")
         console.print(
             f"  gav={escape(str(r.gav))} repo={escape(str(r.repo))} "
