@@ -103,6 +103,17 @@ def test_ending_footer_paths():
     assert "Report" in plain and str(report_path) in plain
 
 
+def test_ending_footer_escapes_bracketed_paths():
+    """output/report_path can be untrusted (loaded from a report's settings dict by
+    Task 4's `decaf report`) or just a directory a user happened to name with brackets
+    for the live run path — must render verbatim, not raise MarkupError."""
+    console = _console()
+    render_ending(console, report(), output=Path("out[/bold]"),
+                  report_path=Path("out[/bold]/decaf-report.json"), verbose=False)  # must not raise
+    plain = console.file.getvalue()
+    assert "out[/bold]" in plain
+
+
 def test_ending_verbose_shows_stderr_tail():
     console = _console()
     render_ending(console, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=True)

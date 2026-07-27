@@ -170,8 +170,8 @@ def render_ending(
             console.print(f"…and {len(failed) - 20} more failures (see report)")
 
     console.print()
-    console.print(f"[dim]{'Output':<{_FOOTER_LABEL_WIDTH}}[/]  {output}")
-    console.print(f"[dim]{'Report':<{_FOOTER_LABEL_WIDTH}}[/]  {report_path}")
+    console.print(f"[dim]{'Output':<{_FOOTER_LABEL_WIDTH}}[/]  {escape(str(output))}")
+    console.print(f"[dim]{'Report':<{_FOOTER_LABEL_WIDTH}}[/]  {escape(str(report_path))}")
 
 
 def render_problems(console: Console, report: RunReport) -> None:

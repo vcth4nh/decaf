@@ -469,8 +469,9 @@ def report_cmd(
 
     schema = report.schema_version or 0
     console.print(
-        f"[dim]{resolved} · schema {schema} · decaf {report.decaf_version or 'unknown'} · "
-        f"{report.ended_at or 'no timestamp'}[/]"
+        f"[dim]{escape(str(resolved))} · schema {schema} · "
+        f"decaf {escape(report.decaf_version or 'unknown')} · "
+        f"{escape(report.ended_at or 'no timestamp')}[/]"
     )
     if schema > 1:
         console.print(

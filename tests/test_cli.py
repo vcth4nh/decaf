@@ -872,3 +872,22 @@ def test_report_word_is_command_not_input_path(tmp_path: Path, monkeypatch):
     assert "error:" in plain
     assert "decaf-out" in plain
     assert "input report does not exist" not in plain
+
+
+def test_report_header_escapes_bracketed_decaf_version(tmp_path: Path):
+    """Unescaped, '1.8.0[snapshot]' silently drops '[snapshot]' (Rich treats it as an
+    unclosed style tag) instead of raising — either way the real value must survive."""
+    out = _write_report(tmp_path / "out", _mixed_report(decaf_version="1.8.0[snapshot]"))
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    assert "[snapshot]" in ANSI.sub("", result.output)
+
+
+def test_report_footer_escapes_bracketed_output_setting(tmp_path: Path):
+    """Unescaped, a settings['output'] value containing a stray closing tag like
+    '[/bold]' raises rich.errors.MarkupError, breaking the 'always exit 0 unless
+    ReportError' mandate."""
+    out = _write_report(tmp_path / "out", _mixed_report(settings={"output": "out[/bold]"}))
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    assert "out[/bold]" in ANSI.sub("", result.output)
