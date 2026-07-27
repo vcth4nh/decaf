@@ -4,6 +4,8 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-07-27
+
 ### Fixed
 
 - Artifact names, GAVs, and failure text with `[bracketed]` content render
