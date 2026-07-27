@@ -127,6 +127,23 @@ def test_report_settings_repos_redacted(fake_env, make_jar, tmp_path: Path):
     assert "s3cr3t" not in (out / "decaf-report.json").read_text()
 
 
+def test_run_uppercase_source_suffixes_counted(fake_env, make_jar, tmp_path: Path):
+    """Case-insensitive extraction already keeps A.JAVA/K.KT; the writers must count them."""
+    input_dir = tmp_path / "in"
+    make_jar(
+        "up-lib-sources.jar",
+        {"com/k/K.kt": "fun k() {}", "com/k/A.JAVA": "class A {}"},
+        base=input_dir,
+    )
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    (art,) = report.artifacts
+    assert art.method == "extracted"
+    assert art.java_files == 2
+    assert (out / "up-lib-sources.jar/com/k/K.kt").is_file()
+    assert (out / "up-lib-sources.jar/com/k/A.JAVA").is_file()
+
+
 def test_run_mirror_mode_nested_archive_resource_no_collision(fake_env, make_jar, tmp_path: Path):
     """Real engines pass a nested archive through as a resource file alongside the
     decompiled .java files; the mirror output for the nested artifact's own

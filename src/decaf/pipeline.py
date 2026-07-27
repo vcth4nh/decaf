@@ -149,7 +149,7 @@ class MergeWriter:
         java = 0
         collisions: list[dict] = []
         for p in sorted(tree.rglob("*")):
-            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+            if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
                 continue
             java += 1
             rel = normalize_java_rel(p.relative_to(tree).as_posix())
@@ -193,7 +193,7 @@ class MirrorWriter:
         dest = self.dest_for(rel)
         java = 0
         for p in sorted(tree.rglob("*")):
-            if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+            if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
                 continue  # engine strays never land; resources come from add_resources
             java += 1
             target = dest / p.relative_to(tree)
