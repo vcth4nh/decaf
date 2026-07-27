@@ -192,6 +192,24 @@ def test_render_artifact_no_match_returns_zero():
     assert console.file.getvalue() == ""
 
 
+def test_render_artifact_escapes_bracketed_stderr():
+    """Engine stderr routinely contains [main]/[WARNING]-style tags; must render verbatim,
+    not raise rich.errors.MarkupError and not silently swallow the bracketed text."""
+    artifacts = [
+        ArtifactReport(
+            rel="noisy.jar", kind="archive", outcome="failed", failure="all engines failed",
+            attempts=[EngineAttempt("vineflower", "archive", 1, False, 0,
+                                     "[main] [WARNING] bad class file")],
+        ),
+    ]
+    console = _console()
+    rep = report(artifacts=artifacts, totals=compute_totals(artifacts))
+    count = render_artifact(console, rep, "noisy.jar")  # must not raise
+    assert count == 1
+    plain = console.file.getvalue()
+    assert "[main] [WARNING] bad class file" in plain
+
+
 def test_render_problems_groups_then_partial():
     console = _console()
     render_problems(console, report())
@@ -204,13 +222,13 @@ def test_render_problems_groups_then_partial():
 def test_render_network_fallbacks_lists_misses():
     artifacts = [
         ArtifactReport(rel="n.jar", kind="archive", outcome="ok", method="cfr",
-                        sources_miss="network: sources download 503 persisted"),
+                        sources_miss="network: sources download 503 [connection reset]"),
         ArtifactReport(rel="ok.jar", kind="archive", outcome="ok", method="maven"),
     ]
     console = _console()
     render_network_fallbacks(console, report(artifacts=artifacts, totals=compute_totals(artifacts)))
     plain = console.file.getvalue()
-    assert "n.jar" in plain and "network: sources download 503 persisted" in plain
+    assert "n.jar" in plain and "network: sources download 503 [connection reset]" in plain
     assert "ok.jar" not in plain
 
 

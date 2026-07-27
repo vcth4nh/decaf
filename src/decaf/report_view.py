@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from rich.console import Console
+from rich.markup import escape
 
 from .pipeline import ArtifactReport, EngineAttempt, RunReport
 
@@ -198,7 +199,8 @@ def render_artifact(console: Console, report: RunReport, pattern: str) -> int:
         console.print(f"[bold]{r.rel}[/]")
         console.print(f"  kind={r.kind} outcome={r.outcome} method={r.method}")
         console.print(
-            f"  gav={r.gav} repo={r.repo} resolved_by={r.resolved_by} sources_miss={r.sources_miss}"
+            f"  gav={escape(str(r.gav))} repo={escape(str(r.repo))} "
+            f"resolved_by={escape(str(r.resolved_by))} sources_miss={escape(str(r.sources_miss))}"
         )
         console.print(
             f"  classes={r.classes} java_files={r.java_files} "
@@ -206,13 +208,13 @@ def render_artifact(console: Console, report: RunReport, pattern: str) -> int:
             f"missing_classes={r.missing_classes} collisions={len(r.collisions)}"
         )
         if r.failure:
-            console.print(f"  failure={r.failure}")
+            console.print(f"  failure={escape(r.failure)}")
         for a in r.attempts:
             console.print(
                 f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} java_files={a.java_files}"
             )
             if a.stderr_tail:
-                console.print(f"    [dim]{a.stderr_tail}[/]")
+                console.print(f"    [dim]{escape(a.stderr_tail)}[/]")
     return len(matches)
 
 
@@ -220,4 +222,4 @@ def render_network_fallbacks(console: Console, report: RunReport) -> None:
     """List artifacts that lost sources to network failures, with the miss text."""
     for r in report.artifacts:
         if (r.sources_miss or "").startswith("network:"):
-            console.print(f"{r.rel}: {r.sources_miss}")
+            console.print(f"{r.rel}: {escape(r.sources_miss)}")
