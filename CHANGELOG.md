@@ -4,6 +4,29 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-07-27
+
+### Added
+
+- `decaf report` — offline inspector over `decaf-report.json`: default
+  outcome view, `--problems`, `--artifact GLOB`, `--network-fallbacks`.
+  Reads reports from any decaf version. A folder literally named `report`
+  now needs `decaf ./report` (#84).
+- Report schema v1: additive `schema_version`, `decaf_version`, `status`,
+  and `started_at`/`ended_at` timestamps; the report file is written
+  atomically (#84).
+- `--format json|ndjson`: machine data on stdout (the final report, or
+  streamed per-artifact events), human narration on stderr; exit codes
+  unchanged (#84).
+- Non-TTY runs print a plain progress heartbeat every 30s instead of going
+  silent (#84).
+
+### Changed
+
+- The end-of-run summary table is replaced by an outcome-led ending:
+  verdict line first, failures grouped by cause, output/report paths
+  last (#84).
+
 ### Fixed
 
 - Partial results are marked honestly: a yellow `!` (instead of a green `✓`)
@@ -23,15 +46,6 @@ All notable changes to decaf are documented here.
   stripped from everything decaf writes or shows: report settings and
   per-artifact `repo` fields, `-v` output, sources-cache `.repo` markers
   (legacy markers sanitized on read), and lookup-verdict files (#83).
-
-### Added
-- `decaf report` — offline inspector over `decaf-report.json`: default outcome view, `--problems`, `--artifact GLOB`, `--network-fallbacks`. A folder literally named `report` now needs `decaf ./report` (#84).
-- Report schema v1: additive `schema_version`, `decaf_version`, `status`, `started_at`/`ended_at`; the report file is written atomically (#84).
-- `--format json|ndjson`: machine data on stdout (final report, or streamed per-artifact events), human narration on stderr; exit codes unchanged (#84).
-- Non-TTY runs print a plain progress heartbeat every 30s instead of going silent (#84).
-
-### Changed
-- The end-of-run summary table is replaced by an outcome-led ending: verdict line first, failures grouped by cause, output/report paths last (#84).
 
 ## [1.8.0] - 2026-07-27
 
