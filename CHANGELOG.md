@@ -4,6 +4,26 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Artifact names, GAVs, and failure text with `[bracketed]` content render
+  verbatim in status lines and `decaf report --artifact` detail instead of
+  being swallowed or crashing rendering; `:id:`-style artifactIds no longer
+  turn into emoji (#89).
+- `decaf report` tolerates reports with `null`/mistyped `settings`, `totals`,
+  `artifacts`, or `duration_seconds` instead of crashing (#89).
+- `decaf report --artifact` with overlapping globs prints each matching
+  artifact once (#89).
+- HTTP 401/403 during a sources download no longer records a 7-day
+  "no sources" verdict: the miss is tagged network-degraded (`!` marker) and
+  resolution is re-attempted next run — bad credentials can't poison the
+  verdict cache (#89).
+- Uppercase `.JAVA`/`.KT` entries in sources jars are now counted and
+  written by both output writers (extraction already kept them) (#89).
+- Decode and redirect anomalies during candidate probes taint the miss like
+  other network failures instead of being silently swallowed, so they no
+  longer feed negative verdicts (#89).
+
 ## [1.9.0] - 2026-07-27
 
 ### Added
