@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -716,6 +717,57 @@ def test_display_progress_ignores_unknown_and_fetch_rows():
     disp.on_event("progress", "b.jar", "vineflower · batch of 2 · 1/3 classes")
     task = next(t for t in progress.tasks if "b.jar" in t.description)
     assert task.fields["detail"] == "" and task.fields["since"] is None
+
+
+def test_heartbeat_line_none_before_scan():
+    progress, disp = make_display()
+    disp.on_found(3)
+    assert disp.heartbeat_line(570.0) is None
+
+
+def test_heartbeat_line_shape():
+    progress, disp = make_display()
+    disp.on_found(3)
+    disp.on_event("scan", "", "3 top-level + 0 nested")
+    disp.on_event("fetch", "a.jar", "resolving")
+    disp.on_event("decompile", "b.jar", "vineflower · 2 classes")
+    disp.on_done(ArtifactReport(rel="c.jar", kind="archive", outcome="ok"))
+    line = disp.heartbeat_line(570.0)
+    assert line.startswith("[+9m30s] ")
+    assert "1/3 done" in line
+    assert "1 fetching" in line
+    assert "1 decompiling" in line
+    assert "0 queued" in line
+    assert "longest active b.jar" in line
+
+
+def test_heartbeat_thread_gated_by_quiet_and_format(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    monkeypatch.setattr(cli, "_HEARTBEAT_INTERVAL", 0.02)
+
+    def fake_run(settings, **kw):
+        kw["on_found"](3)
+        if kw["on_event"] is not None:
+            kw["on_event"]("scan", "", "3 top-level + 0 nested")
+        time.sleep(0.2)
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
+    assert "[+" in ANSI.sub("", result.output)
+
+    result_q = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2"), "-q"])
+    assert result_q.exit_code == 0
+    assert "[+" not in ANSI.sub("", result_q.output)
+
+    result_json = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out3"), "--format", "json"]
+    )
+    assert result_json.exit_code == 0
+    assert "[+" not in ANSI.sub("", result_json.stdout)
+    assert "[+" not in ANSI.sub("", result_json.stderr)
 
 
 def test_cli_engine_args_passthrough(tmp_path: Path, make_jar, monkeypatch):

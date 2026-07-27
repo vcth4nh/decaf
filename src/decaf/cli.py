@@ -211,6 +211,7 @@ def _fail(message: str) -> typer.Exit:
 
 
 _STAGE_RANK = {"header": 0, "engines": 1, "fetch": 2, "decompile": 3}
+_HEARTBEAT_INTERVAL = 30.0
 
 
 def _shorten(rel: str, limit: int = 60) -> str:
@@ -314,6 +315,23 @@ class _RunDisplay:
                     self._p.update(row, detail=detail)  # detail only: clock and verb untouched
             self._refresh_header()
 
+    def heartbeat_line(self, elapsed: float) -> str | None:
+        with self._lock:
+            if not self._scanned:
+                return None
+            fetching = sum(1 for s in self._stage.values() if s == "fetch")
+            decompiling = len(self._stage) - fetching
+            queued = max(0, self._total - self._done - len(self._stage))
+            line = (
+                f"[+{_elapsed(elapsed)}] {self._done}/{self._total} done"
+                f" · {fetching} fetching · {decompiling} decompiling · {queued} queued"
+            )
+            longest = self._longest_active()
+            if longest is not None:
+                rel, since = longest
+                line += f" · longest active {_shorten(rel)} ({_elapsed(monotonic() - since)})"
+            return line
+
     # -- internals; every method below expects the lock to be held --
 
     def _engines_event(self, subject: str, detail: str) -> None:
@@ -363,6 +381,15 @@ class _RunDisplay:
                 f" · {decompiling} decompiling · {queued} queued"
             ),
         )
+
+    def _longest_active(self) -> tuple[str, float] | None:
+        by_id = {t.id: t for t in self._p.tasks}
+        best: tuple[str, float] | None = None
+        for rel, task_id in self._rows.items():
+            since = by_id[task_id].fields.get("since")
+            if since is not None and (best is None or since < best[1]):
+                best = (rel, since)
+        return best
 
 
 @app.command(name="run")
@@ -472,6 +499,21 @@ def main(
             if not quiet:
                 progress.console.print(f"[yellow]{escape(text)}[/]")
 
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop.wait(_HEARTBEAT_INTERVAL):
+                try:
+                    line = display.heartbeat_line(monotonic() - t0)
+                    if line:
+                        progress.console.print(line)
+                except Exception:
+                    pass
+
+        t0 = monotonic()
+        if not quiet and format is Format.human and not console.is_terminal:
+            threading.Thread(target=heartbeat, daemon=True).start()
+
         try:
             with progress:
                 report = run(settings, on_done=on_done, on_found=on_found,
@@ -480,6 +522,8 @@ def main(
                              on_warn=on_warn if (format is Format.ndjson or not quiet) else None)
         except (DecafError, ScanError) as exc:
             raise _fail(str(exc))
+        finally:
+            stop.set()
 
         report_view.render_ending(console, report, output=output, report_path=output / "decaf-report.json", verbose=verbose)
         if format is Format.json:
