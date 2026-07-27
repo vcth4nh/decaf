@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import shutil
 import threading
 from enum import Enum
@@ -19,9 +21,10 @@ from rich.text import Text
 from typer.core import TyperGroup
 
 from . import __version__, engines
-from . import update
+from . import report_view, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
-from .pipeline import ArtifactReport, DecafError, RunReport, Settings, run
+from .pipeline import ArtifactReport, DecafError, Settings, run
+from .report_view import _status_line
 from .scanner import ScanError
 
 
@@ -196,12 +199,19 @@ class Engine(str, Enum):
     jd = "jd"
 
 
+class Format(str, Enum):
+    human = "human"
+    json = "json"
+    ndjson = "ndjson"
+
+
 def _fail(message: str) -> typer.Exit:
     console.print(f"[red]error:[/] {message}")
     return typer.Exit(code=2)
 
 
 _STAGE_RANK = {"header": 0, "engines": 1, "fetch": 2, "decompile": 3}
+_HEARTBEAT_INTERVAL = 30.0
 
 
 def _shorten(rel: str, limit: int = 60) -> str:
@@ -305,6 +315,23 @@ class _RunDisplay:
                     self._p.update(row, detail=detail)  # detail only: clock and verb untouched
             self._refresh_header()
 
+    def heartbeat_line(self, elapsed: float) -> str | None:
+        with self._lock:
+            if not self._scanned:
+                return None
+            fetching = sum(1 for s in self._stage.values() if s == "fetch")
+            decompiling = len(self._stage) - fetching
+            queued = max(0, self._total - self._done - len(self._stage))
+            line = (
+                f"[+{_elapsed(elapsed)}] {self._done}/{self._total} done"
+                f" · {fetching} fetching · {decompiling} decompiling · {queued} queued"
+            )
+            longest = self._longest_active()
+            if longest is not None:
+                rel, since = longest
+                line += f" · longest active {_shorten(rel)} ({_elapsed(monotonic() - since)})"
+            return line
+
     # -- internals; every method below expects the lock to be held --
 
     def _engines_event(self, subject: str, detail: str) -> None:
@@ -355,77 +382,14 @@ class _RunDisplay:
             ),
         )
 
-
-def _status_line(r: ArtifactReport) -> str:
-    if r.outcome == "ok":
-        if r.method == "maven":
-            detail = f"maven sources, {r.gav}"
-            if r.sources_cached:
-                detail += ", cached"
-        elif r.method == "extracted":
-            detail = "extracted sources jar"
-        elif r.method is None and r.kind == "resource_only":
-            detail = f"resources only, {r.resources_copied} files"
-        else:
-            detail = f"{r.method}, {r.classes} classes"
-            if r.missing_classes:
-                detail += f", [yellow]{r.missing_classes} missing[/]"
-        glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
-        line = f"{glyph} {r.rel} ({detail})"
-        if r.method == "maven" and r.sources_cached:
-            return f"[dim]{line}[/]"
-        return line
-    if r.outcome == "skipped":
-        return f"[yellow]-[/] {r.rel} ({r.failure or 'resource-only'}, skipped)"
-    reason = (r.failure or "failed").splitlines()[-1]
-    return f"[red]✗[/] {r.rel} ({reason})"
-
-
-def _print_summary(report: RunReport, verbose: bool, output: Path) -> None:
-    t = report.totals
-    table = Table(title="decaf summary", show_header=False)
-    table.add_row("Artifacts", str(t["artifacts"]))
-    cached = sum(1 for r in report.artifacts if r.sources_cached)
-    maven_part = f"maven {t['maven_sources']}"
-    if cached:
-        maven_part += f" ({cached} cached)"
-    resource_only_ok = sum(
-        1 for r in report.artifacts if r.outcome == "ok" and r.method is None
-    )
-    ok_detail = f"{maven_part}, decompiled {t['decompiled']}, extracted {t['extracted']}"
-    if resource_only_ok:
-        ok_detail += f", resource-only {resource_only_ok}"
-    table.add_row("OK", f"{t['ok']} ({ok_detail})")
-    if t.get("partial"):
-        table.add_row("Partial", str(t["partial"]))
-    table.add_row("Skipped", str(t["skipped"]))
-    table.add_row("Failed", str(t["failed"]))
-    table.add_row("Java files", str(t["java_files"]))
-    table.add_row("Resources", str(t["resources_copied"]))
-    table.add_row("Collisions", str(t["collisions"]))
-    table.add_row("Duration", f"{report.duration_seconds}s")
-    console.print(table)
-    failed = [r for r in report.artifacts if r.outcome == "failed"]
-    for r in failed[:20]:
-        console.print(_status_line(r))
-        if verbose:
-            for a in r.attempts:
-                if a.stderr_tail:
-                    console.print(f"    [dim]{a.engine} ({a.level}): {a.stderr_tail[-300:]}[/]")
-    if len(failed) > 20:
-        console.print(f"…and {len(failed) - 20} more failures (see report)")
-    if t["network_misses"]:
-        console.print(
-            f"[yellow]{t['network_misses']} artifact(s) fell back to decompilation "
-            "without sources due to network failures[/]"
-        )
-    if report.interrupted:
-        console.print(
-            f"[yellow]interrupted — {t['artifacts']}/{report.discovered} artifacts completed, "
-            "partial results written[/]"
-        )
-    console.print(f"[dim]output: {output}[/]")
-    console.print(f"[dim]report: {output / 'decaf-report.json'}[/]")
+    def _longest_active(self) -> tuple[str, float] | None:
+        by_id = {t.id: t for t in self._p.tasks}
+        best: tuple[str, float] | None = None
+        for rel, task_id in self._rows.items():
+            since = by_id[task_id].fields.get("since")
+            if since is not None and (best is None or since < best[1]):
+                best = (rel, since)
+        return best
 
 
 @app.command(name="run")
@@ -447,82 +411,182 @@ def main(
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Only print the final summary")] = False,
+    format: Annotated[Format, typer.Option("--format", help="Output mode: human (default), json (single report to stdout), or ndjson (streaming events to stdout)")] = Format.human,
     engine_args: Annotated[Optional[list[str]], typer.Argument(
         help="Engine options after -- , passed verbatim to the primary engine (requires --no-fallback)",
         show_default=False,
     )] = None,
 ) -> None:
     """Decompile every Java artifact under INPUT, preferring real Maven sources."""
-    if not input.exists():
-        raise _fail(f"input {input} does not exist")
-    if output.exists() and not output.is_dir():
-        raise _fail(f"output {output} exists and is not a directory")
-    if output.exists() and any(output.iterdir()) and not force:
-        raise _fail(f"output {output} is not empty (use --force to write anyway)")
-    if no_resource and merge:
-        raise _fail("--no-resource only applies to mirror mode (remove --merge)")
-    if fresh_maven and no_maven:
-        raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
-    if engine_args and not no_fallback:
-        raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
+    global console
+    machine = format is not Format.human
+    prior_console = console
+    if machine:
+        console = Console(stderr=True)
     try:
-        cfg = load_config(config, extra_repos=repo or [])
-    except ConfigError as exc:
+        if not input.exists():
+            raise _fail(f"input {input} does not exist")
+        if output.exists() and not output.is_dir():
+            raise _fail(f"output {output} exists and is not a directory")
+        if output.exists() and any(output.iterdir()) and not force:
+            raise _fail(f"output {output} is not empty (use --force to write anyway)")
+        if no_resource and merge:
+            raise _fail("--no-resource only applies to mirror mode (remove --merge)")
+        if fresh_maven and no_maven:
+            raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
+        if engine_args and not no_fallback:
+            raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
+        try:
+            cfg = load_config(config, extra_repos=repo or [])
+        except ConfigError as exc:
+            raise _fail(str(exc))
+
+        settings = Settings(
+            input=input,
+            output=output,
+            engine=engine.value,
+            fallback=not no_fallback,
+            engine_args=tuple(engine_args or ()),
+            mirror=not merge,
+            resources=not no_resource,
+            maven=not no_maven,
+            fresh_maven=fresh_maven,
+            max_depth=max_depth,
+            jobs=jobs,
+            cpus=cpus,
+            timeout=timeout,
+            repos=cfg.repositories,
+            verbose=verbose,
+            quiet=quiet,
+            engine_overrides=cfg.engine_overrides,
+        )
+
+        progress = _GroupedProgress(
+            SpinnerColumn(),
+            _RowColumn(table_column=Column(no_wrap=True)),
+            console=console,
+            transient=True,
+            disable=quiet or machine,
+        )
+        display = None if machine else _RunDisplay(progress)
+        scan_sent = False
+
+        def on_done(r: ArtifactReport) -> None:
+            if display is not None:
+                display.on_done(r)
+            if format is Format.ndjson:
+                print(json.dumps({"event": "artifact", **dataclasses.asdict(r)}), flush=True)
+            if not quiet:
+                progress.console.print(_status_line(r))
+
+        def on_found(count: int) -> None:
+            nonlocal scan_sent
+            if display is not None:
+                display.on_found(count)
+            # pipeline calls on_found more than once: the initial discovered
+            # total, then bare deltas as fetch-time nested discovery diverges
+            # from the scan estimate. Only the first call is a true total.
+            if format is Format.ndjson and not scan_sent:
+                scan_sent = True
+                print(json.dumps({"event": "scan", "artifacts": count}), flush=True)
+
+        def on_stderr(text: str) -> None:
+            progress.console.print(f"[dim]{escape(text)}[/]")
+
+        def on_warn(text: str) -> None:
+            if format is Format.ndjson:
+                print(json.dumps({"event": "warning", "text": text}), flush=True)
+            if not quiet:
+                progress.console.print(f"[yellow]{escape(text)}[/]")
+
+        stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop.wait(_HEARTBEAT_INTERVAL):
+                try:
+                    line = display.heartbeat_line(monotonic() - t0)
+                    if line:
+                        progress.console.print(line)
+                except Exception:
+                    pass
+
+        t0 = monotonic()
+        if not quiet and format is Format.human and not console.is_terminal:
+            threading.Thread(target=heartbeat, daemon=True).start()
+
+        try:
+            with progress:
+                report = run(settings, on_done=on_done, on_found=on_found,
+                             on_event=None if (quiet or machine) else display.on_event,
+                             on_stderr=on_stderr if verbose else None,
+                             on_warn=on_warn if (format is Format.ndjson or not quiet) else None)
+        except (DecafError, ScanError) as exc:
+            raise _fail(str(exc))
+        finally:
+            stop.set()
+
+        report_view.render_ending(console, report, output=output, report_path=output / "decaf-report.json", verbose=verbose)
+        if format is Format.json:
+            print(report.to_json(), flush=True)
+        elif format is Format.ndjson:
+            print(json.dumps({
+                "event": "summary",
+                "status": report.status,
+                "totals": report.totals,
+                "discovered": report.discovered,
+                "duration_seconds": report.duration_seconds,
+                "output": str(output),
+                "report": str(output / "decaf-report.json"),
+            }), flush=True)
+        if report.interrupted:
+            raise typer.Exit(code=130)
+        raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
+    finally:
+        console = prior_console
+
+
+@app.command(name="report")
+def report_cmd(
+    path: Annotated[Path, typer.Argument(help="Report file, or an output directory containing decaf-report.json")] = Path("decaf-out"),
+    problems: Annotated[bool, typer.Option("--problems", help="List failed and partial artifacts, grouped by cause")] = False,
+    artifact: Annotated[Optional[list[str]], typer.Option("--artifact", help="Show full detail for artifacts matching this glob (repeatable)")] = None,
+    network_fallbacks: Annotated[bool, typer.Option("--network-fallbacks", help="List artifacts that lost sources to network failures")] = False,
+) -> None:
+    """Inspect a decaf-report.json offline."""
+    try:
+        report, resolved = report_view.load_report(path)
+    except report_view.ReportError as exc:
         raise _fail(str(exc))
 
-    settings = Settings(
-        input=input,
-        output=output,
-        engine=engine.value,
-        fallback=not no_fallback,
-        engine_args=tuple(engine_args or ()),
-        mirror=not merge,
-        resources=not no_resource,
-        maven=not no_maven,
-        fresh_maven=fresh_maven,
-        max_depth=max_depth,
-        jobs=jobs,
-        cpus=cpus,
-        timeout=timeout,
-        repos=cfg.repositories,
-        verbose=verbose,
-        quiet=quiet,
-        engine_overrides=cfg.engine_overrides,
+    schema = report.schema_version or 0
+    console.print(
+        f"[dim]{escape(str(resolved))} · schema {schema} · "
+        f"decaf {escape(report.decaf_version or 'unknown')} · "
+        f"{escape(report.ended_at or 'no timestamp')}[/]"
     )
+    if schema > 1:
+        console.print(
+            f"[yellow]warning: schema {schema} is newer than this decaf understands; "
+            f"rendering is best-effort[/]"
+        )
 
-    progress = _GroupedProgress(
-        SpinnerColumn(),
-        _RowColumn(table_column=Column(no_wrap=True)),
-        console=console,
-        transient=True,
-        disable=quiet,
-    )
-    display = _RunDisplay(progress)
+    if not (problems or artifact or network_fallbacks):
+        report_view.render_ending(
+            console, report,
+            output=report.settings.get("output", str(resolved.parent)),
+            report_path=resolved,
+            verbose=False,
+        )
+        return
 
-    def on_done(r: ArtifactReport) -> None:
-        display.on_done(r)
-        if not quiet:
-            progress.console.print(_status_line(r))
-
-    def on_stderr(text: str) -> None:
-        progress.console.print(f"[dim]{escape(text)}[/]")
-
-    def on_warn(text: str) -> None:
-        progress.console.print(f"[yellow]{escape(text)}[/]")
-
-    try:
-        with progress:
-            report = run(settings, on_done=on_done, on_found=display.on_found,
-                         on_event=None if quiet else display.on_event,
-                         on_stderr=on_stderr if verbose else None,
-                         on_warn=on_warn if not quiet else None)
-    except (DecafError, ScanError) as exc:
-        raise _fail(str(exc))
-
-    _print_summary(report, verbose, output)
-    if report.interrupted:
-        raise typer.Exit(code=130)
-    raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
+    if problems:
+        report_view.render_problems(console, report)
+    if artifact:
+        matches = sum(report_view.render_artifact(console, report, pattern) for pattern in artifact)
+        if matches == 0:
+            console.print("no artifacts match")
+    if network_fallbacks:
+        report_view.render_network_fallbacks(console, report)
 
 
 @engines_app.command("update")

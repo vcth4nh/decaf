@@ -373,6 +373,7 @@ def test_interrupt_during_submission_still_writes_report(fake_env, make_jar, tmp
     assert (out / "decaf-report.json").is_file()
     assert report.discovered == 3  # denominator survives the interrupt
     assert report.totals["artifacts"] < 3
+    assert report.status == "interrupted"
 
 
 def test_run_streams_engine_stderr_with_prefix(fake_env, make_jar, tmp_path: Path):
@@ -1693,3 +1694,29 @@ def test_run_engine_args_reach_batch_runner(fake_env, make_jar, tmp_path):
     assert report.totals["ok"] == 3
     assert seen["batch"] == ("-dgs=1",)
     assert seen["solo"] == ("-dgs=1",)
+
+
+def test_report_schema_v1_fields(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    raw = (out / "decaf-report.json").read_text()
+    on_disk = json.loads(raw)
+    assert on_disk["schema_version"] == 1
+    assert on_disk["decaf_version"] == report.decaf_version != ""
+    assert on_disk["status"] == "completed"
+    import re as _re
+    ts = _re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+    assert ts.match(on_disk["started_at"]) and ts.match(on_disk["ended_at"])
+    assert not list(out.glob("*.tmp"))  # atomic write leaves no droppings
+    assert raw.endswith("}\n")  # trailing newline: byte-identical to stdout's print(to_json())
+
+
+def test_report_status_reflects_failures(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    def failing_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, **kw):
+        return EngineResult(spec.name, 1, False, 0, "boom")
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=failing_engine)
+    assert report.status == "completed_with_failures"

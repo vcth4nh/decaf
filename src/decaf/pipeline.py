@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from functools import partial
 from heapq import heappush, heappop
 from itertools import count
@@ -22,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import engines, maven
+from . import __version__, engines, maven
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -237,6 +238,11 @@ class RunReport:
     duration_seconds: float
     discovered: int = 0  # scan-found artifacts, incl. never-started ones on interrupt
     interrupted: bool = False
+    schema_version: int = 0
+    decaf_version: str = ""
+    status: str = ""
+    started_at: str = ""
+    ended_at: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -883,6 +889,7 @@ def run(
     if settings.engine_args and settings.fallback:
         raise DecafError("engine_args require fallback disabled (engine option dialects don't transfer)")
     start = time.monotonic()
+    started_wall = datetime.now(timezone.utc)
     engines.PROCESSES.reset()
     found = engines.find_java()
     if found is None:
@@ -1061,6 +1068,11 @@ def run(
             # Write the report even if a second Ctrl-C lands during teardown,
             # so partial results survive.
             reports.sort(key=lambda r: r.rel)
+            totals = compute_totals(reports)
+            status = (
+                "interrupted" if interrupted
+                else "completed_with_failures" if totals["failed"] else "completed"
+            )
             run_report = RunReport(
                 settings={
                     "input": str(settings.input),
@@ -1084,13 +1096,19 @@ def run(
                     "java_major": java_major,
                 },
                 artifacts=reports,
-                totals=compute_totals(reports),
+                totals=totals,
                 duration_seconds=round(time.monotonic() - start, 2),
                 discovered=discovered,
                 interrupted=interrupted,
+                schema_version=1, decaf_version=__version__, status=status,
+                started_at=started_wall.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ended_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
             settings.output.mkdir(parents=True, exist_ok=True)
-            (settings.output / "decaf-report.json").write_text(run_report.to_json())
+            report_path = settings.output / "decaf-report.json"
+            tmp_path_ = report_path.with_suffix(".json.tmp")
+            tmp_path_.write_text(run_report.to_json() + "\n")
+            os.replace(tmp_path_, report_path)
     finally:
         client.close()
         shutil.rmtree(tmp_root, ignore_errors=True)

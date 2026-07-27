@@ -1,12 +1,13 @@
 import json
 import re
+import time
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 import decaf.cli as cli
 from decaf.cli import app
-from decaf.pipeline import ArtifactReport, RunReport
+from decaf.pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
 
 runner = CliRunner(env={"COLUMNS": "200"})
 
@@ -251,6 +252,15 @@ def test_bare_decaf_shows_group_help():
     assert result.exit_code in (0, 2)  # click's no_args_is_help exit code varies by version
 
 
+def test_verdict_line_clean_run(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert "Completed in " in plain
+    assert "with" not in plain
+
+
 def test_summary_warns_on_network_misses(tmp_path: Path, make_jar, monkeypatch):
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     totals = dict(ok_report().totals, network_misses=2)
@@ -258,14 +268,14 @@ def test_summary_warns_on_network_misses(tmp_path: Path, make_jar, monkeypatch):
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
-    assert "2 artifact(s) fell back to decompilation without sources due to network failures" in plain
+    assert "2 network fallbacks" in plain
 
 
 def test_summary_silent_when_no_network_misses(tmp_path: Path, make_jar, monkeypatch):
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
-    assert "network failures" not in ANSI.sub("", result.output)
+    assert "network fallbacks" not in ANSI.sub("", result.output)
 
 
 def test_on_warn_wired_unless_quiet(tmp_path: Path, make_jar, monkeypatch):
@@ -328,8 +338,10 @@ def test_summary_prints_paths_footer(tmp_path: Path, make_jar, monkeypatch):
     out = tmp_path / "out"
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out)])
     plain = ANSI.sub("", result.output)
-    assert f"output: {out}" in plain
-    assert f"report: {out / 'decaf-report.json'}" in plain
+    assert "Output" in plain
+    assert str(out) in plain
+    assert "Report" in plain
+    assert str(out / "decaf-report.json") in plain
 
 
 def test_failure_recap_names_remainder(tmp_path: Path, make_jar, monkeypatch):
@@ -351,11 +363,13 @@ def test_interrupted_summary_shows_denominator(tmp_path: Path, make_jar, monkeyp
     rep = ok_report()
     rep.interrupted = True
     rep.discovered = 10
+    rep.duration_seconds = 250.0
     monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "interrupted — 2/10 artifacts completed, partial results written" in plain
+    assert "Interrupted after" in plain
+    assert "2/10 artifacts completed" in plain
     assert result.exit_code == 130
 
 
@@ -382,7 +396,7 @@ def test_summary_partial_row_only_when_nonzero(tmp_path: Path, make_jar, monkeyp
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "Partial" not in plain
+    assert " partial" not in plain
 
     rep2 = ok_report()
     rep2.artifacts[1].missing_classes = 1
@@ -390,7 +404,7 @@ def test_summary_partial_row_only_when_nonzero(tmp_path: Path, make_jar, monkeyp
     monkeypatch.setattr(cli, "run", lambda settings, **kw: rep2)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2")])
     plain = ANSI.sub("", result.output)
-    assert "Partial" in plain
+    assert "1 partial" in plain
 
 
 def test_summary_counts_cached_sources(tmp_path: Path, make_jar, monkeypatch):
@@ -400,7 +414,7 @@ def test_summary_counts_cached_sources(tmp_path: Path, make_jar, monkeypatch):
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "maven 1 (1 cached), decompiled 1, extracted 0" in plain
+    assert "1 Maven (1 cached) · 1 decompiled · 0 extracted" in plain
 
 
 def test_summary_wording_unchanged_without_cache_hits(tmp_path: Path, make_jar, monkeypatch):
@@ -408,7 +422,7 @@ def test_summary_wording_unchanged_without_cache_hits(tmp_path: Path, make_jar, 
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "maven 1, decompiled 1, extracted 0" in plain
+    assert "1 Maven · 1 decompiled · 0 extracted" in plain
 
 
 def make_display():
@@ -581,17 +595,6 @@ def test_status_line_resource_only_mirrored():
     assert cli._status_line(r) == "[green]✓[/] r.jar (resources only, 3 files)"
 
 
-def test_summary_shows_resources_row(tmp_path: Path, make_jar, monkeypatch):
-    rep = ok_report()
-    rep.totals = {**rep.totals, "resources_copied": 7}
-    monkeypatch.setattr(cli, "run", lambda settings, **kw: rep)
-    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
-    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
-    plain = ANSI.sub("", result.output)
-    assert "Resources" in plain
-    assert "7" in plain
-
-
 def test_summary_ok_row_counts_mirrored_resource_only(tmp_path: Path, make_jar, monkeypatch):
     rep = ok_report()
     rep.artifacts.append(
@@ -602,7 +605,7 @@ def test_summary_ok_row_counts_mirrored_resource_only(tmp_path: Path, make_jar, 
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     plain = ANSI.sub("", result.output)
-    assert "maven 1, decompiled 1, extracted 0, resource-only 1" in plain
+    assert "· 1 resource-only" in plain
 
 
 def test_fresh_maven_flag_wiring(tmp_path: Path, make_jar, monkeypatch):
@@ -716,6 +719,57 @@ def test_display_progress_ignores_unknown_and_fetch_rows():
     assert task.fields["detail"] == "" and task.fields["since"] is None
 
 
+def test_heartbeat_line_none_before_scan():
+    progress, disp = make_display()
+    disp.on_found(3)
+    assert disp.heartbeat_line(570.0) is None
+
+
+def test_heartbeat_line_shape():
+    progress, disp = make_display()
+    disp.on_found(3)
+    disp.on_event("scan", "", "3 top-level + 0 nested")
+    disp.on_event("fetch", "a.jar", "resolving")
+    disp.on_event("decompile", "b.jar", "vineflower · 2 classes")
+    disp.on_done(ArtifactReport(rel="c.jar", kind="archive", outcome="ok"))
+    line = disp.heartbeat_line(570.0)
+    assert line.startswith("[+9m30s] ")
+    assert "1/3 done" in line
+    assert "1 fetching" in line
+    assert "1 decompiling" in line
+    assert "0 queued" in line
+    assert "longest active b.jar" in line
+
+
+def test_heartbeat_thread_gated_by_quiet_and_format(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    monkeypatch.setattr(cli, "_HEARTBEAT_INTERVAL", 0.02)
+
+    def fake_run(settings, **kw):
+        kw["on_found"](3)
+        if kw["on_event"] is not None:
+            kw["on_event"]("scan", "", "3 top-level + 0 nested")
+        time.sleep(0.2)
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
+    assert "[+" in ANSI.sub("", result.output)
+
+    result_q = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2"), "-q"])
+    assert result_q.exit_code == 0
+    assert "[+" not in ANSI.sub("", result_q.output)
+
+    result_json = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out3"), "--format", "json"]
+    )
+    assert result_json.exit_code == 0
+    assert "[+" not in ANSI.sub("", result_json.stdout)
+    assert "[+" not in ANSI.sub("", result_json.stderr)
+
+
 def test_cli_engine_args_passthrough(tmp_path: Path, make_jar, monkeypatch):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     captured = {}
@@ -754,3 +808,296 @@ def test_cli_engine_args_require_no_fallback(tmp_path: Path, make_jar, monkeypat
                                  "--", "-dgs=1"])
     assert result.exit_code == 2
     assert "--no-fallback" in ANSI.sub("", result.output)
+
+
+# --format json|ndjson: typer's vendored click (0.27) CliRunner has no `mix_stderr`
+# kwarg (its __init__ only takes charset/env) — but it always keeps stdout and
+# stderr separate internally and exposes both via result.stdout / result.stderr
+# (result.output is the combined stream), so no combined-output filtering
+# fallback is needed; these tests read the separated streams directly.
+
+
+def test_format_json_stdout_is_report(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["totals"]["ok"] == 2
+    assert "Completed" not in result.stdout  # ending narration went to stderr, not stdout
+
+
+def test_format_ndjson_streams_events(tmp_path: Path, make_jar, monkeypatch):
+    rep = ok_report(status="completed")
+
+    def fake_run(settings, **kw):
+        kw["on_done"](rep.artifacts[0])
+        kw["on_warn"]("net sad")
+        return rep
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "ndjson"]
+    )
+    assert result.exit_code == 0
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line]
+    events = {line["event"] for line in lines}
+    assert events >= {"artifact", "warning", "summary"}
+    artifact_event = next(line for line in lines if line["event"] == "artifact")
+    assert artifact_event["rel"] == rep.artifacts[0].rel
+    summary = next(line for line in lines if line["event"] == "summary")
+    assert summary["status"] == "completed"
+    assert summary["report"] == str(tmp_path / "out" / "decaf-report.json")
+
+
+def test_format_ndjson_scan_event_fires_once(tmp_path: Path, make_jar, monkeypatch):
+    """pipeline.run() calls on_found more than once by design: the initial
+    discovered total, then bare deltas when fetch-time nested discovery
+    diverges from the scan_counted estimate. Only the first call is a true
+    total, so only it may become a scan event."""
+    rep = ok_report()
+
+    def fake_run(settings, **kw):
+        kw["on_found"](3)
+        kw["on_found"](1)  # a later delta, not a total — must not re-emit "scan"
+        return rep
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "ndjson"]
+    )
+    assert result.exit_code == 0
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line]
+    scan_events = [line for line in lines if line["event"] == "scan"]
+    assert len(scan_events) == 1
+    assert scan_events[0]["artifacts"] == 3
+
+
+def test_format_ndjson_quiet_still_streams_events(tmp_path: Path, make_jar, monkeypatch):
+    """-q is orthogonal to --format: it silences stderr narration only, same as
+    today — ndjson's stdout event stream keeps flowing regardless."""
+    rep = ok_report()
+
+    def fake_run(settings, **kw):
+        kw["on_warn"]("net sad")
+        return rep
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+              "--format", "ndjson", "--quiet"],
+    )
+    assert result.exit_code == 0
+    events = {json.loads(line)["event"] for line in result.stdout.splitlines() if line}
+    assert "warning" in events
+    assert "summary" in events
+
+
+def test_format_human_unchanged(tmp_path: Path, make_jar, monkeypatch):
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
+    assert "Completed in " in ANSI.sub("", result.stdout)
+
+
+def test_machine_usage_error_stdout_empty(tmp_path: Path):
+    result = runner.invoke(app, [str(tmp_path / "nope"), "--format", "json"])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "does not exist" in ANSI.sub("", result.stderr)
+
+
+def test_format_json_swaps_console_to_stderr_and_restores(tmp_path: Path, make_jar, monkeypatch):
+    captured = {}
+
+    def capture(settings, **kw):
+        captured["mid_run_stderr"] = cli.console.stderr
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--format", "json"])
+    assert captured["mid_run_stderr"] is True
+    assert cli.console.stderr is False  # restored in `finally` for the next invocation
+
+
+def _mixed_report(**over) -> RunReport:
+    """1 ok / 1 partial / 1 failed / 1 network fallback, for `decaf report` CLI tests."""
+    artifacts = [
+        ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="maven",
+                        gav="com.example:a:1.0", classes=3, java_files=3),
+        ArtifactReport(rel="foo.jar", kind="archive", outcome="ok", method="cfr",
+                        classes=5, java_files=4, missing_classes=1),  # partial
+        ArtifactReport(
+            rel="legacy.jar", kind="archive", outcome="failed",
+            failure="engine timeout after 5 attempts",
+            attempts=[EngineAttempt("vineflower", "archive", -1, True, 0, "engine crashed: boom")],
+        ),
+        ArtifactReport(rel="net.jar", kind="archive", outcome="ok", method="cfr",
+                        sources_miss="network: sources download 503"),
+    ]
+    base = dict(
+        settings={"chain": ["vineflower"]},
+        artifacts=artifacts,
+        totals=compute_totals(artifacts),
+        duration_seconds=42.0,
+        schema_version=1,
+        decaf_version="1.8.0",
+        ended_at="2026-07-27T00:00:42Z",
+    )
+    base.update(over)
+    return RunReport(**base)
+
+
+def _write_report(dir_path: Path, rep: RunReport) -> Path:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    (dir_path / "decaf-report.json").write_text(rep.to_json())
+    return dir_path
+
+
+def test_report_resolves_dir_and_file(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert str(out / "decaf-report.json") in plain
+    assert "schema 1" in plain
+    assert "decaf 1.8.0" in plain
+    assert "2026-07-27T00:00:42Z" in plain
+    assert "Completed" in plain
+
+    result_file = runner.invoke(app, ["report", str(out / "decaf-report.json")])
+    assert result_file.exit_code == 0
+    plain_file = ANSI.sub("", result_file.output)
+    assert str(out / "decaf-report.json") in plain_file
+    assert "Completed" in plain_file
+
+
+def test_report_problems_groups_failures(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--problems"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "engine timeout" in plain
+    assert "legacy.jar" in plain
+    assert "foo.jar" in plain  # partial artifact listed too
+
+
+def test_report_artifact_glob_shows_detail(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--artifact", "f*"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "foo.jar" in plain
+    assert "missing_classes=1" in plain
+
+
+def test_report_artifact_no_match_prints_message(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--artifact", "nope*"])
+    assert result.exit_code == 0
+    assert "no artifacts match" in ANSI.sub("", result.output)
+
+
+def test_report_network_fallbacks_lists_misses(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report())
+    result = runner.invoke(app, ["report", str(out), "--network-fallbacks"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "net.jar" in plain
+    assert "network: sources download 503" in plain
+
+
+def test_report_missing_dir_exits_2(tmp_path: Path):
+    result = runner.invoke(app, ["report", str(tmp_path / "nope")])
+    assert result.exit_code == 2
+    plain = ANSI.sub("", result.output)
+    assert "error:" in plain
+    assert "report not found" in plain  # ReportError text, not run's "input ... does not exist"
+
+
+def test_report_schema_version_warns(tmp_path: Path):
+    out = _write_report(tmp_path / "out", _mixed_report(schema_version=99))
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "schema 99" in plain
+    assert "warning" in plain.lower()
+
+
+def test_report_word_is_command_not_input_path(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "report").mkdir()  # a literal folder named 'report' in cwd
+    result = runner.invoke(app, ["report"])  # must hit report_cmd, not scan ./report as run's input
+    assert result.exit_code == 2
+    plain = ANSI.sub("", result.output)
+    assert "error:" in plain
+    assert "decaf-out" in plain
+    assert "input report does not exist" not in plain
+
+
+def test_report_header_escapes_bracketed_decaf_version(tmp_path: Path):
+    """Unescaped, '1.8.0[snapshot]' silently drops '[snapshot]' (Rich treats it as an
+    unclosed style tag) instead of raising — either way the real value must survive."""
+    out = _write_report(tmp_path / "out", _mixed_report(decaf_version="1.8.0[snapshot]"))
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    assert "[snapshot]" in ANSI.sub("", result.output)
+
+
+def test_report_footer_escapes_bracketed_output_setting(tmp_path: Path):
+    """Unescaped, a settings['output'] value containing a stray closing tag like
+    '[/bold]' raises rich.errors.MarkupError, breaking the 'always exit 0 unless
+    ReportError' mandate."""
+    out = _write_report(tmp_path / "out", _mixed_report(settings={"output": "out[/bold]"}))
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    assert "out[/bold]" in ANSI.sub("", result.output)
+
+
+def test_report_tolerates_pre_1_8_totals(tmp_path: Path):
+    """decaf <=1.7 reports have a totals dict without 'network_misses' (added in
+    1.8.0) or 'partial', and lack the schema/status/discovered fields entirely.
+    render_ending must render best-effort, not KeyError."""
+    data = {
+        "settings": {"chain": ["vineflower"]},
+        "artifacts": [
+            {"rel": "a.jar", "kind": "archive", "outcome": "ok", "method": "maven",
+             "classes": 3, "java_files": 3},
+        ],
+        "totals": {
+            "artifacts": 1, "ok": 1, "failed": 0, "skipped": 0,
+            "maven_sources": 1, "extracted": 0, "decompiled": 0,
+            "java_files": 3, "collisions": 0,
+            # no "partial", no "network_misses" -- both postdate this report
+        },
+        "duration_seconds": 10.0,
+        # no schema_version/decaf_version/status/started_at/ended_at/discovered
+    }
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "decaf-report.json").write_text(json.dumps(data))
+
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    assert "Completed" in ANSI.sub("", result.output)
+
+
+def test_report_empty_json_object_renders_zeros(tmp_path: Path):
+    """A parseable-but-junk report ({}) must render best-effort zeros, not crash."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "decaf-report.json").write_text("{}")
+
+    result = runner.invoke(app, ["report", str(out)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "Completed" in plain
+    assert "0 processed · 0 complete" in plain
