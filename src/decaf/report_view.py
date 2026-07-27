@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import fnmatch
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from rich.console import Console
@@ -34,10 +35,17 @@ def _artifact(d: dict) -> ArtifactReport:
 
 def _run_report(d: dict) -> RunReport:
     kwargs = {k: v for k, v in d.items() if k in _RR and k != "artifacts"}
-    kwargs["settings"] = d.get("settings", {})
-    kwargs["totals"] = d.get("totals", {})
-    kwargs["duration_seconds"] = d.get("duration_seconds", 0.0)
-    kwargs["artifacts"] = [_artifact(a) for a in d.get("artifacts", [])]
+    settings = d.get("settings")
+    totals = d.get("totals")
+    duration = d.get("duration_seconds")
+    artifacts = d.get("artifacts")
+    kwargs["settings"] = settings if isinstance(settings, dict) else {}
+    kwargs["totals"] = totals if isinstance(totals, dict) else {}
+    kwargs["duration_seconds"] = duration if isinstance(duration, (int, float)) else 0.0
+    kwargs["artifacts"] = (
+        [_artifact(a) for a in artifacts if isinstance(a, dict)]
+        if isinstance(artifacts, list) else []
+    )
     return RunReport(**kwargs)
 
 
@@ -74,7 +82,7 @@ def _bucket_groups(failed: list[ArtifactReport]) -> dict[str, list[ArtifactRepor
 def _status_line(r: ArtifactReport) -> str:
     if r.outcome == "ok":
         if r.method == "maven":
-            detail = f"maven sources, {r.gav}"
+            detail = f"maven sources, {escape(str(r.gav))}"
             if r.sources_cached:
                 detail += ", cached"
         elif r.method == "extracted":
@@ -86,14 +94,14 @@ def _status_line(r: ArtifactReport) -> str:
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
         glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
-        line = f"{glyph} {r.rel} ({detail})"
+        line = f"{glyph} {escape(r.rel)} ({detail})"
         if r.method == "maven" and r.sources_cached:
             return f"[dim]{line}[/]"
         return line
     if r.outcome == "skipped":
-        return f"[yellow]-[/] {r.rel} ({r.failure or 'resource-only'}, skipped)"
-    reason = (r.failure or "failed").splitlines()[-1]
-    return f"[red]✗[/] {r.rel} ({reason})"
+        return f"[yellow]-[/] {escape(r.rel)} ({escape(r.failure or 'resource-only')}, skipped)"
+    reason = escape((r.failure or "failed").splitlines()[-1])
+    return f"[red]✗[/] {escape(r.rel)} ({reason})"
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -192,13 +200,16 @@ def render_problems(console: Console, report: RunReport) -> None:
             console.print(_status_line(r))
 
 
-def render_artifact(console: Console, report: RunReport, pattern: str) -> int:
-    """Print full detail for artifacts whose rel matches the glob; return match count."""
-    matches = [r for r in report.artifacts if fnmatch.fnmatch(r.rel, pattern)]
+def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]) -> int:
+    """Print full detail for artifacts whose rel matches any glob, once each; return match count."""
+    matches = [
+        r for r in report.artifacts
+        if any(fnmatch.fnmatch(r.rel, p) for p in patterns)
+    ]
     for i, r in enumerate(matches):
         if i:
             console.print()
-        console.print(f"[bold]{r.rel}[/]")
+        console.print(f"[bold]{escape(r.rel)}[/]")
         console.print(f"  kind={r.kind} outcome={r.outcome} method={r.method}")
         console.print(
             f"  gav={escape(str(r.gav))} repo={escape(str(r.repo))} "

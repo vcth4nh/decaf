@@ -3,6 +3,7 @@ import re
 import time
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import decaf.cli as cli
@@ -305,6 +306,71 @@ def test_warn_sink_renders_message_body(tmp_path: Path, make_jar, monkeypatch):
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
     assert "maven: r.test: [boom] persisted <odd>" in plain  # escape(): markup-like text renders verbatim
+
+
+@pytest.mark.parametrize("name", ["run", "engines", "cache", "report"])
+def test_dot_slash_escapes_reserved_words(name, tmp_path: Path, make_jar, monkeypatch):
+    captured = {}
+
+    def fake_run(settings, **kw):
+        captured["input"] = settings.input
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.chdir(tmp_path)
+    make_jar(f"{name}/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [f"./{name}", "-o", "out"])
+    assert result.exit_code == 0
+    assert captured["input"] == Path(f"./{name}")
+
+
+def test_status_line_escapes_bracketed_free_text():
+    import io
+
+    from rich.console import Console
+
+    def rendered(line: str) -> str:
+        c = Console(file=io.StringIO(), width=200, emoji=False)  # mirrors cli.console
+        c.print(line)
+        return c.file.getvalue()
+
+    failed = ArtifactReport(
+        rel="x[main].jar", kind="archive", outcome="failed", failure="boom [/bold] tail"
+    )
+    out = rendered(cli._status_line(failed))
+    assert "x[main].jar" in out and "boom [/bold] tail" in out
+
+    ok = ArtifactReport(
+        rel="a[1].jar", kind="archive", outcome="ok", method="maven", gav="g:a:1[x]"
+    )
+    out = rendered(cli._status_line(ok))
+    assert "a[1].jar" in out and "g:a:1[x]" in out
+
+    skipped = ArtifactReport(
+        rel="s[2].jar", kind="archive", outcome="skipped", failure="odd [tag]"
+    )
+    out = rendered(cli._status_line(skipped))
+    assert "s[2].jar" in out and "odd [tag]" in out
+
+
+def test_emoji_shortcode_gavs_render_verbatim():
+    """`:id:`/`:a:`-style artifactIds must not become emoji in the real console."""
+    r = ArtifactReport(
+        rel="a.jar", kind="archive", outcome="ok", method="maven", gav="com.x:id:1[x]"
+    )
+    with cli.console.capture() as cap:
+        cli.console.print(cli._status_line(r))
+    assert "com.x:id:1[x]" in cap.get()
+
+
+def test_report_tolerates_null_fields(tmp_path: Path):
+    p = tmp_path / "decaf-report.json"
+    p.write_text(json.dumps({
+        "settings": None, "totals": None, "artifacts": None, "duration_seconds": None,
+    }))
+    result = runner.invoke(app, ["report", str(p)])
+    assert result.exit_code == 0
+    assert "Completed" in ANSI.sub("", result.output)
 
 
 def test_status_line_cached_suffix():

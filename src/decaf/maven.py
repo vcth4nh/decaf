@@ -435,7 +435,20 @@ def verify_gav(
             log.events.append(f"{nf.detail} during candidate probe")
             log.probe_failures += 1
             continue
+        except (httpx.DecodingError, httpx.TooManyRedirects) as exc:
+            # Server anomalies, not evidence about the candidate: taint the miss
+            # so no negative verdict is recorded (#62 review note).
+            log.events.append(f"{type(exc).__name__} during candidate probe")
+            log.probe_failures += 1
+            continue
         except (httpx.HTTPError, httpx.InvalidURL):
+            continue
+        if resp.status_code in (401, 403):
+            # Auth failure says nothing about the candidate (same rule as the
+            # sources-download path): taint the miss so no verdict is recorded.
+            host = httpx.URL(repo).host
+            log.events.append(f"{host}: HTTP {resp.status_code} (auth) during candidate probe")
+            log.probe_failures += 1
             continue
         if resp.status_code != 200:
             continue
@@ -561,6 +574,14 @@ def _download(
                 if status_kind is not None:
                     kind = status_kind
                     retry_after = _retry_after_seconds(resp)
+                elif resp.status_code in (401, 403):
+                    # Auth failure says nothing about the artifact: taint the miss
+                    # instead of recording a verified one, and don't retry — auth
+                    # does not heal. Transport-class rule keeps the breaker out.
+                    raise NetworkFailure(
+                        host, f"HTTP {resp.status_code}",
+                        f"{host}: HTTP {resp.status_code} (auth)",
+                    )
                 elif resp.status_code != 200:
                     log.ok_hosts.add(host)
                     return None
