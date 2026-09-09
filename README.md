@@ -181,3 +181,7 @@ uv sync
 uv run pytest                      # fast offline suite
 uv run pytest -m "slow or network" # + real-engine and live-Maven integration
 ```
+
+## Credits
+
+decaf is inspired by [@rskvp93](https://github.com/rskvp93)'s srctools.
