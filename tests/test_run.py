@@ -12,7 +12,8 @@ import decaf.engines as engines
 from decaf import casefs
 from decaf.engines import EngineResult
 from decaf.maven import Gav, Resolution
-from decaf.pipeline import DecafError, Settings, run
+from decaf.pipeline import DecafError, Settings, _case_failure, run
+from decaf.scanner import ArtifactKind
 
 
 def perfect_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
@@ -1768,3 +1769,108 @@ def test_run_unwritable_output_is_a_clean_error(fake_env, make_jar, tmp_path: Pa
             run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
     finally:
         out.chmod(0o700)
+
+
+def _mixed_jar(make_jar, input_dir: Path, name: str = "mixed.jar") -> Path:
+    return make_jar(
+        name,
+        {"p/a.class": b"a", "p/A.class": b"A", "p/A$Inner.class": b"i", "p/B.class": b"B"},
+        base=input_dir,
+    )
+
+
+def test_case_failure_text():
+    groups = [["p/A", "p/a"], ["q/B", "q/b", "q/bB"]]
+    assert _case_failure(groups, ArtifactKind.ARCHIVE, "output directory") == (
+        "case collision: 5 classes differ only by case (p/A vs p/a, ...); case-insensitive output directory"
+    )
+    assert _case_failure([["p/A.java", "p/a.java"]], ArtifactKind.SOURCES_JAR, "temp directory") == (
+        "case collision: 2 source files differ only by case (p/A.java vs p/a.java); case-insensitive temp directory"
+    )
+
+
+def test_run_refuses_case_colliding_archive_on_case_insensitive_tree(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
+    input_dir = tmp_path / "in"
+    _mixed_jar(make_jar, input_dir)
+    make_jar("clean.jar", {"q/C.class": b"c"}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    by_rel = {a.rel: a for a in report.artifacts}
+    mixed, clean = by_rel["mixed.jar"], by_rel["clean.jar"]
+    assert mixed.outcome == "failed"
+    assert mixed.failure == (
+        "case collision: 2 classes differ only by case (p/A vs p/a); "
+        "case-insensitive output and temp directories"
+    )
+    assert mixed.attempts == [] and mixed.java_files == 0 and mixed.classes == 0
+    assert not (out / "mixed.jar").exists()
+    assert clean.outcome == "ok" and (out / "clean.jar/q/C.java").is_file()
+    assert report.totals["failed"] == 1
+
+
+def test_run_refuses_case_colliding_sources_jar(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
+    input_dir = tmp_path / "in"
+    make_jar(
+        "lib-sources.jar",
+        {"p/a.java": "class a {}", "p/A.java": "class A {}", "p/B.kt": "fun b() {}"},
+        base=input_dir,
+    )
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    (art,) = report.artifacts
+    assert art.outcome == "failed"
+    assert art.failure == (
+        "case collision: 2 source files differ only by case (p/A.java vs p/a.java); "
+        "case-insensitive output and temp directories"
+    )
+    assert art.java_files == 0 and not (out / "lib-sources.jar").exists()
+
+
+def test_run_refuses_case_colliding_class_tree(fake_env, tmp_path: Path, monkeypatch):
+    if casefs.is_case_insensitive(tmp_path):  # real probe, before the monkeypatch
+        pytest.skip("input tree cannot hold two names that differ only by case")
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
+    input_dir = tmp_path / "in"
+    (input_dir / "p").mkdir(parents=True)
+    for name in ("a", "A", "B"):
+        (input_dir / "p" / f"{name}.class").write_bytes(name.encode())
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    (art,) = report.artifacts
+    assert art.rel == "_classes" and art.outcome == "failed"
+    assert art.failure.startswith("case collision: 2 classes differ only by case (p/A vs p/a)")
+    assert art.attempts == []
+
+
+def test_run_refused_war_still_processes_nested_jars(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
+    input_dir = tmp_path / "in"
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    make_jar(
+        "app.war",
+        {
+            "WEB-INF/classes/p/a.class": b"a",
+            "WEB-INF/classes/p/A.class": b"A",
+            "WEB-INF/lib/dep.jar": inner.read_bytes(),
+        },
+        base=input_dir,
+    )
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    by_rel = {a.rel: a for a in report.artifacts}
+    assert by_rel["app.war"].outcome == "failed"
+    assert by_rel["app.war"].failure.startswith("case collision: 2 classes differ only by case (p/A vs p/a)")
+    assert by_rel["app.war!/WEB-INF/lib/dep.jar"].outcome == "ok"
+    assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
+
+
+def test_run_case_sensitive_tree_leaves_mixed_jar_alone(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: False)
+    input_dir = tmp_path / "in"
+    _mixed_jar(make_jar, input_dir)
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine)
+    (art,) = report.artifacts
+    assert art.outcome == "ok" and art.failure is None
+    assert art.attempts and art.attempts[0].engine == "vineflower"

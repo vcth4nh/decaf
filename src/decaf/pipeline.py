@@ -522,6 +522,40 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     return nested
 
 
+_CASE_CHECKED_KINDS = (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR, ArtifactKind.CLASS_TREE)
+
+
+def _output_stems(artifact: Artifact) -> set[str]:
+    """Normalized names this artifact would write — the ones that can clash by case (#93).
+
+    Archives and class trees: top-level class stems (an inner class collides iff
+    its outer does; module/package-info never do). Sources jars: the source
+    entries themselves, suffix included (`A.java` and `a.kt` do not clash).
+    """
+    if artifact.kind is not ArtifactKind.SOURCES_JAR:
+        return expected_class_stems(artifact.path)
+    try:
+        with zipfile.ZipFile(artifact.path) as zf:
+            names = zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return set()
+    return {
+        normalize_java_rel(n)
+        for n in names
+        if not n.endswith("/") and PurePosixPath(n).suffix.lower() in SOURCE_SUFFIXES
+    }
+
+
+def _case_failure(groups: list[list[str]], kind: ArtifactKind, label: str) -> str:
+    unit = "source files" if kind is ArtifactKind.SOURCES_JAR else "classes"
+    total = sum(len(g) for g in groups)
+    more = ", ..." if len(groups) > 1 else ""
+    return (
+        f"case collision: {total} {unit} differ only by case "
+        f"({' vs '.join(groups[0])}{more}); case-insensitive {label}"
+    )
+
+
 def _fetch_stage(
     artifact: Artifact, ctx: Ctx
 ) -> tuple[ArtifactReport, list[Artifact], Path | None]:
@@ -538,6 +572,14 @@ def _fetch_stage(
 
     nested: list[Artifact] = []
     try:
+        if ctx.case_insensitive and artifact.kind in _CASE_CHECKED_KINDS:
+            groups = casefs.case_groups(_output_stems(artifact))
+            if groups:
+                if artifact.kind is ArtifactKind.ARCHIVE:
+                    nested = _discover_nested(artifact, ctx)  # nested jars get their own check
+                report.outcome = "failed"
+                report.failure = _case_failure(groups, artifact.kind, ctx.case_insensitive)
+                return report, nested, None
         if artifact.kind is ArtifactKind.CORRUPT:
             report.outcome = "failed"
             report.failure = "unreadable archive"
