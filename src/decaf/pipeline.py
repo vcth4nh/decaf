@@ -137,13 +137,16 @@ class MergeWriter:
     """Merges source files (.java/.kt) from many trees into one package tree.
 
     Collisions are deterministic: the tree with the lowest sort_key wins,
-    regardless of the order in which worker threads deliver results.
+    regardless of the order in which worker threads deliver results. On a
+    case-insensitive output tree the index is keyed by the case-folded path,
+    so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
     """
 
-    def __init__(self, src_root: Path) -> None:
+    def __init__(self, src_root: Path, *, case_insensitive: bool = False) -> None:
         self.root = src_root
         self._lock = threading.Lock()
-        self._index: dict[str, tuple[str, str]] = {}  # rel -> (sort_key, sha256)
+        self._case_insensitive = case_insensitive
+        self._index: dict[str, tuple[str, str, str]] = {}  # key -> (sort_key, sha256, rel)
 
     def add_tree(self, tree: Path, sort_key: str) -> tuple[int, list[dict]]:
         java = 0
@@ -153,23 +156,33 @@ class MergeWriter:
                 continue
             java += 1
             rel = normalize_java_rel(p.relative_to(tree).as_posix())
+            key = rel.casefold() if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
             with self._lock:
-                existing = self._index.get(rel)
+                existing = self._index.get(key)
                 if existing is None:
-                    self._index[rel] = (sort_key, digest)
+                    self._index[key] = (sort_key, digest, rel)
                     target = self.root / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
                 elif existing[1] == digest:
                     pass  # identical duplicate
                 elif sort_key < existing[0]:
-                    collisions.append({"path": rel, "kept": sort_key, "dropped": existing[0]})
-                    self._index[rel] = (sort_key, digest)
-                    (self.root / rel).write_bytes(content)
+                    entry = {"path": rel, "kept": sort_key, "dropped": existing[0]}
+                    if existing[2] != rel:
+                        entry["dropped_path"] = existing[2]
+                        (self.root / existing[2]).unlink(missing_ok=True)
+                    collisions.append(entry)
+                    self._index[key] = (sort_key, digest, rel)
+                    target = self.root / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
                 else:
-                    collisions.append({"path": rel, "kept": existing[0], "dropped": sort_key})
+                    entry = {"path": existing[2], "kept": existing[0], "dropped": sort_key}
+                    if existing[2] != rel:
+                        entry["dropped_path"] = rel
+                    collisions.append(entry)
         return java, collisions
 
     def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
