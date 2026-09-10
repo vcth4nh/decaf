@@ -4,6 +4,21 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Windows: decaf sets the NTFS per-directory case-sensitivity flag on its
+  output and temp folders (needs WSL installed and a local NTFS volume), so
+  archives whose classes differ only by case decompile completely (#93).
+
+### Fixed
+
+- Case-insensitive output trees (default macOS, Windows without the flag,
+  FAT/exFAT) silently collapsed classes that differ only by case: the file kept
+  the first name and the last content, and the missing-class retry then
+  reported a clean run. Such artifacts are now refused before any work with a
+  `case collision` failure and a one-line hint; merge mode records cross-jar
+  case-only clashes as collisions (`dropped_path`) instead of overwriting (#93).
+
 ## [1.9.1] - 2026-07-27
 
 ### Fixed
