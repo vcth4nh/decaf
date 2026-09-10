@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import __version__, engines, maven
+from . import __version__, casefs, engines, maven
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -333,6 +333,7 @@ class Ctx:
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events (scan/engines/fetch/queued/decompile/progress)
+    case_insensitive: str | None = None  # roots that ignore case ("output directory", ...); None = case-sensitive run (#93)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -953,6 +954,11 @@ def run(
         affinity_base = os.sched_getaffinity(0)
         os.sched_setaffinity(0, set(sorted(affinity_base)[:total_cpus]))
     try:
+        try:
+            case_label = casefs.prepare_roots(settings.output, tmp_root)
+        except OSError as exc:
+            where = getattr(exc, "filename", None) or settings.output
+            raise DecafError(f"cannot write to {where}: {exc.strerror or exc}") from exc
         chain, engine_jars = _preflight_engines(
             settings, java_major, client, on_event, on_warn=on_warn
         )
@@ -960,7 +966,7 @@ def run(
         if settings.mirror:
             writer = MirrorWriter(settings.output, resources=settings.resources)
         else:
-            writer = MergeWriter(settings.output / "src")
+            writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None)
         ctx = Ctx(
             settings=settings,
             writer=writer,
@@ -977,6 +983,7 @@ def run(
             cds_dir=cds_dir,
             on_stderr=on_stderr,
             on_event=on_event,
+            case_insensitive=case_label,
         )
         try:
             with (

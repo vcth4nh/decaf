@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 import threading
 import time
 import zipfile
@@ -7,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import decaf.engines as engines
+from decaf import casefs
 from decaf.engines import EngineResult
 from decaf.maven import Gav, Resolution
 from decaf.pipeline import DecafError, Settings, run
@@ -1737,3 +1740,31 @@ def test_report_status_reflects_failures(fake_env, make_jar, tmp_path: Path):
         return EngineResult(spec.name, 1, False, 0, "boom")
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=failing_engine)
     assert report.status == "completed_with_failures"
+
+
+def test_run_case_insensitive_merge_records_cross_jar_clash(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
+    input_dir = tmp_path / "in"
+    make_jar("x.jar", {"p/A.class": b"A"}, base=input_dir)
+    make_jar("y.jar", {"p/a.class": b"a"}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False, mirror=False), runner=perfect_engine)
+    assert report.totals["failed"] == 0
+    (clash,) = [c for a in report.artifacts for c in a.collisions]
+    assert clash == {"path": "p/A.java", "kept": "x.jar", "dropped": "y.jar", "dropped_path": "p/a.java"}
+    assert sorted(q.name for q in (out / "src/p").iterdir()) == ["A.java"]
+    assert report.totals["collisions"] == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions as non-root")
+def test_run_unwritable_output_is_a_clean_error(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("x.jar", {"p/A.class": b"A"}, base=input_dir)
+    out = tmp_path / "out"
+    out.mkdir()
+    out.chmod(0o500)
+    try:
+        with pytest.raises(DecafError, match="cannot write to"):
+            run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    finally:
+        out.chmod(0o700)
