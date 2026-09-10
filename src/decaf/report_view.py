@@ -61,6 +61,13 @@ def load_report(path: Path) -> tuple[RunReport, Path]:
     return _run_report(data), resolved
 
 
+_CASE_HINT = (
+    "case collision: the output tree ignores case. Windows: install WSL (enables "
+    "per-directory case sensitivity) or run \"fsutil file setCaseSensitiveInfo <empty dir> enable\"; "
+    "macOS: use a case-sensitive APFS volume."
+)
+
+
 def failure_bucket(r: ArtifactReport) -> str:
     """Best-effort cause grouping for a failed artifact, without new pipeline data."""
     if any(a.timed_out for a in r.attempts):
@@ -69,6 +76,8 @@ def failure_bucket(r: ArtifactReport) -> str:
         return "unreadable archive"
     if r.failure == "all engines failed":
         return "all engines failed"
+    if (r.failure or "").startswith("case collision"):
+        return "case collision"
     return "other"
 
 
@@ -178,6 +187,8 @@ def render_ending(
                         console.print(f"    [dim]{a.engine} ({a.level}): {escape(a.stderr_tail[-300:])}[/]")
         if len(failed) > 20:
             console.print(f"…and {len(failed) - 20} more failures (see report)")
+        if any(failure_bucket(r) == "case collision" for r in failed):
+            console.print(f"[dim]{_CASE_HINT}[/]")
 
     console.print()
     console.print(f"[dim]{'Output':<{_FOOTER_LABEL_WIDTH}}[/]  {escape(str(output))}")
