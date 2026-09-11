@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from decaf import casefs
 from decaf.pipeline import (
     ArtifactReport,
     MergeWriter,
@@ -218,3 +221,28 @@ def test_mirror_add_blob_unreadable_zip_is_zero(tmp_path: Path):
     w = MirrorWriter(tmp_path / "out")
     assert w.add_blob(bad, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (0, 0)
     assert not (tmp_path / "out/dep.jar/lib/inner.jar").exists()
+
+
+def test_merge_case_insensitive_records_case_clash_lowest_key_wins(tmp_path: Path):
+    files = {"a/x.jar": {"p/A.java": "class A {}"}, "b/y.jar": {"p/a.java": "class a {}"}}
+    for order in [("a/x.jar", "b/y.jar"), ("b/y.jar", "a/x.jar")]:
+        root = tmp_path / order[0].replace("/", "_")
+        w = MergeWriter(root / "src", case_insensitive=True)
+        _, c1 = w.add_tree(tree(root / "t1", files[order[0]]), order[0])
+        _, c2 = w.add_tree(tree(root / "t2", files[order[1]]), order[1])
+        assert c1 == []
+        assert c2 == [
+            {"path": "p/A.java", "kept": "a/x.jar", "dropped": "b/y.jar", "dropped_path": "p/a.java"}
+        ]
+        assert sorted(q.name for q in (root / "src/p").iterdir()) == ["A.java"]
+        assert (root / "src/p/A.java").read_text() == "class A {}"
+
+
+def test_merge_flag_off_keeps_exact_keys(tmp_path: Path):
+    if casefs.is_case_insensitive(tmp_path):
+        pytest.skip("needs a case-sensitive tmp to hold both names")
+    w = MergeWriter(tmp_path / "src")
+    _, c1 = w.add_tree(tree(tmp_path / "t1", {"p/A.java": "class A {}"}), "a/x.jar")
+    _, c2 = w.add_tree(tree(tmp_path / "t2", {"p/a.java": "class a {}"}), "b/y.jar")
+    assert (c1, c2) == ([], [])
+    assert sorted(q.name for q in (tmp_path / "src/p").iterdir()) == ["A.java", "a.java"]

@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import __version__, engines, maven
+from . import __version__, casefs, engines, maven
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -137,13 +137,16 @@ class MergeWriter:
     """Merges source files (.java/.kt) from many trees into one package tree.
 
     Collisions are deterministic: the tree with the lowest sort_key wins,
-    regardless of the order in which worker threads deliver results.
+    regardless of the order in which worker threads deliver results. On a
+    case-insensitive output tree the index is keyed by the case-folded path,
+    so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
     """
 
-    def __init__(self, src_root: Path) -> None:
+    def __init__(self, src_root: Path, *, case_insensitive: bool = False) -> None:
         self.root = src_root
         self._lock = threading.Lock()
-        self._index: dict[str, tuple[str, str]] = {}  # rel -> (sort_key, sha256)
+        self._case_insensitive = case_insensitive
+        self._index: dict[str, tuple[str, str, str]] = {}  # key -> (sort_key, sha256, rel)
 
     def add_tree(self, tree: Path, sort_key: str) -> tuple[int, list[dict]]:
         java = 0
@@ -153,23 +156,33 @@ class MergeWriter:
                 continue
             java += 1
             rel = normalize_java_rel(p.relative_to(tree).as_posix())
+            key = rel.casefold() if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
             with self._lock:
-                existing = self._index.get(rel)
+                existing = self._index.get(key)
                 if existing is None:
-                    self._index[rel] = (sort_key, digest)
+                    self._index[key] = (sort_key, digest, rel)
                     target = self.root / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
                 elif existing[1] == digest:
                     pass  # identical duplicate
                 elif sort_key < existing[0]:
-                    collisions.append({"path": rel, "kept": sort_key, "dropped": existing[0]})
-                    self._index[rel] = (sort_key, digest)
-                    (self.root / rel).write_bytes(content)
+                    entry = {"path": rel, "kept": sort_key, "dropped": existing[0]}
+                    if existing[2] != rel:
+                        entry["dropped_path"] = existing[2]
+                        (self.root / existing[2]).unlink(missing_ok=True)
+                    collisions.append(entry)
+                    self._index[key] = (sort_key, digest, rel)
+                    target = self.root / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
                 else:
-                    collisions.append({"path": rel, "kept": existing[0], "dropped": sort_key})
+                    entry = {"path": existing[2], "kept": existing[0], "dropped": sort_key}
+                    if existing[2] != rel:
+                        entry["dropped_path"] = rel
+                    collisions.append(entry)
         return java, collisions
 
     def add_resources(self, archive: Path, rel: str, *, include_sources: bool = False) -> tuple[int, int]:
@@ -320,6 +333,7 @@ class Ctx:
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events (scan/engines/fetch/queued/decompile/progress)
+    case_insensitive: str | None = None  # roots that ignore case ("output directory", ...); None = case-sensitive run (#93)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -497,15 +511,59 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
             Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.BEYOND_DEPTH)
             for name in names
         ]
+    nested: list[Artifact] = []
+    if ctx.case_insensitive:
+        groups = casefs.case_groups(names)
+        if groups:  # e.g. WEB-INF/lib/A.jar + WEB-INF/lib/a.jar would extract onto one file (#93)
+            text = _case_failure(groups, "nested archives", ctx.case_insensitive)
+            clashing = {n for g in groups for n in g}
+            nested = [
+                Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.ARCHIVE, refusal=text)
+                for name in names
+                if name in clashing
+            ]
+            names = [n for n in names if n not in clashing]
     extract_dir = _tmp_dir(ctx)
     safe_extract_zip(artifact.path, extract_dir, members=names)
-    nested = []
     for name in names:
         p = extract_dir / name
         if p.is_file():
             kind, classes = classify_counted(p)
             nested.append(Artifact(p, f"{artifact.rel}!/{name}", kind, classes))
     return nested
+
+
+_CASE_CHECKED_KINDS = (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR, ArtifactKind.CLASS_TREE)
+
+
+def _output_stems(artifact: Artifact) -> set[str]:
+    """Normalized names this artifact would write — the ones that can clash by case (#93).
+
+    Archives and class trees: top-level class stems (an inner class collides iff
+    its outer does; module/package-info never do). Sources jars: the source
+    entries themselves, suffix included (`A.java` and `a.kt` do not clash).
+    """
+    if artifact.kind is not ArtifactKind.SOURCES_JAR:
+        return expected_class_stems(artifact.path)
+    try:
+        with zipfile.ZipFile(artifact.path) as zf:
+            names = zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return set()
+    return {
+        normalize_java_rel(n)
+        for n in names
+        if not n.endswith("/") and PurePosixPath(n).suffix.lower() in SOURCE_SUFFIXES
+    }
+
+
+def _case_failure(groups: list[list[str]], unit: str, label: str) -> str:
+    total = sum(len(g) for g in groups)
+    more = ", ..." if len(groups) > 1 else ""
+    return (
+        f"case collision: {total} {unit} differ only by case "
+        f"({' vs '.join(groups[0])}{more}); case-insensitive {label}"
+    )
 
 
 def _fetch_stage(
@@ -524,6 +582,19 @@ def _fetch_stage(
 
     nested: list[Artifact] = []
     try:
+        if artifact.refusal:  # decided by the parent's discovery (#93): nothing to extract or run
+            report.outcome = "failed"
+            report.failure = artifact.refusal
+            return report, nested, None
+        if ctx.case_insensitive and artifact.kind in _CASE_CHECKED_KINDS:
+            groups = casefs.case_groups(_output_stems(artifact))
+            if groups:
+                if artifact.kind is ArtifactKind.ARCHIVE:
+                    nested = _discover_nested(artifact, ctx)  # nested jars get their own check
+                unit = "source files" if artifact.kind is ArtifactKind.SOURCES_JAR else "classes"
+                report.outcome = "failed"
+                report.failure = _case_failure(groups, unit, ctx.case_insensitive)
+                return report, nested, None
         if artifact.kind is ArtifactKind.CORRUPT:
             report.outcome = "failed"
             report.failure = "unreadable archive"
@@ -850,11 +921,13 @@ def _preflight_engines(
     return chain, jars
 
 
-def _form_batch(ready_small: deque) -> list:
+def _form_batch(ready_small: deque, *, fold: bool = False) -> list:
     """Greedy prefix of ready smalls with disjoint stems and claims, bounded by the caps.
 
     Skipped members (stem/claim overlap / class cap) stay queued in order for
     the next batch. Always takes at least one member, so the queue drains.
+    ``fold`` compares footprints case-folded: on a case-insensitive tree, stems
+    that differ only by case would share one file in the batch dest (#93).
     """
     batch: list = []
     taken: set[str] = set()
@@ -863,7 +936,7 @@ def _form_batch(ready_small: deque) -> list:
     while ready_small and len(batch) < _BATCH_MAX_JARS:
         item = ready_small.popleft()
         a, _, _, stems, claims = item
-        footprint = stems | claims
+        footprint = {s.casefold() for s in stems | claims} if fold else stems | claims
         if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (footprint & taken)):
             kept.append(item)
             continue
@@ -940,6 +1013,11 @@ def run(
         affinity_base = os.sched_getaffinity(0)
         os.sched_setaffinity(0, set(sorted(affinity_base)[:total_cpus]))
     try:
+        try:
+            case_label = casefs.prepare_roots(settings.output, tmp_root)
+        except OSError as exc:
+            where = getattr(exc, "filename", None) or settings.output
+            raise DecafError(f"cannot write to {where}: {exc.strerror or exc}") from exc
         chain, engine_jars = _preflight_engines(
             settings, java_major, client, on_event, on_warn=on_warn
         )
@@ -947,7 +1025,7 @@ def run(
         if settings.mirror:
             writer = MirrorWriter(settings.output, resources=settings.resources)
         else:
-            writer = MergeWriter(settings.output / "src")
+            writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None)
         ctx = Ctx(
             settings=settings,
             writer=writer,
@@ -964,6 +1042,7 @@ def run(
             cds_dir=cds_dir,
             on_stderr=on_stderr,
             on_event=on_event,
+            case_insensitive=case_label,
         )
         try:
             with (
@@ -1005,7 +1084,7 @@ def run(
                             dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", w)
                         # ready drains first: a waiting whale gets first claim on freed weight
                         while ready_small and (dec_weight == 0 or dec_weight + 1 <= jobs):
-                            batch = _form_batch(ready_small)
+                            batch = _form_batch(ready_small, fold=case_label is not None)
                             dec_weight += 1
                             if len(batch) == 1:
                                 a, target, report, _, _ = batch[0]

@@ -35,6 +35,14 @@ into a source tree that mirrors your input, or one merged package tree with
   Fernflower 21+)
 - Linux, macOS, or Windows (the CPU budget is hard-enforced on Linux,
   hint-only elsewhere)
+- A case-sensitive output tree for archives whose classes differ only by case
+  (common in ProGuard-obfuscated jars). On Windows with WSL installed, decaf
+  makes its output and temp folders case-sensitive automatically. Elsewhere on
+  a case-insensitive tree (default macOS, Windows without WSL, FAT/exFAT) such
+  archives are refused with a `case collision` failure and a hint, because two
+  classes cannot share one file. To decompile them there anyway, use a
+  case-sensitive volume for the output and point `TMPDIR` at it too: decaf's
+  temp folder must not ignore case either.
 
 ## Install
 

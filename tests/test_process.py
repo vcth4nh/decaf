@@ -964,6 +964,27 @@ def test_form_batch_defers_metadata_claim_overlap():
     assert [stems for _, _, _, stems, _ in q] == [{"com/x/B"}]
 
 
+def test_form_batch_folds_case_when_tree_ignores_case():
+    """#93: on a case-insensitive tree, stems that differ only by case would share one
+    file in the batch dest — with fold=True they never co-batch; exact matching otherwise."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    from decaf.pipeline import _form_batch
+
+    def member(stems):
+        return (SimpleNamespace(classes=1), None, None, stems, set())
+
+    q = deque([member({"p/A"}), member({"p/a"}), member({"q/Z"})])
+    batch = _form_batch(q, fold=True)
+    assert [stems for _, _, _, stems, _ in batch] == [{"p/A"}, {"q/Z"}]
+    assert [stems for _, _, _, stems, _ in q] == [{"p/a"}]  # deferred, in order
+
+    q = deque([member({"p/A"}), member({"p/a"}), member({"q/Z"})])
+    batch = _form_batch(q)  # case-sensitive tree: exact footprints, all three co-batch
+    assert [stems for _, _, _, stems, _ in batch] == [{"p/A"}, {"p/a"}, {"q/Z"}]
+
+
 def test_partial_predicate_and_totals():
     from dataclasses import replace
 

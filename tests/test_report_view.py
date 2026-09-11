@@ -289,3 +289,34 @@ def test_render_artifact_bracketed_rel_renders_verbatim():
     rep = report(artifacts=artifacts, totals=compute_totals(artifacts))
     assert render_artifact(console, rep, ["x*"]) == 1  # must not raise
     assert "x[main].jar" in console.file.getvalue()
+
+
+_CASE_FAILURE = "case collision: 2 classes differ only by case (p/A vs p/a); case-insensitive output directory"
+
+
+def test_failure_bucket_case_collision():
+    r = ArtifactReport(rel="m.jar", kind="archive", outcome="failed", failure=_CASE_FAILURE)
+    assert failure_bucket(r) == "case collision"
+
+
+def test_ending_prints_case_collision_hint_once():
+    arts = [
+        ArtifactReport(rel="m.jar", kind="archive", outcome="failed", failure=_CASE_FAILURE),
+        ArtifactReport(rel="n.jar", kind="archive", outcome="failed",
+                       failure="case collision: 4 classes differ only by case (q/B vs q/b, ...); case-insensitive output directory"),
+    ]
+    buf = io.StringIO()
+    console = Console(file=buf, width=300, emoji=False, force_terminal=False, highlight=False)
+    render_ending(console, report(artifacts=arts, totals=compute_totals(arts)),
+                  output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    text = buf.getvalue()
+    assert "  2  case collision" in text
+    assert text.count("fsutil file setCaseSensitiveInfo") == 1
+    assert "case-sensitive APFS volume" in text
+
+
+def test_ending_has_no_case_hint_without_case_failures():
+    buf = io.StringIO()
+    console = Console(file=buf, width=300, emoji=False, force_terminal=False, highlight=False)
+    render_ending(console, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert "fsutil" not in buf.getvalue()
