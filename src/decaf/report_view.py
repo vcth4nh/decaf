@@ -64,7 +64,7 @@ def load_report(path: Path) -> tuple[RunReport, Path]:
 _CASE_HINT = (
     "case collision: the output tree ignores case. Windows: install WSL (enables "
     "per-directory case sensitivity) or run \"fsutil file setCaseSensitiveInfo <empty dir> enable\"; "
-    "macOS: use a case-sensitive APFS volume."
+    "macOS: use a case-sensitive APFS volume for the output and point TMPDIR at it too."
 )
 
 

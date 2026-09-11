@@ -27,10 +27,14 @@ def case_groups(names: Iterable[str]) -> list[list[str]]:
 def is_case_insensitive(directory: Path) -> bool:
     """Probe: does a case-swapped name resolve to a file just created in ``directory``?
 
-    OSError propagates: a root decaf cannot write to fails the run anyway.
+    OSError propagates (naming the directory, not the hidden probe file): a root
+    decaf cannot write to fails the run anyway.
     """
     marker = directory / f".decaf-CaseProbe-{uuid.uuid4().hex}"
-    marker.write_bytes(b"")
+    try:
+        marker.write_bytes(b"")
+    except OSError as exc:
+        raise OSError(exc.errno, exc.strerror or str(exc), str(directory)) from exc
     try:
         return (directory / marker.name.swapcase()).exists()
     finally:

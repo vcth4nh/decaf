@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -1764,7 +1765,7 @@ def test_run_unwritable_output_is_a_clean_error(fake_env, make_jar, tmp_path: Pa
     out.mkdir()
     out.chmod(0o500)
     try:
-        with pytest.raises(DecafError, match="cannot write to"):
+        with pytest.raises(DecafError, match=f"cannot write to {re.escape(str(out))}: "):
             run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
     finally:
         out.chmod(0o700)

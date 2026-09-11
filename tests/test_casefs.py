@@ -1,3 +1,4 @@
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -65,3 +66,16 @@ def test_prepare_roots_labels(tmp_path: Path, monkeypatch):
     assert casefs.prepare_roots(out, tmp) == "temp directory"
     monkeypatch.setattr(casefs, "is_case_insensitive", probe({out, tmp}))
     assert casefs.prepare_roots(out, tmp) == "output and temp directories"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions as non-root")
+def test_probe_error_names_the_directory(tmp_path: Path):
+    d = tmp_path / "ro"
+    d.mkdir()
+    d.chmod(0o500)
+    try:
+        with pytest.raises(OSError) as info:
+            casefs.is_case_insensitive(d)
+        assert info.value.filename == str(d)  # the directory, not the hidden probe file
+    finally:
+        d.chmod(0o700)
