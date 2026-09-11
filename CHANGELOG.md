@@ -4,6 +4,8 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-11
+
 ### Added
 
 - Windows: decaf sets the NTFS per-directory case-sensitivity flag on its
