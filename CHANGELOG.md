@@ -16,8 +16,11 @@ All notable changes to decaf are documented here.
   FAT/exFAT) silently collapsed classes that differ only by case: the file kept
   the first name and the last content, and the missing-class retry then
   reported a clean run. Such artifacts are now refused before any work with a
-  `case collision` failure and a one-line hint; merge mode records cross-jar
-  case-only clashes as collisions (`dropped_path`) instead of overwriting (#93).
+  `case collision` failure and a one-line hint; nested archives whose names
+  differ only by case are refused the same way instead of extracting onto one
+  file; small jars whose classes differ only by case never share a batch; and
+  merge mode records cross-jar case-only clashes as collisions (`dropped_path`)
+  instead of overwriting (#93).
 
 ## [1.9.1] - 2026-07-27
 
