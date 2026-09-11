@@ -1874,3 +1874,29 @@ def test_run_case_sensitive_tree_leaves_mixed_jar_alone(fake_env, make_jar, tmp_
     (art,) = report.artifacts
     assert art.outcome == "ok" and art.failure is None
     assert art.attempts and art.attempts[0].engine == "vineflower"
+
+
+def test_run_case_insensitive_tree_never_batches_case_clashing_jars(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
+    input_dir = tmp_path / "in"
+    make_jar("x.jar", {"p/A.class": b"A"}, base=input_dir)
+    make_jar("y.jar", {"p/a.class": b"a"}, base=input_dir)
+    make_jar("z.jar", {"q/Z.class": b"z"}, base=input_dir)
+    batches: list[list[str]] = []
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None, **kw):
+        batches.append(sorted(Path(t).name for t in targets))
+        total = 0
+        for t in targets:
+            total += perfect_engine(spec, jar_path, t, dest, timeout, java=java, cpu_budget=cpu_budget).java_files
+        return EngineResult(spec.name, 0, False, total, "")
+
+    out = tmp_path / "out"
+    report = run(
+        Settings(input=input_dir, output=out, maven=False, mirror=False),
+        runner=perfect_engine, batch_runner=recording_batch,
+    )
+    assert report.totals["failed"] == 0
+    assert all(not {"x.jar", "y.jar"} <= set(b) for b in batches), batches
+    (clash,) = [c for a in report.artifacts for c in a.collisions]
+    assert clash == {"path": "p/A.java", "kept": "x.jar", "dropped": "y.jar", "dropped_path": "p/a.java"}

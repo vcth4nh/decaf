@@ -906,11 +906,13 @@ def _preflight_engines(
     return chain, jars
 
 
-def _form_batch(ready_small: deque) -> list:
+def _form_batch(ready_small: deque, *, fold: bool = False) -> list:
     """Greedy prefix of ready smalls with disjoint stems and claims, bounded by the caps.
 
     Skipped members (stem/claim overlap / class cap) stay queued in order for
     the next batch. Always takes at least one member, so the queue drains.
+    ``fold`` compares footprints case-folded: on a case-insensitive tree, stems
+    that differ only by case would share one file in the batch dest (#93).
     """
     batch: list = []
     taken: set[str] = set()
@@ -919,7 +921,7 @@ def _form_batch(ready_small: deque) -> list:
     while ready_small and len(batch) < _BATCH_MAX_JARS:
         item = ready_small.popleft()
         a, _, _, stems, claims = item
-        footprint = stems | claims
+        footprint = {s.casefold() for s in stems | claims} if fold else stems | claims
         if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (footprint & taken)):
             kept.append(item)
             continue
@@ -1067,7 +1069,7 @@ def run(
                             dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", w)
                         # ready drains first: a waiting whale gets first claim on freed weight
                         while ready_small and (dec_weight == 0 or dec_weight + 1 <= jobs):
-                            batch = _form_batch(ready_small)
+                            batch = _form_batch(ready_small, fold=case_label is not None)
                             dec_weight += 1
                             if len(batch) == 1:
                                 a, target, report, _, _ = batch[0]
