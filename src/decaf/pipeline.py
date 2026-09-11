@@ -511,9 +511,20 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
             Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.BEYOND_DEPTH)
             for name in names
         ]
+    nested: list[Artifact] = []
+    if ctx.case_insensitive:
+        groups = casefs.case_groups(names)
+        if groups:  # e.g. WEB-INF/lib/A.jar + WEB-INF/lib/a.jar would extract onto one file (#93)
+            text = _case_failure(groups, "nested archives", ctx.case_insensitive)
+            clashing = {n for g in groups for n in g}
+            nested = [
+                Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.ARCHIVE, refusal=text)
+                for name in names
+                if name in clashing
+            ]
+            names = [n for n in names if n not in clashing]
     extract_dir = _tmp_dir(ctx)
     safe_extract_zip(artifact.path, extract_dir, members=names)
-    nested = []
     for name in names:
         p = extract_dir / name
         if p.is_file():
@@ -546,8 +557,7 @@ def _output_stems(artifact: Artifact) -> set[str]:
     }
 
 
-def _case_failure(groups: list[list[str]], kind: ArtifactKind, label: str) -> str:
-    unit = "source files" if kind is ArtifactKind.SOURCES_JAR else "classes"
+def _case_failure(groups: list[list[str]], unit: str, label: str) -> str:
     total = sum(len(g) for g in groups)
     more = ", ..." if len(groups) > 1 else ""
     return (
@@ -572,13 +582,18 @@ def _fetch_stage(
 
     nested: list[Artifact] = []
     try:
+        if artifact.refusal:  # decided by the parent's discovery (#93): nothing to extract or run
+            report.outcome = "failed"
+            report.failure = artifact.refusal
+            return report, nested, None
         if ctx.case_insensitive and artifact.kind in _CASE_CHECKED_KINDS:
             groups = casefs.case_groups(_output_stems(artifact))
             if groups:
                 if artifact.kind is ArtifactKind.ARCHIVE:
                     nested = _discover_nested(artifact, ctx)  # nested jars get their own check
+                unit = "source files" if artifact.kind is ArtifactKind.SOURCES_JAR else "classes"
                 report.outcome = "failed"
-                report.failure = _case_failure(groups, artifact.kind, ctx.case_insensitive)
+                report.failure = _case_failure(groups, unit, ctx.case_insensitive)
                 return report, nested, None
         if artifact.kind is ArtifactKind.CORRUPT:
             report.outcome = "failed"

@@ -13,7 +13,6 @@ from decaf import casefs
 from decaf.engines import EngineResult
 from decaf.maven import Gav, Resolution
 from decaf.pipeline import DecafError, Settings, _case_failure, run
-from decaf.scanner import ArtifactKind
 
 
 def perfect_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
@@ -1781,10 +1780,10 @@ def _mixed_jar(make_jar, input_dir: Path, name: str = "mixed.jar") -> Path:
 
 def test_case_failure_text():
     groups = [["p/A", "p/a"], ["q/B", "q/b", "q/bB"]]
-    assert _case_failure(groups, ArtifactKind.ARCHIVE, "output directory") == (
+    assert _case_failure(groups, "classes", "output directory") == (
         "case collision: 5 classes differ only by case (p/A vs p/a, ...); case-insensitive output directory"
     )
-    assert _case_failure([["p/A.java", "p/a.java"]], ArtifactKind.SOURCES_JAR, "temp directory") == (
+    assert _case_failure([["p/A.java", "p/a.java"]], "source files", "temp directory") == (
         "case collision: 2 source files differ only by case (p/A.java vs p/a.java); case-insensitive temp directory"
     )
 
@@ -1900,3 +1899,35 @@ def test_run_case_insensitive_tree_never_batches_case_clashing_jars(fake_env, ma
     assert all(not {"x.jar", "y.jar"} <= set(b) for b in batches), batches
     (clash,) = [c for a in report.artifacts for c in a.collisions]
     assert clash == {"path": "p/A.java", "kept": "x.jar", "dropped": "y.jar", "dropped_path": "p/a.java"}
+
+
+def test_run_refuses_nested_archives_that_differ_only_by_case(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
+    input_dir = tmp_path / "in"
+    upper = make_jar("u/A.jar", {"p/R.class": b"r"})
+    lower = make_jar("l/a.jar", {"com/d/D.class": b"d"})
+    make_jar(
+        "app.war",
+        {
+            "WEB-INF/classes/q/Q.class": b"q",
+            "WEB-INF/lib/A.jar": upper.read_bytes(),
+            "WEB-INF/lib/a.jar": lower.read_bytes(),
+            "WEB-INF/lib/dep.jar": lower.read_bytes(),
+        },
+        base=input_dir,
+    )
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    by_rel = {a.rel: a for a in report.artifacts}
+    assert by_rel["app.war"].outcome == "ok"
+    for rel in ("app.war!/WEB-INF/lib/A.jar", "app.war!/WEB-INF/lib/a.jar"):
+        assert by_rel[rel].outcome == "failed"
+        assert by_rel[rel].failure == (
+            "case collision: 2 nested archives differ only by case "
+            "(WEB-INF/lib/A.jar vs WEB-INF/lib/a.jar); case-insensitive output and temp directories"
+        )
+        assert by_rel[rel].attempts == [] and by_rel[rel].kind == "archive"
+    assert by_rel["app.war!/WEB-INF/lib/dep.jar"].outcome == "ok"
+    assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
+    assert not (out / "app.war/WEB-INF/lib/A.jar").exists()
+    assert report.totals["failed"] == 2

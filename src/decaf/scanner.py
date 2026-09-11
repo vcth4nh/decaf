@@ -32,6 +32,7 @@ class Artifact:
     rel: str
     kind: ArtifactKind
     classes: int = 0
+    refusal: str | None = None  # failure text decided on discovery (#93): the artifact is not processed
 
 
 def _read_names(path: Path) -> list[str] | None:
