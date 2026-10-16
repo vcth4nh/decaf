@@ -1026,6 +1026,8 @@ def _decompile_batch(
 
     trees: dict[int, Path] = {}
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
+    helds: dict[int, _Held] = {}
+    flagged: dict[int, int] = {}
     try:
         if res.returncode == 0 and not res.timed_out:
             for p in sorted(dest.rglob("*")):
@@ -1041,6 +1043,12 @@ def _decompile_batch(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(p, target)
                 produced[i].add(stem)
+        order = sorted(trees)
+        helds = {i: _Held() for i in order}
+        results = _check_trees([(trees[i], members[i][0], members[i][1], helds[i]) for i in order], ctx)
+        if results is not None:
+            for i, by_path in zip(order, results):
+                flagged[i] = _apply_hold(trees[i], by_path, name, helds[i], ctx)
     except Exception:
         trees = {}  # split unusable; every member requeues and redoes solo (self-healing)
 
@@ -1049,7 +1057,7 @@ def _decompile_batch(
     for i, (a, target, report, stems, _) in enumerate(members):
         report.attempts.append(
             EngineAttempt(name, "batch", res.returncode, res.timed_out,
-                          len(produced[i]), res.stderr_tail)
+                          len(produced[i]), res.stderr_tail, flagged.get(i, 0))
         )
         if i not in trees:
             requeue.append((a, target, report))
@@ -1060,7 +1068,7 @@ def _decompile_batch(
             report.collisions += collisions
             report.method = name
             report.classes = len(stems)
-            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:])
+            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:], helds[i])
             report.outcome = "ok"
         except Exception:
             report.outcome = "failed"

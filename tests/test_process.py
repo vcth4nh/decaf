@@ -1274,3 +1274,30 @@ def test_two_files_with_one_stem_in_one_output(make_jar, tmp_path: Path):
     assert report.outcome == "ok" and report.flagged == [] and not report.partial
     assert report.attempts[0].flagged == 1 and report.check["checked"] == 1  # the check ran; the clean file won
     assert (tmp_path / "out/mr.jar/com/x/A.java").read_text() == "class A {}"
+
+
+def test_decompile_batch_checks_once_and_retries_flagged_member(make_jar, tmp_path: Path):
+    from decaf.pipeline import _decompile_batch
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        for stem, text in (("com/a/A", "// FLAG"), ("com/b/B", "class B {}")):
+            out = Path(dest) / f"{stem}.java"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text)
+        return EngineResult(spec.name, 0, False, 2, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    calls: list = []
+    ctx = _batch_ctx(tmp_path, batch, chain=["vineflower", "cfr"])
+    ctx.runner = writing_runner({"cfr": {"com/a/A.java": "class A { /* cfr */ }"}})
+    ctx.checker = marker_checker(calls)
+    ctx.java_major = 21
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    assert len(calls) == 2 and len(calls[0]) == 2  # one call for the batch, one for the a.jar retry
+    a, b = done
+    assert (a.attempts[0].flagged, b.attempts[0].flagged) == (1, 0)
+    assert a.flagged == [] and not a.partial and a.attempts[-1].engine == "cfr"
+    assert b.check["checked"] == 1 and b.flagged == []
+    assert (tmp_path / "out/src/com/a/A.java").read_text() == "class A { /* cfr */ }"
