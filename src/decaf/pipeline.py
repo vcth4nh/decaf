@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import __version__, casefs, engines, maven, stubs
+from . import __version__, casefs, engines, maven, memory, stubs
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -301,6 +301,7 @@ class Settings:
     max_depth: int = 1  # archive-in-archive levels to extract; 0 = top-level only
     jobs: int = 0  # 0 = auto: min(4, cpu count)
     cpus: int = 0  # total CPU budget across all workers; 0 = all cores
+    memory_mb: int | None = 0  # engine heap budget in MB; None = auto (80% of RAM, the CLI default); 0 = no cap (#98)
     timeout: float = 600.0
     repos: tuple[str, ...] = ()
     verbose: bool = False
@@ -335,6 +336,7 @@ class Ctx:
     resolver: Callable
     batch_runner: Callable | None = None
     cpu_budget: int | None = None  # visible cores per engine JVM
+    memory_plan: memory.MemoryPlan = memory.NO_CAP  # the heap shares of the engine JVMs (#98)
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events (scan/engines/fetch/queued/decompile/progress)
@@ -1089,9 +1091,20 @@ def run(
     total_cpus = settings.cpus or max(1, (os.cpu_count() or 1) - 1)  # auto: leave one core free
     jobs = settings.jobs or min(4, os.cpu_count() or 1)
     jobs = max(1, min(jobs, total_cpus))
+    budget_mb = settings.memory_mb
+    if budget_mb is None:
+        budget_mb = memory.default_budget_mb() or 0  # unknown RAM: no cap
+    mem_plan = memory.plan(budget_mb, jobs)
+    jobs = mem_plan.jobs  # fewer jobs when a share would fall below the heap floor (#98)
     cpu_budget = max(1, total_cpus // jobs)
     fetch_jobs = min(8, 2 * jobs)  # IO-sized: stage 1 waits on the network, not cores
     queue_bound = 2 * jobs  # decompiles queued beyond the running `jobs` before stage 1 stalls
+    if on_event is not None:
+        ram_unknown = settings.memory_mb is None and not budget_mb
+        on_event("memory", "", memory.budget_line(mem_plan, ram_unknown=ram_unknown))
+    if mem_plan.budget_mb and on_warn is not None:
+        for line in memory.heap_env_warnings(os.environ):
+            on_warn(line)
     affinity_base: set[int] | None = None
     if hasattr(os, "sched_setaffinity"):
         # ActiveProcessorCount only sizes JVM pools — JIT/GC warmup still bursts past
@@ -1125,6 +1138,7 @@ def run(
             resolver=resolver,
             batch_runner=batch_runner,
             cpu_budget=cpu_budget,
+            memory_plan=mem_plan,
             cds_dir=cds_dir,
             on_stderr=on_stderr,
             on_event=on_event,
@@ -1254,6 +1268,9 @@ def run(
                     "fetch_jobs": fetch_jobs,
                     "cpus": total_cpus,
                     "cpu_budget": cpu_budget,
+                    "memory_budget_mb": mem_plan.budget_mb,
+                    "heap_mb": mem_plan.heap_mb(1),
+                    "whale_heap_mb": mem_plan.heap_mb(2),
                     "timeout": settings.timeout,
                     "repos": maven._redacted(settings.repos),
                     "chain": chain,

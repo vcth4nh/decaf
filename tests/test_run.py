@@ -2277,3 +2277,94 @@ def test_run_lists_a_stub_that_a_retry_engine_wrote(fake_env, make_jar, tmp_path
     assert [(s["path"], s["engine"]) for s in r.stubs] == [("com/x/B.java", "cfr")]
     assert r.stubs[0]["errors"] == ["org.benf.cfr.reader.util.ConfusedCFRException"]
     assert r.missing_classes == 0 and r.partial
+
+
+def capped_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+    """perfect_engine for runs with a heap cap: it takes the heap_mb keyword (#98)."""
+    return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+
+def test_run_reports_the_memory_plan(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    events: list[tuple[str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=8, cpus=8, memory_mb=6553),
+        runner=capped_engine,
+        on_event=lambda k, s, d: events.append((k, d)),
+    )
+    s = report.settings
+    assert (s["jobs"], s["cpu_budget"]) == (4, 2)  # the memory clamp left 4 jobs for 8 cpus
+    assert (s["memory_budget_mb"], s["heap_mb"], s["whale_heap_mb"]) == (6553, 1338, 2976)
+    line = "engine memory: up to 6.4 GB (4 jobs, 1.3 GB heap each; a whale gets 2.9 GB)"
+    assert ("memory", line) in events
+    kinds = [k for k, _ in events]
+    assert kinds.index("scan") < kinds.index("memory") < kinds.index("decompile")
+
+
+def test_run_auto_budget_uses_the_ram(fake_env, make_jar, tmp_path, monkeypatch):
+    from decaf import memory
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    monkeypatch.setattr(memory, "default_budget_mb", lambda: 10000)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=2, cpus=2, memory_mb=None),
+        runner=capped_engine,
+    )
+    assert (report.settings["memory_budget_mb"], report.settings["heap_mb"]) == (10000, 4700)
+
+
+def test_run_unknown_ram_means_no_cap(fake_env, make_jar, tmp_path, monkeypatch):
+    from decaf import memory
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    monkeypatch.setattr(memory, "default_budget_mb", lambda: None)
+    events: list[tuple[str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, memory_mb=None),
+        runner=perfect_engine,
+        on_event=lambda k, s, d: events.append((k, d)),
+    )
+    assert (report.settings["memory_budget_mb"], report.settings["heap_mb"]) == (0, None)
+    assert ("memory", "engine memory: no cap (RAM size unknown; set --memory)") in events
+
+
+def test_run_without_a_cap_says_so(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    events: list[tuple[str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=perfect_engine,
+        on_event=lambda k, s, d: events.append((k, d)),
+    )
+    assert ("memory", "engine memory: no cap (--memory 0)") in events
+    assert (report.settings["memory_budget_mb"], report.settings["whale_heap_mb"]) == (0, None)
+
+
+def test_run_warns_about_heap_flags_in_java_options(fake_env, make_jar, tmp_path, monkeypatch):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-Xmx4g")
+    monkeypatch.setenv("_JAVA_OPTIONS", "-Xmx2g")
+    monkeypatch.delenv("JDK_JAVA_OPTIONS", raising=False)
+    warnings: list[str] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, memory_mb=6553),
+        runner=capped_engine,
+        on_warn=warnings.append,
+    )
+    assert (
+        "JAVA_TOOL_OPTIONS sets the heap (-Xmx4g); decaf's --memory heap takes precedence"
+        " (--memory 0 keeps yours)"
+    ) in warnings
+    assert any(w.startswith("_JAVA_OPTIONS sets the heap (-Xmx2g)") for w in warnings)
+    warnings.clear()
+    run(
+        Settings(input=input_dir, output=tmp_path / "out2", maven=False, memory_mb=0),
+        runner=perfect_engine,
+        on_warn=warnings.append,
+    )
+    assert not any("sets the heap" in w for w in warnings)  # no cap: the user's heap applies
