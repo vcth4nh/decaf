@@ -18,9 +18,10 @@ class _Markers:
     error: re.Pattern[str] | None  # captures the exception class name; None = the engine prints none
 
 
-# A line-comment marker must start its line or follow a lambda arrow, so a string
-# literal in decompiled code (a decompiler's own `buffer.append("// $FF: ...")`)
-# cannot match. Patterns verified against the engine jars and real output.
+# A line-comment marker must start its line, follow a lambda arrow, or (Vineflower)
+# be glued to code, never follow a space or a quote, so a string literal in
+# decompiled code (a decompiler's own `buffer.append("// $FF: ...")`) cannot
+# match. Patterns verified against the engine jars and real output.
 _ENGINES: dict[str, _Markers] = {
     "vineflower": _Markers(
         b"VF: ",
