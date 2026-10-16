@@ -1932,3 +1932,234 @@ def test_run_refuses_nested_archives_that_differ_only_by_case(fake_env, make_jar
     assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
     assert not (out / "app.war/WEB-INF/lib/A.jar").exists()
     assert report.totals["failed"] == 2
+
+
+STUB_TEXT = {
+    "vineflower": (
+        "class A {\n   void m() {\n      // $VF: Couldn't be decompiled\n"
+        "      // Please report this to the Vineflower issue tracker, at https://github.com/Vineflower/vineflower/issues"
+        " with a copy of the class file (if you have the rights to distribute it!)\n"
+        "      // java.lang.NullPointerException: boom\n   }\n}\n"
+    ),
+    "cfr": (
+        "class A {\n    void m() {\n        /*\n"
+        "         * This method has failed to decompile.  When submitting a bug report, please provide this stack trace,"
+        " and (if you hold appropriate legal rights) the relevant class file.\n"
+        "         * \n"
+        "         * org.benf.cfr.reader.util.ConfusedCFRException: Started 2 blocks at once\n"
+        "         */\n"
+        '        throw new IllegalStateException("Decompilation failed");\n    }\n}\n'
+    ),
+    "fernflower": "class A {\n   void m() {\n      // $FF: Couldn't be decompiled\n   }\n}\n",
+    "procyon": (
+        "class A {\n    void m() {\n        // \n        // This method could not be decompiled.\n"
+        "        // \n        // The error that occurred was:\n        // \n"
+        "        // java.lang.IllegalStateException: Could not infer any expression.\n"
+        '        throw new IllegalStateException("An error occurred while decompiling this method.");\n    }\n}\n'
+    ),
+    "jd": "class A {\n  void m() {\n    // Byte code:\n    //   0: return\n  }\n}\n",
+}
+
+
+def stub_engine(stub: dict[str, set[str]], suffix: dict[str, str] | None = None):
+    """Fake engines like perfect_engine; engine NAME writes STUB_TEXT[NAME] for the class stems in stub[NAME]."""
+
+    def run_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        dest, target = Path(dest), Path(target)
+        if target.is_dir():
+            entries = [p.relative_to(target).as_posix() for p in target.rglob("*.class")]
+        else:
+            with zipfile.ZipFile(target) as zf:
+                entries = [n for n in zf.namelist() if n.endswith(".class")]
+        n = 0
+        for entry in entries:
+            if "$" in entry.rsplit("/", 1)[-1]:
+                continue
+            stem = entry[: -len(".class")]
+            out = dest / (stem + (suffix or {}).get(spec.name, ".java"))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if stem in stub.get(spec.name, set()):
+                out.write_text(STUB_TEXT[spec.name])
+            else:
+                out.write_text(f"// {spec.name}\nclass X {{}}\n")
+            n += 1
+        return EngineResult(spec.name, 0, False, n, "")
+
+    return run_engine
+
+
+def test_run_retries_a_stubbed_class_with_the_next_engine(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+    events: list[tuple[str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=stub_engine({"vineflower": {"com/x/A"}}),
+        on_event=lambda k, s, d: events.append((k, d)),
+    )
+    r = report.artifacts[0]
+    assert r.outcome == "ok" and r.method == "vineflower"
+    assert r.stubs == [] and not r.partial
+    assert [(a.engine, a.level, a.stubbed) for a in r.attempts] == [
+        ("vineflower", "archive", 1),
+        ("cfr", "class", 0),
+    ]
+    out = tmp_path / "out/a.jar/com/x"
+    assert (out / "A.java").read_text() == "// cfr\nclass X {}\n"
+    assert (out / "B.java").read_text() == "// vineflower\nclass X {}\n"
+    assert r.java_files == 2
+    assert ("decompile", "cfr · retry 1 classes") in events
+    assert report.totals["stubbed_classes"] == 0
+
+
+def test_run_keeps_the_first_engine_file_when_every_engine_stubs(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+    every = {name: {"com/x/A"} for name in ("vineflower", "cfr", "fernflower", "procyon", "jd")}
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=stub_engine(every),
+    )
+    r = report.artifacts[0]
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert r.stubs == [{
+        "path": "com/x/A.java", "engine": "vineflower", "methods": 1,
+        "errors": ["java.lang.NullPointerException"],
+    }]
+    assert r.outcome == "ok" and r.partial and r.missing_classes == 0
+    assert [(a.engine, a.stubbed) for a in r.attempts] == [
+        ("vineflower", 1), ("cfr", 1), ("fernflower", 1), ("procyon", 1), ("jd", 1),
+    ]
+    assert r.java_files == 2
+    assert report.totals["stubbed_classes"] == 1 and report.totals["partial"] == 1
+    assert report.status == "completed"
+
+
+@pytest.mark.parametrize("mirror", [True, False])
+def test_run_clean_java_retry_replaces_a_stubbed_kotlin_file(fake_env, make_jar, tmp_path, mirror):
+    input_dir = tmp_path / "in"
+    make_jar("k.jar", {"okio/Buffer.class": b"k", "okio/Okio.class": b"k"}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=mirror),
+        runner=stub_engine({"vineflower": {"okio/Buffer"}}, suffix={"vineflower": ".kt"}),
+    )
+    r = report.artifacts[0]
+    root = tmp_path / ("out/k.jar" if mirror else "out/src")
+    written = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())
+    assert written == ["okio/Buffer.java", "okio/Okio.kt"]
+    assert r.stubs == [] and r.collisions == []
+
+
+def test_run_no_fallback_reports_the_stub_without_a_retry(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, fallback=False),
+        runner=stub_engine({"vineflower": {"com/x/A"}}),
+    )
+    r = report.artifacts[0]
+    assert [(a.engine, a.level, a.stubbed) for a in r.attempts] == [("vineflower", "archive", 1)]
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["path"] for s in r.stubs] == ["com/x/A.java"] and r.partial
+
+
+def test_run_retries_missing_and_stubbed_classes_together(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar(
+        "a.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b", "com/x/C.class": b"c"}, base=input_dir
+    )
+    base = stub_engine({"vineflower": {"com/x/A"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = base(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "vineflower":
+            (Path(dest) / "com/x/B.java").unlink()  # B goes missing
+            res.java_files -= 1
+        return res
+
+    events: list[tuple[str, str]] = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=engine,
+        on_event=lambda k, s, d: events.append((k, d)),
+    )
+    r = report.artifacts[0]
+    assert ("decompile", "cfr · retry 2 classes") in events
+    assert r.missing_classes == 0 and r.stubs == [] and not r.partial
+    out = tmp_path / "out/a.jar/com/x"
+    assert {p.name: p.read_text().splitlines()[0] for p in out.iterdir()} == {
+        "A.java": "// cfr", "B.java": "// cfr", "C.java": "// vineflower",
+    }
+
+
+def test_run_without_stubs_reports_none(fake_env, make_jar, tmp_path):
+    input_dir = make_inputs(make_jar, tmp_path)
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine)
+    assert all(r.stubs == [] for r in report.artifacts)
+    assert all(a.stubbed == 0 for r in report.artifacts for a in r.attempts)
+    assert report.totals["stubbed_classes"] == 0
+
+
+def test_run_stub_under_a_container_root_is_released_by_a_package_path_retry(fake_env, make_jar, tmp_path):
+    """Vineflower keeps WEB-INF/classes/; real CFR writes the package path. One stem, no leftover stub."""
+    input_dir = tmp_path / "in"
+    make_jar(
+        "app.war",
+        {"WEB-INF/classes/com/w/W.class": b"w", "WEB-INF/classes/com/w/V.class": b"v"},
+        base=input_dir,
+    )
+    base = stub_engine({"vineflower": {"WEB-INF/classes/com/w/W"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name != "cfr":
+            return base(spec, jar_path, target, dest, timeout, java=java)
+        out = Path(dest) / "com/w/W.java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("// cfr\nclass W {}\n")
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    out = tmp_path / "out/app.war"
+    assert (out / "com/w/W.java").read_text() == "// cfr\nclass W {}\n"
+    assert not (out / "WEB-INF/classes/com/w/W.java").exists()
+    assert (out / "WEB-INF/classes/com/w/V.java").is_file()
+    assert r.stubs == [] and r.missing_classes == 0
+
+
+def test_run_interrupt_during_a_retry_still_writes_the_held_file(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    base = stub_engine({"vineflower": {"com/x/A"}, "cfr": {"com/x/A"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = base(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "cfr":
+            engines.PROCESSES.kill_all()  # Ctrl-C lands while the retry runs
+        return res
+
+    try:
+        report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    finally:
+        engines.PROCESSES.reset()
+    r = report.artifacts[0]
+    assert [a.engine for a in r.attempts] == ["vineflower", "cfr"]  # the chain stopped
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["engine"] for s in r.stubs] == ["vineflower"]
+
+
+def test_run_stubbed_inner_class_file_is_written_without_a_retry(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a", "com/x/A$1.class": b"i"}, base=input_dir)
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        (Path(dest) / "com/x/A$1.java").write_text(STUB_TEXT["vineflower"])  # an inner class on its own
+        res.java_files += 1
+        return res
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    assert [a.engine for a in r.attempts] == ["vineflower"]  # A$1 is no expected stem: no retry
+    assert (tmp_path / "out/a.jar/com/x/A$1.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["path"] for s in r.stubs] == ["com/x/A$1.java"]

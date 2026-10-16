@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import __version__, casefs, engines, maven
+from . import __version__, casefs, engines, maven, stubs
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -87,6 +87,7 @@ class EngineAttempt:
     timed_out: bool
     java_files: int
     stderr_tail: str
+    stubbed: int = 0  # files of this attempt's output that hold an engine stub marker (#96)
 
 
 @dataclass
@@ -107,13 +108,16 @@ class ArtifactReport:
     missing_classes: int = 0
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
+    stubs: list[dict] = field(default_factory=list)  # classes left stubbed in the output (#96)
     failure: str | None = None
 
     @property
     def partial(self) -> bool:
-        """ok but degraded: engine holes, or decompiled sources-less due to network."""
+        """ok but degraded: engine holes or stubs, or decompiled sources-less due to network."""
         return self.outcome == "ok" and (
-            self.missing_classes > 0 or (self.sources_miss or "").startswith("network:")
+            self.missing_classes > 0
+            or bool(self.stubs)
+            or (self.sources_miss or "").startswith("network:")
         )
 
 
@@ -279,6 +283,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "network_misses": sum(
             1 for r in reports if (r.sources_miss or "").startswith("network:")
         ),
+        "stubbed_classes": sum(len(r.stubs) for r in reports),
     }
 
 
@@ -384,6 +389,57 @@ def produced_stems(dest: Path) -> set[str]:
     }
 
 
+@dataclass
+class _Held:
+    """Stubbed engine files kept out of the output until a clean retry replaces them (#96)."""
+
+    root: Path | None = None  # a _tmp_dir, made at the first stub
+    files: dict[str, tuple[str, stubs.Stub]] = field(default_factory=dict)  # stem -> (engine, stub)
+
+
+def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> int:
+    """Move the stubbed files of one engine output aside before the writer copies it.
+
+    The first engine's file of a class stays held; a later stubbed copy is
+    deleted. Returns the number of stubbed files in this output.
+    """
+    found = stubs.scan(tree, engine)
+    for stub in found:
+        src = tree / stub.path
+        norm = normalize_java_rel(stub.path)
+        stem = norm[: -len(PurePosixPath(norm).suffix)]  # the produced_stems rule
+        if stem in held.files:
+            src.unlink()
+            continue
+        if held.root is None:
+            held.root = _tmp_dir(ctx)
+        target = held.root / stub.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, target)
+        held.files[stem] = (engine, stub)
+    return len(found)
+
+
+def _release_held(held: _Held, clean: set[str]) -> None:
+    """Drop the held file of each class that a retry wrote without a stub."""
+    for stem in clean & held.files.keys():
+        _, stub = held.files.pop(stem)
+        (held.root / stub.path).unlink(missing_ok=True)
+
+
+def _write_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
+    """Write the classes that stayed stubbed (the first engine's file) and list them."""
+    if not held.files:
+        return
+    java, collisions = ctx.writer.add_tree(held.root, rel)
+    report.java_files += java
+    report.collisions += collisions
+    report.stubs = [
+        {"path": stub.path, "engine": engine, "methods": stub.methods, "errors": list(stub.errors)}
+        for engine, stub in sorted(held.files.values(), key=lambda v: v[1].path)
+    ]
+
+
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
     """Copy the .class files (plus their $-inners) for missing stems into a temp tree."""
 
@@ -424,34 +480,41 @@ def _retry_missing_classes(
     ctx: Ctx,
     report: ArtifactReport,
     chain: list[str],
+    held: _Held,
 ) -> None:
-    missing = expected - produced
+    """Retry missing and stubbed classes down the chain; then write what stays stubbed (#96)."""
+    missing = expected - produced - held.files.keys()
     for name in chain:
         if engines.PROCESSES.closed:
             break
-        if not missing:
+        retry = missing | (held.files.keys() & expected)
+        if not retry:
             break
-        retry_tree = _extract_failed_classes(source, missing, ctx)
+        retry_tree = _extract_failed_classes(source, retry, ctx)
         if retry_tree is None:
             break
         dest = _tmp_dir(ctx)
         if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(missing):,} classes")
+            ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
         res = ctx.runner(
             ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
+        stubbed = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else 0
         report.attempts.append(
-            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
+            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail, stubbed)
         )
         if res.java_files > 0:
             java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
             report.collisions += collisions
-            produced |= produced_stems(dest)
-            missing = expected - produced
+            clean = produced_stems(dest)
+            produced |= clean
+            _release_held(held, clean)
+            missing = expected - produced - held.files.keys()
+    _write_held(artifact.rel, ctx, report, held)
     report.missing_classes = len(missing)
 
 
@@ -460,6 +523,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
     expected = expected_class_stems(source)
     report.classes = len(expected)
     produced: set[str] = set()
+    held = _Held()
 
     used_index: int | None = None
     for i, name in enumerate(ctx.chain):
@@ -475,8 +539,9 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
+        stubbed = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else 0
         report.attempts.append(
-            EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
+            EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail, stubbed)
         )
         if res.java_files > 0:
             java, collisions = ctx.writer.add_tree(dest, artifact.rel)
@@ -493,7 +558,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         return
 
     _retry_missing_classes(
-        artifact, source, expected, produced, ctx, report, ctx.chain[used_index + 1 :]
+        artifact, source, expected, produced, ctx, report, ctx.chain[used_index + 1 :], held
     )
     report.outcome = "ok"
 
@@ -849,7 +914,7 @@ def _decompile_batch(
             report.collisions += collisions
             report.method = name
             report.classes = len(stems)
-            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:])
+            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:], _Held())
             report.outcome = "ok"
         except Exception:
             report.outcome = "failed"

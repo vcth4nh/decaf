@@ -993,6 +993,7 @@ def test_partial_predicate_and_totals():
     ok = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
     assert not ok.partial
     assert replace(ok, missing_classes=3).partial
+    assert replace(ok, stubs=[{"path": "p/A.java", "engine": "vineflower", "methods": 1, "errors": []}]).partial
     assert replace(ok, sources_miss="network: index timeout; trail").partial
     assert not replace(ok, sources_miss="no pom.properties").partial
     assert not replace(ok, outcome="failed", missing_classes=3).partial
