@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import zipfile
@@ -8,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from decaf.cli import app
+from decaf import stubs
 from decaf.engines import ENGINE_ORDER, ENGINES, ensure_engine, find_java, run_engine
 
 pytestmark = [pytest.mark.slow, pytest.mark.network]
@@ -79,3 +81,27 @@ def test_cli_maven_first_real(tmp_path: Path):
     assert report["artifacts"][0]["method"] == "maven"
     assert report["artifacts"][0]["gav"] == "org.slf4j:slf4j-api:2.0.13"
     assert (out / "src/org/slf4j/Logger.java").is_file()
+
+
+SPRING_BOOT_URL = (
+    "https://repo1.maven.org/maven2/org/springframework/boot/spring-boot/3.5.12/spring-boot-3.5.12.jar"
+)
+SPRING_BOOT_SHA1 = "da8301111d026baad823ca00e19b636bc5ef0699"
+
+
+def test_cli_reports_every_engine_stub_real(tmp_path: Path):
+    """Vineflower stubs StructuredLoggingJsonProperties at default settings (#96)."""
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    with httpx.Client(follow_redirects=True, timeout=60) as client:
+        data = client.get(SPRING_BOOT_URL).content
+    assert hashlib.sha1(data).hexdigest() == SPRING_BOOT_SHA1
+    (input_dir / "spring-boot-3.5.12.jar").write_bytes(data)
+    out = tmp_path / "out"
+    result = runner.invoke(app, [str(input_dir), "-o", str(out), "--no-maven"])
+    assert result.exit_code == 0, result.output
+    art = json.loads((out / "decaf-report.json").read_text())["artifacts"][0]
+    assert art["attempts"][0]["engine"] == "vineflower" and art["attempts"][0]["stubbed"] >= 1
+    root = out / "spring-boot-3.5.12.jar"
+    marked = {s.path for name in ENGINE_ORDER for s in stubs.scan(root, name)}
+    assert marked == {s["path"] for s in art["stubs"]}

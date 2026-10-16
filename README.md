@@ -23,8 +23,9 @@ into a source tree that mirrors your input, or one merged package tree with
   cached. `--fresh-maven` re-derives verdicts; `decaf cache clean`
   wipes cached sources and verdicts.
 - **Five engines, automatic fallback:** Vineflower → CFR → Fernflower →
-  Procyon → JD-CLI. If an engine crashes, times out, or misses classes,
-  the next one takes over (whole-archive and per-class retries).
+  Procyon → JD-CLI. If an engine crashes, times out, misses classes, or
+  writes a stub in place of a method body, the next one takes over
+  (whole-archive and per-class retries).
 - **Engines auto-download** on first use (pinned versions, sha256-verified)
   into your user cache dir. Manage them with `decaf engines list|fetch|clean|update`.
 
