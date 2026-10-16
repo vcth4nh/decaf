@@ -411,11 +411,16 @@ def _held_key(rel: str) -> str:
 
 
 def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> int:
-    """Move the stubbed files of one engine output aside before the writer copies it.
+    """Prepare one engine output before the writer copies it (#96).
 
-    The first engine's file of a class stays held; a later stubbed copy is
-    deleted. Returns the number of stubbed files in this output.
+    Empty source files are no output (Fernflower writes one when a whole class
+    fails), so they go. Stubbed files move aside: the first engine's file of a
+    class stays held; a later stubbed copy is deleted. Returns the number of
+    stubbed files in this output.
     """
+    for p in list(tree.rglob("*")):
+        if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and p.stat().st_size == 0:
+            p.unlink()
     found = stubs.scan(tree, engine)
     for stub in found:
         src = tree / stub.path
@@ -498,36 +503,38 @@ def _retry_missing_classes(
 ) -> None:
     """Retry missing and stubbed classes down the chain; then write what stays stubbed (#96)."""
     missing = expected - produced - held.files.keys()
-    for name in chain:
-        if engines.PROCESSES.closed:
-            break
-        retry = missing | (held.files.keys() & expected)
-        if not retry:
-            break
-        retry_tree = _extract_failed_classes(source, retry, ctx)
-        if retry_tree is None:
-            break
-        dest = _tmp_dir(ctx)
-        if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
-        res = ctx.runner(
-            ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
-            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
-            **_stream_kw_for(ctx, name, artifact.rel),
-        )
-        stubbed = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else 0
-        report.attempts.append(
-            EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail, stubbed)
-        )
-        if res.java_files > 0:
-            java, collisions = ctx.writer.add_tree(dest, artifact.rel)
-            report.java_files += java
-            report.collisions += collisions
-            produced |= produced_stems(dest)
-            _release_held(held, dest)
-            missing = expected - produced - held.files.keys()
-    _write_held(artifact.rel, ctx, report, held)
+    try:
+        for name in chain:
+            if engines.PROCESSES.closed:
+                break
+            retry = missing | (held.files.keys() & expected)
+            if not retry:
+                break
+            retry_tree = _extract_failed_classes(source, retry, ctx)
+            if retry_tree is None:
+                break
+            dest = _tmp_dir(ctx)
+            if ctx.on_event is not None:
+                ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
+            res = ctx.runner(
+                ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
+                ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+                **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+                **_stream_kw_for(ctx, name, artifact.rel),
+            )
+            stubbed = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else 0
+            report.attempts.append(
+                EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail, stubbed)
+            )
+            if res.java_files > 0:
+                java, collisions = ctx.writer.add_tree(dest, artifact.rel)
+                report.java_files += java
+                report.collisions += collisions
+                produced |= produced_stems(dest)
+                _release_held(held, dest)
+                missing = expected - produced - held.files.keys()
+    finally:
+        _write_held(artifact.rel, ctx, report, held)  # also when a retry raises: the stubs are not lost
     report.missing_classes = len(missing)
 
 
@@ -896,8 +903,8 @@ def _decompile_batch(
     try:
         if res.returncode == 0 and not res.timed_out:
             for p in sorted(dest.rglob("*")):
-                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
-                    continue
+                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES or p.stat().st_size == 0:
+                    continue  # an empty file is no output (#96)
                 rel = p.relative_to(dest).as_posix()
                 stem = normalize_java_rel(rel)[: -len(p.suffix)]
                 i = _owner_index(stem, owners)

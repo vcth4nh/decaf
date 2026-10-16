@@ -67,6 +67,16 @@ VF_INLINE = (
 )
 VF_LAMBDA = "class A {\n   Runnable r = () -> // $VF: Couldn't be decompiled\n   ;\n}\n"
 
+# Built from Vineflower 1.12.0 ClassWriter.writeException after a class processor fails: glued to code.
+VF_GLUED = (
+    "class A {\n"
+    "   Runnable r = new Runnable()// $VF: Couldn't be decompiled\n"
+    f"// {VF_PLEASE}\n"
+    "// java.lang.IllegalStateException: boom\n"
+    ";\n"
+    "}\n"
+)
+
 # Built from Fernflower 253 ClassWriter.methodToJava and LimitContainer: the default text, or a limit message.
 FF_METHOD = "class A {\n   public void m() {\n      // $FF: Couldn't be decompiled\n   }\n}\n"
 FF_LIMIT = (
@@ -140,6 +150,7 @@ def write(tree: Path, rel: str, text: str) -> None:
         ("vineflower", "A.java", VF_CLASS_EMPTY, 1, ()),
         ("vineflower", "A.java", VF_INLINE, 1, ()),
         ("vineflower", "A.java", VF_LAMBDA, 1, ()),
+        ("vineflower", "A.java", VF_GLUED, 1, ("java.lang.IllegalStateException",)),
         ("fernflower", "A.java", FF_METHOD, 1, ()),
         ("fernflower", "A.java", FF_LIMIT, 1, ()),
         ("cfr", "A.java", CFR_METHOD, 1, ("org.benf.cfr.reader.util.ConfusedCFRException",)),

@@ -534,6 +534,22 @@ def test_decompile_batch_retries_a_stubbed_member_class(make_jar, tmp_path):
     assert (out / "com/b/B.java").read_text() == "class X {}\n"
 
 
+def test_decompile_batch_empty_member_file_requeues(make_jar, tmp_path):
+    from decaf.pipeline import _decompile_batch
+
+    def emptying_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        (Path(dest) / "com/a/A.java").write_text("")  # a whole-class failure in the batch
+        return res
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, emptying_batch)
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert [r.rel for r in done] == ["b.jar"]
+    assert [a.rel for a, _, _ in requeue] == ["a.jar"]  # no output: it redoes solo
+
+
 def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
     from decaf.engines import EngineResult
     from decaf.pipeline import _decompile_batch

@@ -25,7 +25,7 @@ _ENGINES: dict[str, _Markers] = {
     "vineflower": _Markers(
         b"VF: ",
         re.compile(
-            r"(?:^[ \t]*|->[ \t]*)// \$VF: Couldn't be decompiled"
+            r"(?:^[ \t]*|->[ \t]*|(?<![\s\x22']))// \$VF: Couldn't be decompiled"  # also glued: new Foo()// $VF: ...
             r"|(?<!\x22)/\* \$VF: Couldn't be decompiled\. Class "  # an anonymous class never processed
             r"|^\$ ?VF: Unable to decompile class",  # whole class; "$ VF" when it gave no output
             re.MULTILINE,

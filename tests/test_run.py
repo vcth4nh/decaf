@@ -2205,3 +2205,75 @@ def test_run_multi_release_versioned_stub_is_not_retried(fake_env, make_jar, tmp
     assert (out / "p/A.java").read_text() == "// vineflower\nclass X {}\n"
     assert (out / "META-INF/versions/9/p/A.java").read_text() == STUB_TEXT["vineflower"]
     assert [s["path"] for s in r.stubs] == ["META-INF/versions/9/p/A.java"] and r.partial
+
+
+def test_run_retry_error_still_writes_the_held_file(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+    base = stub_engine({"vineflower": {"com/x/A"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name == "cfr":
+            raise OSError(28, "No space left on device")
+        return base(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    assert r.outcome == "failed" and "No space left on device" in (r.failure or "")
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["path"] for s in r.stubs] == ["com/x/A.java"]
+
+
+def test_run_empty_retry_file_keeps_the_held_stub(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    base = stub_engine({name: {"com/x/A"} for name in ("vineflower", "cfr", "procyon", "jd")})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name != "fernflower":
+            return base(spec, jar_path, target, dest, timeout, java=java)
+        out = Path(dest) / "com/x/A.java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("")  # Fernflower's whole-class failure: an empty file
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["engine"] for s in r.stubs] == ["vineflower"]
+
+
+def test_run_empty_first_file_counts_as_missing(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "vineflower":
+            (Path(dest) / "com/x/A.java").write_text("")  # a whole-class failure
+        return res
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    assert [(a.engine, a.level) for a in r.attempts] == [("vineflower", "archive"), ("cfr", "class")]
+    assert r.missing_classes == 0 and not r.partial
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text().startswith("// decompiled from")
+
+
+def test_run_lists_a_stub_that_a_retry_engine_wrote(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+    base = stub_engine({name: {"com/x/B"} for name in ("cfr", "fernflower", "procyon", "jd")})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = base(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "vineflower":
+            (Path(dest) / "com/x/B.java").unlink()  # vineflower misses B
+            res.java_files -= 1
+        return res
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    assert [(s["path"], s["engine"]) for s in r.stubs] == [("com/x/B.java", "cfr")]
+    assert r.stubs[0]["errors"] == ["org.benf.cfr.reader.util.ConfusedCFRException"]
+    assert r.missing_classes == 0 and r.partial
