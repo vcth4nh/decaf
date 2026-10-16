@@ -1031,7 +1031,7 @@ def test_class_versions_reads_top_level_majors(make_jar, tmp_path: Path):
         "META-INF/versions/9/com/b/B.class": _class_header(53),
         "x.txt": b"no",
     })
-    assert _class_versions(jar) == {"com/a/A": 69, "com/b/B": 52}
+    assert _class_versions(jar) == {"com/a/A": 69, "com/b/B": 52, "META-INF/versions/9/com/b/B": 53}
 
 
 def test_family_classpath_war_and_nested_jar(make_jar, tmp_path: Path):
@@ -1263,17 +1263,74 @@ def test_clean_check_writes_the_same_tree(make_jar, tmp_path: Path):
     assert r1.check is None and r2.check["checked"] == 2
 
 
-def test_two_files_with_one_stem_in_one_output(make_jar, tmp_path: Path):
-    jar = make_jar("mr.jar", {"com/x/A.class": b"a"})
-    runner = writing_runner({"vineflower": {
-        "META-INF/versions/9/com/x/A.java": "// FLAG",
-        "com/x/A.java": "class A {}",
-    }})
-    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+_MR9 = "META-INF/versions/9/com/x/A.java"
+
+
+def _run_mr(make_jar, tmp_path: Path, files: dict[str, dict[str, str]], *, fallback: bool, classes=None, calls=None):
+    """A multi-release jar in mirror mode; returns the report and the written {path: text}."""
+    jar = make_jar("mr.jar", classes or {"com/x/A.class": b"a", "META-INF/versions/9/com/x/A.class": b"a9"})
+    ctx = make_ctx(tmp_path, writing_runner(files), fallback=fallback, checker=marker_checker(calls),
+                   writer=MirrorWriter(tmp_path / "out"))
     report, _ = process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
-    assert report.outcome == "ok" and report.flagged == [] and not report.partial
-    assert report.attempts[0].flagged == 1 and report.check["checked"] == 1  # the check ran; the clean file won
-    assert (tmp_path / "out/mr.jar/com/x/A.java").read_text() == "class A {}"
+    out = tmp_path / "out/mr.jar"
+    return report, {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
+
+
+def test_two_files_with_one_stem_in_one_output(make_jar, tmp_path: Path):
+    # The variants of a multi-release class are separate files: both are written, the flagged one is reported.
+    report, written = _run_mr(
+        make_jar, tmp_path, {"vineflower": {_MR9: "// FLAG", "com/x/A.java": "class A {}"}}, fallback=False,
+    )
+    assert written == {_MR9: "// FLAG", "com/x/A.java": "class A {}"}
+    assert [f["path"] for f in report.flagged] == [_MR9] and report.partial
+    assert report.check["checked"] == 2 and report.check["flagged"] == 1
+
+
+def test_sibling_that_does_not_pass_is_not_deleted(make_jar, tmp_path: Path):
+    report, written = _run_mr(
+        make_jar, tmp_path, {"vineflower": {_MR9: "// FLAG", "com/x/A.java": "// ENV"}}, fallback=False,
+    )
+    assert written == {_MR9: "// FLAG", "com/x/A.java": "// ENV"}
+    assert [f["path"] for f in report.flagged] == [_MR9]
+    assert report.check["unchecked_reasons"]["absent classes"] == 1
+
+
+def test_both_flagged_variants_are_written_and_reported(make_jar, tmp_path: Path):
+    report, written = _run_mr(
+        make_jar, tmp_path, {"vineflower": {_MR9: "// FLAG 9", "com/x/A.java": "// FLAG"}}, fallback=False,
+    )
+    assert written == {_MR9: "// FLAG 9", "com/x/A.java": "// FLAG"}
+    assert [f["path"] for f in report.flagged] == [_MR9, "com/x/A.java"]
+
+
+def test_same_key_sibling_in_one_output_is_not_deleted(make_jar, tmp_path: Path):
+    files = {"vineflower": {"WEB-INF/classes/com/x/A.java": "// FLAG", "com/x/A.java": "// ENV"}}
+    report, written = _run_mr(make_jar, tmp_path, files, fallback=False)
+    assert written == {"WEB-INF/classes/com/x/A.java": "// FLAG", "com/x/A.java": "// ENV"}
+    assert [f["path"] for f in report.flagged] == ["WEB-INF/classes/com/x/A.java"]
+
+
+def test_retry_replaces_only_the_held_variant(make_jar, tmp_path: Path):
+    report, written = _run_mr(make_jar, tmp_path, {
+        "vineflower": {_MR9: "// FLAG", "com/x/A.java": "class A {}"},
+        "cfr": {_MR9: "class A { /* cfr 9 */ }", "com/x/A.java": "class A { /* cfr */ }"},
+    }, fallback=True)
+    assert written == {_MR9: "class A { /* cfr 9 */ }", "com/x/A.java": "class A {}"}
+    assert report.flagged == [] and report.collisions == [] and not report.partial
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+
+
+def test_newer_multi_release_variant_is_not_sent(make_jar, tmp_path: Path):
+    calls: list = []
+    report, _ = _run_mr(
+        make_jar, tmp_path,
+        {"vineflower": {"META-INF/versions/25/com/x/A.java": "class A {}", "com/x/A.java": "class A {}"}},
+        fallback=False, calls=calls,
+        classes={"com/x/A.class": _class_header(52), "META-INF/versions/25/com/x/A.class": _class_header(69)},
+    )
+    sent = [Path(f).as_posix() for f in calls[0][0].files]
+    assert len(sent) == 1 and sent[0].endswith("/com/x/A.java") and "META-INF" not in sent[0]
+    assert report.check["unchecked_reasons"]["newer class version"] == 1 and report.check["needs_java"] == 25
 
 
 def test_decompile_batch_checks_once_and_retries_flagged_member(make_jar, tmp_path: Path):
