@@ -25,7 +25,7 @@ def writing_runner(files_per_engine: dict[str, dict[str, str]]):
     return _run
 
 
-def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=False, engine="vineflower", writer=None):
+def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=False, engine="vineflower", writer=None, checker=None):
     settings = Settings(
         input=tmp_path,
         output=tmp_path / "out",
@@ -47,6 +47,8 @@ def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=Fals
         sources_cache=tmp_path / "cache",
         runner=runner,
         resolver=resolver or (lambda *a, **k: None),
+        checker=checker,
+        java_major=21,
     )
 
 
@@ -1012,3 +1014,78 @@ def test_new_report_fields_have_backward_compatible_defaults():
     r = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
     assert r.flagged == [] and r.check is None
     assert Settings(input=Path("in"), output=Path("out")).check is True
+
+
+def _class_header(major: int) -> bytes:
+    return b"\xca\xfe\xba\xbe\x00\x00" + major.to_bytes(2, "big") + b"rest"
+
+
+def test_class_versions_reads_top_level_majors(make_jar, tmp_path: Path):
+    from decaf.pipeline import _class_versions
+
+    jar = make_jar("v.jar", {
+        "WEB-INF/classes/com/a/A.class": _class_header(69),
+        "WEB-INF/classes/com/a/A$1.class": _class_header(70),
+        "com/b/B.class": _class_header(52),
+        "META-INF/versions/9/com/b/B.class": _class_header(53),
+        "x.txt": b"no",
+    })
+    assert _class_versions(jar) == {"com/a/A": 69, "com/b/B": 52}
+
+
+def test_family_classpath_war_and_nested_jar(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    dep = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    other = make_jar("other.jar", {"com/o/O.class": b"o"})
+    war = make_jar("app.war", {
+        "WEB-INF/classes/com/w/W.class": b"w",
+        "WEB-INF/lib/dep.jar": dep.read_bytes(),
+        "WEB-INF/lib/other.jar": other.read_bytes(),
+    })
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    war_a = Artifact(war, "app.war", ArtifactKind.ARCHIVE)
+    nested = _discover_nested(war_a, ctx)
+    cp = _family_classpath(war_a, war, ctx)
+    assert (cp[0] / "com/w/W.class").is_file()  # the class root comes first
+    assert cp[1] == war
+    assert [p.name for p in cp[2:]] == ["dep.jar", "other.jar"]
+    dep_a = next(a for a in nested if a.rel.endswith("dep.jar"))
+    cp_dep = _family_classpath(dep_a, dep_a.path, ctx)
+    assert cp_dep[0] == dep_a.path
+    assert cp_dep[1:] == [cp[0], war, cp[3]]  # parent group without the duplicate dep.jar
+
+
+def test_family_classpath_war_without_lib_keeps_its_class_root(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    war = make_jar("only.war", {"WEB-INF/classes/com/w/W.class": b"w"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    a = Artifact(war, "only.war", ArtifactKind.ARCHIVE)
+    _discover_nested(a, ctx)  # no nested archives
+    cp = _family_classpath(a, war, ctx)
+    assert len(cp) == 2 and (cp[0] / "com/w/W.class").is_file() and cp[1] == war
+
+
+def test_family_classpath_input_group_and_class_tree(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    a_jar = make_jar("in/a.jar", {"com/a/A.class": b"a"})
+    b_jar = make_jar("in/b.jar", {"com/b/B.class": b"b"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    ctx.input_group = [a_jar, b_jar, tmp_path / "in"]
+    assert _family_classpath(Artifact(a_jar, "a.jar", ArtifactKind.ARCHIVE), a_jar, ctx) == [
+        a_jar, b_jar, tmp_path / "in",
+    ]
+    tree = tmp_path / "copy"
+    tree.mkdir()
+    t = Artifact(tmp_path / "in", "_classes", ArtifactKind.CLASS_TREE)
+    assert _family_classpath(t, tree, ctx) == [tree, a_jar, b_jar, tmp_path / "in"]
+
+
+def test_family_classpath_single_file_input_has_no_input_group(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    jar = make_jar("solo.jar", {"com/s/S.class": b"s"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    assert _family_classpath(Artifact(jar, "solo.jar", ArtifactKind.ARCHIVE), jar, ctx) == [jar]

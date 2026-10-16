@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import __version__, casefs, engines, maven
+from . import __version__, casefs, check, engines, maven
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -344,6 +344,12 @@ class Ctx:
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events (scan/engines/fetch/queued/decompile/progress)
     case_insensitive: str | None = None  # roots that ignore case ("output directory", ...); None = case-sensitive run (#93)
+    checker: Callable | None = None  # compile check (#99): check.run_check with bound args; None = off
+    java_major: int = 0  # limits the class versions that the check accepts; 0 = no limit
+    input_group: list[Path] = field(default_factory=list)  # top-level classpath entries (#99)
+    families: dict[str, tuple[Path, list[Path]]] = field(default_factory=dict)  # parent rel -> (path, nested archives)
+    class_roots: dict[str, Path | None] = field(default_factory=dict)  # rel -> extracted WEB-INF/BOOT-INF classes
+    family_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -392,6 +398,79 @@ def produced_stems(dest: Path) -> set[str]:
         for p in dest.rglob("*")
         if p.is_file() and p.suffix in SOURCE_SUFFIXES
     }
+
+
+def _class_versions(source: Path) -> dict[str, int]:
+    """Lowest class-file major version of each top-level class, by stem (#99)."""
+    out: dict[str, int] = {}
+
+    def keep(stem: str, major: int | None) -> None:
+        if major is not None:
+            out[stem] = min(out.get(stem, major), major)
+
+    if source.is_dir():
+        for p in source.rglob("*.class"):
+            if "$" not in p.name:
+                with open(p, "rb") as f:
+                    keep(_class_stem(p.relative_to(source).as_posix()), check.class_major(f.read(8)))
+        return out
+    try:
+        with zipfile.ZipFile(source) as zf:
+            for name in zf.namelist():
+                if not name.endswith(".class") or "$" in name.rsplit("/", 1)[-1]:
+                    continue
+                with zf.open(name) as f:
+                    keep(_class_stem(name), check.class_major(f.read(8)))
+    except (zipfile.BadZipFile, OSError):
+        pass
+    return out
+
+
+def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
+    """WEB-INF/classes or BOOT-INF/classes of an archive, extracted once (#99)."""
+    with ctx.family_lock:
+        if rel in ctx.class_roots:
+            return ctx.class_roots[rel]
+    root: Path | None = None
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = zf.namelist()
+        for prefix in _CONTAINER_ROOTS:
+            members = {n for n in names if n.startswith(prefix) and n.endswith(".class")}
+            if members:
+                dest = _tmp_dir(ctx)
+                safe_extract_zip(path, dest, members=members)
+                root = dest / prefix.rstrip("/")
+                break
+    except (zipfile.BadZipFile, RuntimeError, OSError):
+        root = None
+    with ctx.family_lock:
+        return ctx.class_roots.setdefault(rel, root)
+
+
+def _container_group(rel: str, path: Path, ctx: Ctx) -> list[Path]:
+    root = _class_root(rel, path, ctx)
+    with ctx.family_lock:
+        nested = list(ctx.families.get(rel, (path, []))[1])
+    return ([root] if root is not None else []) + [path] + nested
+
+
+def _family_classpath(artifact: Artifact, source: Path, ctx: Ctx) -> list[Path]:
+    """Classpath of an artifact's check: its own group, then its parent's or the input group (#99)."""
+    cp = [source] if source.is_dir() else _container_group(artifact.rel, source, ctx)
+    if "!/" in artifact.rel:
+        parent = artifact.rel.rsplit("!/", 1)[0]
+        with ctx.family_lock:
+            entry = ctx.families.get(parent)
+        if entry is not None:
+            cp += _container_group(parent, entry[0], ctx)
+    else:
+        cp += ctx.input_group
+    out: list[Path] = []
+    for p in cp:
+        if p not in out:
+            out.append(p)
+    return out
 
 
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
@@ -540,6 +619,11 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
         if p.is_file():
             kind, classes = classify_counted(p)
             nested.append(Artifact(p, f"{artifact.rel}!/{name}", kind, classes))
+    with ctx.family_lock:
+        ctx.families[artifact.rel] = (
+            artifact.path,
+            [a.path for a in nested if a.kind is ArtifactKind.ARCHIVE and a.refusal is None],
+        )
     return nested
 
 
