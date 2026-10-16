@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import engines
 
 KINDS = ("parse", "name", "flow", "type", "other")
 RETRY_KINDS = frozenset({"parse", "name", "flow"})
@@ -193,3 +200,99 @@ def class_major(header: bytes) -> int | None:
     if len(header) < 8 or header[:4] != b"\xca\xfe\xba\xbe":
         return None
     return int.from_bytes(header[6:8], "big")
+
+
+SOURCE = Path(__file__).with_name("checker") / "Checker.java"
+
+
+class CheckError(Exception):
+    """The checker could not be installed."""
+
+
+def find_javac(java: str) -> Path | None:
+    """The javac of the JDK that runs `java`, through java.home (shims work), or None."""
+    try:
+        proc = subprocess.run(
+            [java, "-XshowSettings:properties", "-version"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"^\s*java\.home = (.+?)\s*$", (proc.stderr or "") + (proc.stdout or ""), re.MULTILINE)
+    if not m:
+        return None
+    javac = Path(m.group(1)) / "bin" / ("javac.exe" if os.name == "nt" else "javac")
+    return javac if javac.is_file() else None
+
+
+def install(javac: Path, java_major: int, root: Path | None = None) -> Path:
+    """Compile Checker.java once for each source hash and Java version; return its directory."""
+    digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()[:12]
+    base = root or engines.cache_root() / "checker"
+    target = base / f"{digest}-{java_major}"
+    if (target / "Checker.class").is_file():
+        return target
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=base))
+    try:
+        proc = subprocess.run(
+            [str(javac), "-nowarn", "-d", str(tmp), str(SOURCE)],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise CheckError(f"checker compile failed: {exc}") from exc
+    if proc.returncode != 0 or not (tmp / "Checker.class").is_file():
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise CheckError(f"checker compile failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
+    try:
+        os.replace(tmp, target)
+    except OSError:  # another run installed it first
+        shutil.rmtree(tmp, ignore_errors=True)
+    if not (target / "Checker.class").is_file():
+        raise CheckError(f"checker install incomplete: {target}")
+    return target
+
+
+def build_command(
+    java: str,
+    install_dir: Path,
+    jobs_file: Path,
+    result_file: Path,
+    *,
+    threads: int,
+    cds_dir: Path | None = None,
+) -> list[str]:
+    """The one place that builds the checker command (#98 adds its heap flag here)."""
+    cmd = [java, f"-XX:ActiveProcessorCount={threads}"]
+    if cds_dir is not None:
+        cmd += [
+            "-XX:+AutoCreateSharedArchive",
+            f"-XX:SharedArchiveFile={cds_dir / f'checker-{install_dir.name}.jsa'}",
+        ]
+    return [*cmd, "-cp", str(install_dir), "Checker", str(jobs_file), str(result_file), str(threads)]
+
+
+def run_check(
+    jobs: list[Job],
+    *,
+    timeout: float,
+    cpu_budget: int | None,
+    java: str,
+    install: Path,
+    tmp_root: Path,
+    cds_dir: Path | None = None,
+) -> list[list[FileResult]]:
+    """One checker JVM for all jobs: one result for each file of each job, in order."""
+    work = Path(tempfile.mkdtemp(prefix="check-", dir=tmp_root))
+    jobs_file, result_file = work / "jobs.bin", work / "results.tsv"
+    write_jobs(jobs_file, jobs)
+    threads = max(1, cpu_budget or 1)
+    cmd = build_command(java, install, jobs_file, result_file, threads=threads, cds_dir=cds_dir)
+    _, timed_out, _ = engines.run_process(cmd, timeout)
+    try:
+        text = result_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    raw = parse_results(text)
+    return [[classify(raw.get((job.id, i)), timed_out) for i in range(len(job.files))] for job in jobs]

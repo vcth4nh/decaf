@@ -1,3 +1,6 @@
+import hashlib
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -131,3 +134,97 @@ def test_class_major():
     assert class_major(b"\xca\xfe\xba\xbe\x00\x00\x00\x45") == 69
     assert class_major(b"\xca\xfe\xba\xbe\x00\x00") is None
     assert class_major(b"PK\x03\x04\x00\x00\x00\x45") is None
+
+
+def test_find_javac_reads_java_home(tmp_path: Path, monkeypatch):
+    home = tmp_path / "jdk"
+    (home / "bin").mkdir(parents=True)
+    javac = home / "bin" / ("javac.exe" if os.name == "nt" else "javac")
+    javac.write_text("")
+
+    def fake_run(cmd, **kw):
+        assert cmd == ["/shims/java", "-XshowSettings:properties", "-version"]
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="",
+            stderr=f"Property settings:\n    java.home = {home}\n    java.vendor = X\nopenjdk version \"21.0.2\"\n",
+        )
+
+    monkeypatch.setattr(check.subprocess, "run", fake_run)
+    assert check.find_javac("/shims/java") == javac
+
+
+def test_find_javac_none_for_a_jre(tmp_path: Path, monkeypatch):
+    home = tmp_path / "jre"
+    (home / "bin").mkdir(parents=True)
+    monkeypatch.setattr(
+        check.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=f"    java.home = {home}\n"),
+    )
+    assert check.find_javac("java") is None
+
+
+def test_find_javac_none_when_java_fails(monkeypatch):
+    def boom(cmd, **kw):
+        raise OSError("no java")
+
+    monkeypatch.setattr(check.subprocess, "run", boom)
+    assert check.find_javac("java") is None
+
+
+def test_install_reuses_an_existing_install(tmp_path: Path, monkeypatch):
+    digest = hashlib.sha256(check.SOURCE.read_bytes()).hexdigest()[:12]
+    target = tmp_path / f"{digest}-21"
+    target.mkdir()
+    (target / "Checker.class").write_bytes(b"x")
+    monkeypatch.setattr(check.subprocess, "run", lambda *a, **k: pytest.fail("must not compile"))
+    assert check.install(Path("/jdk/bin/javac"), 21, root=tmp_path) == target
+
+
+def test_install_failure_raises_check_error_and_cleans_up(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        check.subprocess, "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Checker.java:1: error: boom"),
+    )
+    with pytest.raises(check.CheckError, match="boom"):
+        check.install(Path("/jdk/bin/javac"), 21, root=tmp_path)
+    assert not list(tmp_path.glob(".tmp-*"))
+
+
+def test_build_command_with_and_without_cds(tmp_path: Path):
+    inst = tmp_path / "abc123-21"
+    jobs, res = tmp_path / "j", tmp_path / "r"
+    assert check.build_command("java", inst, jobs, res, threads=3) == [
+        "java", "-XX:ActiveProcessorCount=3", "-cp", str(inst), "Checker", str(jobs), str(res), "3",
+    ]
+    cmd = check.build_command("java", inst, jobs, res, threads=2, cds_dir=tmp_path / "cds")
+    assert cmd[2:4] == [
+        "-XX:+AutoCreateSharedArchive",
+        f"-XX:SharedArchiveFile={tmp_path / 'cds' / 'checker-abc123-21.jsa'}",
+    ]
+
+
+def test_run_check_maps_results_and_missing_lines(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def fake_process(cmd, timeout, on_stderr_line=None):
+        seen["cmd"] = cmd
+        Path(cmd[-2]).write_text(
+            "0\t0\tT\t1\n"
+            "0\t1\tE\tA\tcompiler.err.missing.ret.stmt\t3\tmissing return statement\n"
+            "0\t1\tT\t2\n"
+        )
+        return 0, False, ""
+
+    monkeypatch.setattr(check.engines, "run_process", fake_process)
+    jobs = [check.Job("0", (tmp_path / "a.jar",), (tmp_path / "A.java", tmp_path / "B.java", tmp_path / "C.java"))]
+    out = check.run_check(jobs, timeout=5, cpu_budget=2, java="java", install=tmp_path / "inst", tmp_root=tmp_path)
+    assert [r.status for r in out[0]] == ["clean", "flagged", "unchecked"]
+    assert out[0][2].reason == "javac crash"
+    assert seen["cmd"][-1] == "2"
+
+
+def test_run_check_timeout_marks_unfinished_files(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(check.engines, "run_process", lambda cmd, timeout, on_stderr_line=None: (-9, True, ""))
+    jobs = [check.Job("0", (), (tmp_path / "A.java",))]
+    out = check.run_check(jobs, timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
+    assert out == [[unchecked("timeout")]]
