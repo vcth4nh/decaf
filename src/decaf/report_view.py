@@ -102,6 +102,8 @@ def _status_line(r: ArtifactReport) -> str:
             detail = f"{r.method}, {r.classes} classes"
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
+            if r.stubs:
+                detail += f", [yellow]{len(r.stubs)} stubbed[/]"
         glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
         line = f"{glyph} {escape(r.rel)} ({detail})"
         if r.method == "maven" and r.sources_cached:
@@ -162,9 +164,12 @@ def render_ending(
     console.print(f"[dim]{'Sources':<{_BODY_LABEL_WIDTH}}[/]  {sources_line}")
 
     missing = sum(r.missing_classes for r in report.artifacts)
+    stubbed = sum(len(r.stubs) for r in report.artifacts)
     warnings = []
     if missing:
         warnings.append(f"{missing} missing classes")
+    if stubbed:
+        warnings.append(f"{stubbed} stubbed classes")
     if t["collisions"]:
         warnings.append(f"{t['collisions']} collisions")
     if t["network_misses"]:
@@ -229,13 +234,20 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
         console.print(
             f"  classes={r.classes} java_files={r.java_files} "
             f"resources_copied={r.resources_copied} resources_skipped={r.resources_skipped} "
-            f"missing_classes={r.missing_classes} collisions={len(r.collisions)}"
+            f"missing_classes={r.missing_classes} stubbed={len(r.stubs)} collisions={len(r.collisions)}"
         )
         if r.failure:
             console.print(f"  failure={escape(r.failure)}")
+        for s in r.stubs:
+            errors = ", ".join(s.get("errors") or []) or "no exception name"
+            console.print(
+                f"  stub {escape(str(s.get('path')))} ({escape(str(s.get('engine')))}, "
+                f"{s.get('methods')} methods): {escape(errors)}"
+            )
         for a in r.attempts:
             console.print(
-                f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} java_files={a.java_files}"
+                f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} "
+                f"java_files={a.java_files} stubbed={a.stubbed}"
             )
             if a.stderr_tail:
                 console.print(f"    [dim]{escape(a.stderr_tail)}[/]")

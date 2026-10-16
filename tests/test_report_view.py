@@ -320,3 +320,74 @@ def test_ending_has_no_case_hint_without_case_failures():
     console = Console(file=buf, width=300, emoji=False, force_terminal=False, highlight=False)
     render_ending(console, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
     assert "fsutil" not in buf.getvalue()
+
+
+_OOM_STUB = {"path": "p/A.java", "engine": "vineflower", "methods": 2, "errors": ["java.lang.OutOfMemoryError"]}
+
+
+def test_status_line_shows_the_stubbed_count():
+    r = ArtifactReport(rel="b.jar", kind="archive", outcome="ok", method="vineflower",
+                       classes=3, java_files=3, stubs=[_OOM_STUB])
+    assert _status_line(r) == "[yellow]![/] b.jar (vineflower, 3 classes, [yellow]1 stubbed[/])"
+
+
+def test_ending_warns_about_stubbed_classes():
+    arts = [ArtifactReport(rel="s.jar", kind="archive", outcome="ok", method="vineflower",
+                           classes=2, java_files=2, stubs=[_OOM_STUB])]
+    rep = RunReport(settings={}, artifacts=arts, totals=compute_totals(arts), duration_seconds=1.0)
+    console = _console()
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    plain = console.file.getvalue()
+    assert plain.splitlines()[0] == "Completed with problems in 1s"
+    assert "1 processed · 0 complete · 1 partial" in plain
+    assert "1 stubbed classes" in plain
+
+
+def test_render_problems_lists_a_stubbed_artifact():
+    arts = [ArtifactReport(rel="s.jar", kind="archive", outcome="ok", method="vineflower",
+                           classes=2, java_files=2, stubs=[_OOM_STUB])]
+    rep = RunReport(settings={}, artifacts=arts, totals=compute_totals(arts), duration_seconds=1.0)
+    console = _console()
+    render_problems(console, rep)
+    assert "s.jar (vineflower, 2 classes, 1 stubbed)" in console.file.getvalue()
+
+
+def test_render_artifact_lists_stubs_and_attempt_counts():
+    bare = {"path": "p/B.java", "engine": "jd", "methods": 1, "errors": []}
+    arts = [ArtifactReport(
+        rel="s.jar", kind="archive", outcome="ok", method="vineflower", classes=2, java_files=2,
+        stubs=[_OOM_STUB, bare],
+        attempts=[
+            EngineAttempt("vineflower", "archive", 0, False, 2, "", 2),
+            EngineAttempt("cfr", "class", 0, False, 2, "", 0),
+        ],
+    )]
+    rep = RunReport(settings={}, artifacts=arts, totals=compute_totals(arts), duration_seconds=1.0)
+    console = _console()
+    assert render_artifact(console, rep, ["s.jar"]) == 1
+    plain = console.file.getvalue()
+    assert "missing_classes=0 stubbed=2 collisions=0" in plain
+    assert "stub p/A.java (vineflower, 2 methods): java.lang.OutOfMemoryError" in plain
+    assert "stub p/B.java (jd, 1 methods): no exception name" in plain
+    assert "vineflower archive rc=0 timed_out=False java_files=2 stubbed=2" in plain
+    assert "cfr class rc=0 timed_out=False java_files=2 stubbed=0" in plain
+
+
+def test_old_report_without_stub_keys_renders(tmp_path: Path):
+    data = json.loads(report().to_json())
+    for a in data["artifacts"]:
+        a.pop("stubs")
+        for att in a["attempts"]:
+            att.pop("stubbed")
+    data["totals"].pop("stubbed_classes")
+    path = tmp_path / "decaf-report.json"
+    path.write_text(json.dumps(data))
+    loaded, _ = load_report(path)
+    assert all(a.stubs == [] for a in loaded.artifacts)
+    assert all(att.stubbed == 0 for a in loaded.artifacts for att in a.attempts)
+    console = _console()
+    render_ending(console, loaded, output=Path("out"), report_path=path, verbose=False)
+    assert "stubbed" not in console.file.getvalue()
+    detail = _console()
+    assert render_artifact(detail, loaded, ["*"]) == 5
+    assert "stubbed=0" in detail.file.getvalue()

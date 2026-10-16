@@ -494,6 +494,62 @@ def test_decompile_batch_contains_member_postprocessing_errors(make_jar, tmp_pat
     assert "No space left on device" in (failed.failure or "")
 
 
+def test_decompile_batch_retries_a_stubbed_member_class(make_jar, tmp_path):
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    vf_stub = (
+        "class A {\n   void m() {\n      // $VF: Couldn't be decompiled\n"
+        "      // Please report this to the Vineflower issue tracker, at https://github.com/Vineflower/vineflower/issues"
+        " with a copy of the class file (if you have the rights to distribute it!)\n"
+        "      // java.lang.NullPointerException: boom\n   }\n}\n"
+    )
+
+    def stubbing_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        (Path(dest) / "com/a/A.java").write_text(vf_stub)
+        return res
+
+    def clean_retry(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        out = Path(dest) / "com/a/A.java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f"// {spec.name}\nclass A {{}}\n")
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, stubbing_batch, chain=["vineflower", "cfr"])
+    ctx.runner = clean_retry
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    a, b = done
+    assert [(x.engine, x.level, x.stubbed) for x in a.attempts] == [
+        ("vineflower", "batch", 1),
+        ("cfr", "class", 0),
+    ]
+    assert a.stubs == [] and not a.partial and a.java_files == 1
+    assert [(x.level, x.stubbed) for x in b.attempts] == [("batch", 0)]
+    out = tmp_path / "out" / "src"
+    assert (out / "com/a/A.java").read_text() == "// cfr\nclass A {}\n"
+    assert (out / "com/b/B.java").read_text() == "class X {}\n"
+
+
+def test_decompile_batch_empty_member_file_requeues(make_jar, tmp_path):
+    from decaf.pipeline import _decompile_batch
+
+    def emptying_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        (Path(dest) / "com/a/A.java").write_text("")  # a whole-class failure in the batch
+        return res
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, emptying_batch)
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert [r.rel for r in done] == ["b.jar"]
+    assert [a.rel for a, _, _ in requeue] == ["a.jar"]  # no output: it redoes solo
+
+
 def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
     from decaf.engines import EngineResult
     from decaf.pipeline import _decompile_batch
@@ -993,6 +1049,7 @@ def test_partial_predicate_and_totals():
     ok = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
     assert not ok.partial
     assert replace(ok, missing_classes=3).partial
+    assert replace(ok, stubs=[{"path": "p/A.java", "engine": "vineflower", "methods": 1, "errors": []}]).partial
     assert replace(ok, sources_miss="network: index timeout; trail").partial
     assert not replace(ok, sources_miss="no pom.properties").partial
     assert not replace(ok, outcome="failed", missing_classes=3).partial

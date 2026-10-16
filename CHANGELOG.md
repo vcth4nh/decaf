@@ -4,6 +4,19 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Method stubs no longer pass as complete output. When an engine cannot
+  decompile a method, it writes a comment in place of the body
+  (`// $VF: Couldn't be decompiled` and the like) and still writes the class
+  file, so the artifact got a green ✓ with `missing_classes: 0`. decaf now
+  finds the stub markers of all five engines, retries the stubbed classes
+  with the next engines of the chain, and writes a retry file only when it
+  has no stub. A class that stays stubbed keeps the first engine's file, is
+  listed under the new `stubs` report key (path, engine, method count,
+  exception names), and makes the artifact partial (`!`). The ending counts
+  the stubbed classes, and `decaf report --artifact` lists them (#96).
+
 ## [1.10.0] - 2026-09-11
 
 ### Added
