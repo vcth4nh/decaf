@@ -64,6 +64,7 @@ decaf ./libs --engine cfr --no-fallback
 decaf ./libs --engine cfr --no-fallback -- --renameillegalidents true
 decaf ./libs --no-maven -j 8 --timeout 120
 decaf ./libs --cpus 8               # cap total CPU (shared machine)
+decaf ./libs --memory 8g            # cap the engine heap (shared machine)
 decaf ./libs --max-depth 2          # also unpack jars nested two archives deep
 decaf ./libs --repo https://nexus.mycorp.com/repository/maven-public
 ```
@@ -104,6 +105,20 @@ Workers are clamped so they never exceed the budget. Maven resolution and
 sources downloads run on a separate IO-sized fetch stage feeding the
 decompile workers through a bounded queue, so network waits don't idle
 decompile slots.
+
+Memory use is budgeted too. All engine JVMs together get one heap budget:
+80% of the RAM by default (or of a lower container memory limit),
+`--memory 8g` to set it, `--memory 0` to turn the cap off (each JVM then takes
+the JVM default, 25% of the RAM). The budget is split in equal shares, one for
+each job; a whale (3000 or more classes) gets two shares, and `-j` is lowered
+when a share would fall below 1 GiB of heap. Before the decompile starts,
+decaf prints the split and warns when an artifact probably needs more heap
+than its share. The report records the peak memory and the heap of each
+engine attempt, the ending shows the largest peak and counts the attempts that
+ran out of heap, and `decaf report out --memory` lists the ten largest peaks.
+A heap flag in `JAVA_TOOL_OPTIONS` or `JDK_JAVA_OPTIONS` loses to decaf's
+`-Xmx`; one in `_JAVA_OPTIONS` overrides it, and decaf warns that the budget is
+then not enforced.
 
 ### Inspecting a report
 
