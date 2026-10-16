@@ -227,13 +227,16 @@ def find_javac(java: str) -> Path | None:
 
 def install(javac: Path, java_major: int, root: Path | None = None) -> Path:
     """Compile Checker.java once for each source hash and Java version; return its directory."""
-    digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()[:12]
-    base = root or engines.cache_root() / "checker"
-    target = base / f"{digest}-{java_major}"
-    if (target / "Checker.class").is_file():
-        return target
-    base.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=base))
+    try:
+        digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()[:12]
+        base = root or engines.cache_root() / "checker"
+        target = base / f"{digest}-{java_major}"
+        if (target / "Checker.class").is_file():
+            return target
+        base.mkdir(parents=True, exist_ok=True)
+        tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=base))
+    except OSError as exc:  # e.g. a read-only cache: the run goes on without the check
+        raise CheckError(f"checker install failed: {exc}") from exc
     try:
         proc = subprocess.run(
             [str(javac), "-nowarn", "-d", str(tmp), str(SOURCE)],

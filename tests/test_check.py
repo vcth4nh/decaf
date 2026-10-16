@@ -190,6 +190,13 @@ def test_install_failure_raises_check_error_and_cleans_up(tmp_path: Path, monkey
     assert not list(tmp_path.glob(".tmp-*"))
 
 
+def test_install_os_error_raises_check_error(tmp_path: Path):
+    root = tmp_path / "not-a-dir"
+    root.write_text("x")  # the cache root cannot be made: the run must go on without the check
+    with pytest.raises(check.CheckError, match="checker install failed"):
+        check.install(Path("/jdk/bin/javac"), 21, root=root)
+
+
 def test_build_command_with_and_without_cds(tmp_path: Path):
     inst = tmp_path / "abc123-21"
     jobs, res = tmp_path / "j", tmp_path / "r"
