@@ -102,6 +102,8 @@ def _status_line(r: ArtifactReport) -> str:
             detail = f"{r.method}, {r.classes} classes"
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
+            if r.flagged:
+                detail += f", [yellow]{len(r.flagged)} flagged[/]"
         glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
         line = f"{glyph} {escape(r.rel)} ({detail})"
         if r.method == "maven" and r.sources_cached:
@@ -162,15 +164,25 @@ def render_ending(
     console.print(f"[dim]{'Sources':<{_BODY_LABEL_WIDTH}}[/]  {sources_line}")
 
     missing = sum(r.missing_classes for r in report.artifacts)
+    flagged = sum(len(r.flagged) for r in report.artifacts)
     warnings = []
     if missing:
         warnings.append(f"{missing} missing classes")
+    if flagged:
+        warnings.append(f"{flagged} flagged files")
     if t["collisions"]:
         warnings.append(f"{t['collisions']} collisions")
     if t["network_misses"]:
         warnings.append(f"{t['network_misses']} network fallbacks")
     if warnings:
         console.print(f"[dim]{'Warnings':<{_BODY_LABEL_WIDTH}}[/]  " + " · ".join(warnings))
+    newer = sum(
+        (r.check or {}).get("unchecked_reasons", {}).get("newer class version", 0) for r in report.artifacts
+    )
+    needs = max(((r.check or {}).get("needs_java") or 0 for r in report.artifacts), default=0)
+    if newer and needs:
+        found = report.settings.get("java_major")
+        console.print(f"[dim]compile check: {newer} files need Java {needs}+ (found Java {found})[/]")
 
     failed = [r for r in report.artifacts if r.outcome == "failed"]
     if failed:
@@ -231,11 +243,25 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
             f"resources_copied={r.resources_copied} resources_skipped={r.resources_skipped} "
             f"missing_classes={r.missing_classes} collisions={len(r.collisions)}"
         )
+        if r.check:
+            reasons = ", ".join(f"{k} {v}" for k, v in (r.check.get("unchecked_reasons") or {}).items() if v)
+            console.print(
+                f"  check: checked={r.check.get('checked', 0)} flagged={r.check.get('flagged', 0)} "
+                f"noted={r.check.get('noted', 0)} unchecked={r.check.get('unchecked', 0)}"
+                + (f" ({escape(reasons)})" if reasons else "")
+            )
+        for f in r.flagged:
+            console.print(
+                f"  flagged {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
+                f"{escape(', '.join(f.get('kinds') or []))}, {f.get('errors', 0)} errors - "
+                f"{escape(str(f.get('first')))}"
+            )
         if r.failure:
             console.print(f"  failure={escape(r.failure)}")
         for a in r.attempts:
             console.print(
-                f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} java_files={a.java_files}"
+                f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} "
+                f"java_files={a.java_files} flagged={a.flagged}"
             )
             if a.stderr_tail:
                 console.print(f"    [dim]{escape(a.stderr_tail)}[/]")
