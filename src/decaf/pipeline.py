@@ -1177,6 +1177,7 @@ def run(
     runner: Callable | None = None,
     resolver: Callable | None = None,
     batch_runner: Callable | None = None,
+    checker: Callable | None = None,
 ) -> RunReport:
     if settings.engine_args and settings.fallback:
         raise DecafError("engine_args require fallback disabled (engine option dialects don't transfer)")
@@ -1200,11 +1201,18 @@ def run(
             f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
         )
     cds_dir: Path | None = None
+    default_runner = runner is None
     if runner is None:
         runner = engines.run_engine
         batch_runner = batch_runner or engines.run_engine_batch
         if java_major >= engines.CDS_MIN_JAVA:
             cds_dir = engines.cache_root() / "engines"
+    if not settings.check:
+        checker = None
+    input_group = (
+        [a.path for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)]
+        if settings.input.is_dir() else []
+    )
     # An injected runner without an injected batch_runner disables batching:
     # custom runners are per-target and must see every artifact individually.
     net = maven.NetState(warn=on_warn)
@@ -1217,6 +1225,7 @@ def run(
     interrupted = False
     reports: list[ArtifactReport] = []
     chain: list[str] = []
+    javac_path: Path | None = None
     tmp_root = Path(tempfile.mkdtemp(prefix="decaf-"))
     client = httpx.Client(follow_redirects=True, timeout=30)
     total_cpus = settings.cpus or max(1, (os.cpu_count() or 1) - 1)  # auto: leave one core free
@@ -1240,6 +1249,24 @@ def run(
         chain, engine_jars = _preflight_engines(
             settings, java_major, client, on_event, on_warn=on_warn
         )
+        if settings.check and checker is None and default_runner:
+            # An injected runner without an injected checker has no check: fake engines write fake Java.
+            javac_path = check.find_javac(java_exe)
+            if javac_path is None:
+                if on_warn is not None:
+                    on_warn(f"compile check skipped: no javac found for {java_exe}")
+            else:
+                try:
+                    install_dir = check.install(javac_path, java_major)
+                except check.CheckError as exc:
+                    javac_path = None
+                    if on_warn is not None:
+                        on_warn(f"compile check skipped: {exc}")
+                else:
+                    checker = partial(
+                        check.run_check, java=java_exe, install=install_dir,
+                        tmp_root=tmp_root, cds_dir=cds_dir,
+                    )
         writer: MergeWriter | MirrorWriter
         if settings.mirror:
             writer = MirrorWriter(settings.output, resources=settings.resources)
@@ -1262,6 +1289,9 @@ def run(
             on_stderr=on_stderr,
             on_event=on_event,
             case_insensitive=case_label,
+            checker=checker,
+            java_major=java_major,
+            input_group=input_group,
         )
         try:
             with (
@@ -1382,6 +1412,8 @@ def run(
                     "resources": settings.resources,
                     "maven": settings.maven,
                     "fresh_maven": settings.fresh_maven,
+                    "check": settings.check,
+                    "javac": str(javac_path) if javac_path is not None else None,
                     "max_depth": settings.max_depth,
                     "jobs": jobs,
                     "fetch_jobs": fetch_jobs,
