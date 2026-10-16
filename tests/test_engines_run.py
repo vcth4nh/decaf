@@ -478,3 +478,26 @@ def test_run_engine_batch_threads_engine_args(tmp_path: Path, monkeypatch):
         tmp_path / "out", 10.0, java=J, engine_args=["-dgs=1"],
     )
     assert "-dgs=1" in seen["cmd"]
+
+
+def test_run_process_reports_exit_code_and_stderr_tail():
+    PROCESSES.reset()
+    rc, timed_out, tail = engines.run_process(
+        [sys.executable, "-c", "import sys; sys.stderr.write('bad thing'); sys.exit(3)"], 30
+    )
+    assert (rc, timed_out) == (3, False)
+    assert "bad thing" in tail
+
+
+def test_run_process_times_out():
+    PROCESSES.reset()
+    _, timed_out, _ = engines.run_process([sys.executable, "-c", "import time; time.sleep(30)"], 0.5)
+    assert timed_out is True
+
+
+def test_run_process_refuses_after_registry_closed():
+    PROCESSES.kill_all()
+    try:
+        assert engines.run_process([sys.executable, "-c", "pass"], 5) == (-1, False, "interrupted")
+    finally:
+        PROCESSES.reset()
