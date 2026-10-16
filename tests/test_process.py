@@ -998,3 +998,17 @@ def test_partial_predicate_and_totals():
     assert not replace(ok, outcome="failed", missing_classes=3).partial
     totals = compute_totals([ok, replace(ok, rel="b.jar", missing_classes=1)])
     assert totals["partial"] == 1
+    assert replace(ok, flagged=[{"path": "a/B.java"}]).partial
+    assert not replace(ok, outcome="failed", flagged=[{"path": "a/B.java"}]).partial
+    with_check = replace(ok, rel="c.jar", check={"checked": 5, "flagged": 1, "noted": 2, "unchecked": 3})
+    t = compute_totals([with_check, ok])
+    assert (t["checked_files"], t["flagged_files"], t["noted_files"], t["unchecked_files"]) == (5, 1, 2, 3)
+
+
+def test_new_report_fields_have_backward_compatible_defaults():
+    from decaf.pipeline import ArtifactReport, EngineAttempt
+
+    assert EngineAttempt("cfr", "archive", 0, False, 1, "").flagged == 0
+    r = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    assert r.flagged == [] and r.check is None
+    assert Settings(input=Path("in"), output=Path("out")).check is True

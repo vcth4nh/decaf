@@ -87,6 +87,7 @@ class EngineAttempt:
     timed_out: bool
     java_files: int
     stderr_tail: str
+    flagged: int = 0  # files that the compile check flagged in this attempt's output (#99)
 
 
 @dataclass
@@ -108,12 +109,16 @@ class ArtifactReport:
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
     failure: str | None = None
+    flagged: list[dict] = field(default_factory=list)  # files that stay flagged by the compile check (#99)
+    check: dict | None = None  # compile-check counts over the final output; None = no check ran
 
     @property
     def partial(self) -> bool:
-        """ok but degraded: engine holes, or decompiled sources-less due to network."""
+        """ok but degraded: engine holes, flagged files, or decompiled sources-less due to network."""
         return self.outcome == "ok" and (
-            self.missing_classes > 0 or (self.sources_miss or "").startswith("network:")
+            self.missing_classes > 0
+            or bool(self.flagged)
+            or (self.sources_miss or "").startswith("network:")
         )
 
 
@@ -279,6 +284,10 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "network_misses": sum(
             1 for r in reports if (r.sources_miss or "").startswith("network:")
         ),
+        "checked_files": sum((r.check or {}).get("checked", 0) for r in reports),
+        "flagged_files": sum((r.check or {}).get("flagged", 0) for r in reports),
+        "noted_files": sum((r.check or {}).get("noted", 0) for r in reports),
+        "unchecked_files": sum((r.check or {}).get("unchecked", 0) for r in reports),
     }
 
 
@@ -293,6 +302,7 @@ class Settings:
     resources: bool = True  # mirror mode: also carry the original archives' resources
     maven: bool = True
     fresh_maven: bool = False  # ignore stored lookup verdicts this run (still re-records)
+    check: bool = True  # javac compile check of decompiled sources (#99)
     max_depth: int = 1  # archive-in-archive levels to extract; 0 = top-level only
     jobs: int = 0  # 0 = auto: min(4, cpu count)
     cpus: int = 0  # total CPU budget across all workers; 0 = all cores
