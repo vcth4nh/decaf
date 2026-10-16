@@ -534,6 +534,25 @@ def test_decompile_batch_retries_a_stubbed_member_class(make_jar, tmp_path):
     assert (out / "com/b/B.java").read_text() == "class X {}\n"
 
 
+def test_decompile_batch_passes_one_slot_of_heap(make_jar, tmp_path):
+    from decaf import memory
+    from decaf.pipeline import _decompile_batch
+
+    seen = {}
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+        seen["heap"] = heap_mb
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, batch)
+    ctx.memory_plan = memory.plan(8000, 4)
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == [] and seen["heap"] == 1700
+    assert [r.attempts[0].heap_mb for r in done] == [1700, 1700]
+
+
 def test_decompile_batch_empty_member_file_requeues(make_jar, tmp_path):
     from decaf.pipeline import _decompile_batch
 

@@ -2368,3 +2368,103 @@ def test_run_warns_about_heap_flags_in_java_options(fake_env, make_jar, tmp_path
         on_warn=warnings.append,
     )
     assert not any("sets the heap" in w for w in warnings)  # no cap: the user's heap applies
+
+
+def test_run_gives_each_jvm_its_heap(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("small.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+    make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    seen: list[tuple[str, str, int | None]] = []
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+        seen.append((Path(target).name, spec.name, heap_mb))
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "vineflower" and Path(target).name == "small.jar":
+            (Path(dest) / "com/x/B.java").unlink()  # B goes missing: a cfr class retry follows
+            res.java_files -= 1
+        return res
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=4, cpus=4, memory_mb=8000),
+        runner=engine,
+    )
+    heaps = {(t, e): h for t, e, h in seen if e == "vineflower"}
+    assert heaps == {("whale.jar", "vineflower"): 3700, ("small.jar", "vineflower"): 1700}  # 2 x 2000 - 300
+    assert [h for _, e, h in seen if e == "cfr"] == [1700]  # the class retry runs in its artifact's slot
+    attempts = {r.rel: [(a.engine, a.heap_mb) for a in r.attempts] for r in report.artifacts}
+    assert attempts["small.jar"] == [("vineflower", 1700), ("cfr", 1700)]
+
+
+def test_run_without_a_cap_records_no_heap(fake_env, make_jar, tmp_path):
+    report = run(
+        Settings(input=make_inputs(make_jar, tmp_path), output=tmp_path / "out", maven=False),
+        runner=perfect_engine,  # takes no heap_mb: the pipeline must not pass one
+    )
+    assert all(a.heap_mb is None for r in report.artifacts for a in r.attempts)
+
+
+def test_run_flags_out_of_memory_attempts(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    make_jar("b.jar", {"com/y/B.class": b"b"}, base=input_dir)
+    oom_stub = STUB_TEXT["vineflower"].replace(
+        "java.lang.NullPointerException: boom", "java.lang.OutOfMemoryError: Java heap space"
+    )
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "vineflower" and Path(target).name == "a.jar":
+            (Path(dest) / "com/x/A.java").write_text(oom_stub)  # out of heap inside one method
+        if spec.name == "vineflower" and Path(target).name == "b.jar":
+            res.out_of_memory = True  # out of heap in stderr, output complete
+        return res
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    by_rel = {r.rel: [(a.engine, a.out_of_memory) for a in r.attempts] for r in report.artifacts}
+    assert by_rel["a.jar"] == [("vineflower", True), ("cfr", False)]
+    assert by_rel["b.jar"] == [("vineflower", True)]
+    assert report.totals["out_of_memory_attempts"] == 2
+
+
+def _deflated_jar(path: Path, entries: dict[str, bytes]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return path
+
+
+def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path):
+    input_dir = tmp_path / "in"
+    _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})  # 73 + 48 x 25 = 1273 MB
+    warnings: list[str] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1, memory_mb=1400),
+        runner=capped_engine,
+        on_warn=warnings.append,
+    )
+    assert "big.jar: vineflower may need about 1.2 GB of heap; its share is 1.1 GB (raise --memory)" in warnings
+    warnings.clear()
+    run(
+        Settings(input=input_dir, output=tmp_path / "out2", maven=False, jobs=1, cpus=1, memory_mb=0),
+        runner=perfect_engine,
+        on_warn=warnings.append,
+    )
+    assert not any("may need about" in w for w in warnings)  # no cap, no share warning
+
+
+def test_run_gives_batch_eligible_jars_no_estimate(fake_env, tmp_path):
+    input_dir = tmp_path / "in"
+    _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    warnings: list[str] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1, memory_mb=1400),
+        runner=capped_engine,
+        batch_runner=batch,
+        on_warn=warnings.append,
+    )
+    assert not any("may need about" in w for w in warnings)  # under 3000 classes: batch-eligible
