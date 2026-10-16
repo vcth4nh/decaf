@@ -2,9 +2,10 @@ from pathlib import Path
 
 import pytest
 
+from decaf import check
 from decaf.engines import ENGINES, EngineResult
 from decaf.maven import Gav, Resolution
-from decaf.pipeline import Ctx, MergeWriter, Settings, _discover_nested, chain_for, process_artifact
+from decaf.pipeline import Ctx, MergeWriter, MirrorWriter, Settings, _discover_nested, chain_for, process_artifact
 from decaf.scanner import Artifact, ArtifactKind
 
 
@@ -1089,3 +1090,187 @@ def test_family_classpath_single_file_input_has_no_input_group(make_jar, tmp_pat
     jar = make_jar("solo.jar", {"com/s/S.class": b"s"})
     ctx = make_ctx(tmp_path, writing_runner({}))
     assert _family_classpath(Artifact(jar, "solo.jar", ArtifactKind.ARCHIVE), jar, ctx) == [jar]
+
+
+def marker_checker(calls=None):
+    """Fake check: FLAG = flagged (name), NOTE = noted (type), ENV = unchecked, else clean."""
+
+    def _check(jobs, *, timeout, cpu_budget):
+        if calls is not None:
+            calls.append(jobs)
+        out = []
+        for job in jobs:
+            results = []
+            for f in job.files:
+                text = Path(f).read_text()
+                if "FLAG" in text:
+                    results.append(check.FileResult(
+                        "flagged", kinds=("name",), errors=1, first="1: cannot find symbol: variable xx",
+                    ))
+                elif "NOTE" in text:
+                    results.append(check.FileResult("noted", kinds=("type",), errors=1))
+                elif "ENV" in text:
+                    results.append(check.unchecked("absent classes"))
+                else:
+                    results.append(check.FileResult("clean"))
+            out.append(results)
+        return out
+
+    return _check
+
+
+def _app(make_jar):
+    return make_jar("app.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"})
+
+
+def test_flagged_file_replaced_by_clean_retry(make_jar, tmp_path: Path):
+    jar = _app(make_jar)
+    runner = writing_runner({
+        "vineflower": {"com/x/A.java": "class A {} // FLAG", "com/x/B.java": "class B {}"},
+        "cfr": {"com/x/A.java": "class A { /* cfr */ }"},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok" and not report.partial
+    assert report.flagged == [] and report.missing_classes == 0
+    assert [(a.engine, a.level, a.flagged) for a in report.attempts] == [
+        ("vineflower", "archive", 1), ("cfr", "class", 0),
+    ]
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "class A { /* cfr */ }"
+    assert report.check["checked"] == 2 and report.check["flagged"] == 0
+    retry_target = runner.calls[1][1]
+    assert sorted(p.name for p in retry_target.rglob("*.class")) == ["A.class"]
+
+
+def test_all_engines_flagged_keeps_first_file_and_is_partial(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({name: {"com/x/A.java": f"class A {{}} // FLAG {name}"} for name in ENGINES})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.partial and report.missing_classes == 0
+    assert report.flagged == [{
+        "path": "com/x/A.java", "engine": "vineflower", "kinds": ["name"],
+        "errors": 1, "first": "1: cannot find symbol: variable xx",
+    }]
+    assert "FLAG vineflower" in (tmp_path / "out/src/com/x/A.java").read_text()
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
+    assert report.check["flagged"] == 1
+
+
+def test_unchecked_retry_file_does_not_replace_held_file(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}, "cfr": {"com/x/A.java": "// ENV"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    ctx.chain = ["vineflower", "cfr"]
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// FLAG"
+    assert report.flagged[0]["engine"] == "vineflower"
+
+
+def test_kotlin_retry_file_does_not_replace_held_java(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}, "cfr": {"com/x/A.kt": "class A"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    ctx.chain = ["vineflower", "cfr"]
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]  # the held class was retried
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// FLAG"
+    assert not (tmp_path / "out/src/com/x/A.kt").exists()
+
+
+def test_noted_files_are_written_and_not_partial(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "// NOTE"}}), checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert not report.partial and [a.engine for a in report.attempts] == ["vineflower"]
+    assert report.check["noted"] == 1 and report.check["kinds"]["type"] == 1
+
+
+def test_no_fallback_writes_and_reports_flagged(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}})
+    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.partial and report.flagged[0]["path"] == "com/x/A.java"
+    assert [a.engine for a in report.attempts] == ["vineflower"]
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// FLAG"
+
+
+def test_without_checker_the_flow_is_unchanged(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}}))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.check is None and report.flagged == [] and not report.partial
+    assert [(a.engine, a.flagged) for a in report.attempts] == [("vineflower", 0)]
+
+
+def test_newer_class_version_is_not_sent(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": _class_header(69)})  # Java 25 class, java_major 21
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}), checker=marker_checker(calls))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert calls == []
+    assert report.check["unchecked_reasons"]["newer class version"] == 1
+    assert report.check["needs_java"] == 25
+
+
+def test_package_info_is_not_checked_or_counted(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    calls: list = []
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}", "com/x/package-info.java": "// FLAG"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(calls))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [Path(f).name for f in calls[0][0].files] == ["A.java"]
+    assert (tmp_path / "out/src/com/x/package-info.java").is_file()
+    assert report.check["checked"] == 1 and report.flagged == []
+
+
+def test_check_trees_returns_none_after_interrupt(make_jar, tmp_path: Path):
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import _check_trees, _Held
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    tree = tmp_path / "tree"
+    (tree / "com/x").mkdir(parents=True)
+    (tree / "com/x/A.java").write_text("// FLAG")
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
+    PROCESSES.kill_all()
+    try:
+        assert _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx) is None
+    finally:
+        PROCESSES.reset()
+    assert calls == []
+
+
+def test_clean_check_writes_the_same_tree(make_jar, tmp_path: Path):
+    jar = _app(make_jar)
+    files = {"vineflower": {"com/x/A.java": "class A {}", "com/x/B.java": "class B {}"}}
+    plain, checked = tmp_path / "plain", tmp_path / "checked"
+    plain.mkdir()
+    checked.mkdir()
+    r1, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), make_ctx(plain, writing_runner(files)))
+    r2, _ = process_artifact(
+        Artifact(jar, "app.jar", ArtifactKind.ARCHIVE),
+        make_ctx(checked, writing_runner(files), checker=marker_checker()),
+    )
+
+    def tree(root: Path) -> dict[str, str]:
+        return {p.relative_to(root).as_posix(): p.read_text() for p in (root / "out").rglob("*.java")}
+
+    assert tree(plain) == tree(checked)
+    assert [(a.engine, a.level) for a in r1.attempts] == [(a.engine, a.level) for a in r2.attempts]
+    assert r1.check is None and r2.check["checked"] == 2
+
+
+def test_two_files_with_one_stem_in_one_output(make_jar, tmp_path: Path):
+    jar = make_jar("mr.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {
+        "META-INF/versions/9/com/x/A.java": "// FLAG",
+        "com/x/A.java": "class A {}",
+    }})
+    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok" and report.flagged == [] and not report.partial
+    assert report.attempts[0].flagged == 1 and report.check["checked"] == 1  # the check ran; the clean file won
+    assert (tmp_path / "out/mr.jar/com/x/A.java").read_text() == "class A {}"
