@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from .pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
+from .memory import gb
 
 _AR = {f.name for f in dataclasses.fields(ArtifactReport)}
 _EA = {f.name for f in dataclasses.fields(EngineAttempt)}
@@ -162,9 +163,22 @@ def render_ending(
     if resource_only:
         sources_line += f" · {resource_only} resource-only"
     console.print(f"[dim]{'Sources':<{_BODY_LABEL_WIDTH}}[/]  {sources_line}")
+    peaks = [
+        (a.peak_rss_mb, r.rel, a.engine)
+        for r in report.artifacts for a in r.attempts if a.peak_rss_mb is not None
+    ]
+    budget = report.settings.get("memory_budget_mb") or 0
+    if peaks:
+        peak, rel, engine = min(peaks, key=lambda p: (-p[0], p[1]))
+        lead = f"budget {gb(budget)}" if budget else "no cap"
+        console.print(
+            f"[dim]{'Memory':<{_BODY_LABEL_WIDTH}}[/]  {lead} · largest peak {gb(peak)} "
+            f"({escape(rel)}, {escape(engine)})"
+        )
 
     missing = sum(r.missing_classes for r in report.artifacts)
     stubbed = sum(len(r.stubs) for r in report.artifacts)
+    out_of_heap = sum(1 for r in report.artifacts for a in r.attempts if a.out_of_memory)
     warnings = []
     if missing:
         warnings.append(f"{missing} missing classes")
@@ -174,8 +188,13 @@ def render_ending(
         warnings.append(f"{t['collisions']} collisions")
     if t["network_misses"]:
         warnings.append(f"{t['network_misses']} network fallbacks")
+    if out_of_heap:
+        warnings.append(f"{out_of_heap} attempts ran out of heap")
     if warnings:
         console.print(f"[dim]{'Warnings':<{_BODY_LABEL_WIDTH}}[/]  " + " · ".join(warnings))
+    if out_of_heap:
+        hint = f"raise --memory (now {gb(budget)}) or lower -j" if budget else "set --memory or lower -j"
+        console.print(f"[dim]hint: {hint}[/]")
 
     failed = [r for r in report.artifacts if r.outcome == "failed"]
     if failed:
@@ -247,7 +266,8 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
         for a in r.attempts:
             console.print(
                 f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} "
-                f"java_files={a.java_files} stubbed={a.stubbed}"
+                f"java_files={a.java_files} stubbed={a.stubbed} "
+                f"peak_rss_mb={a.peak_rss_mb} heap_mb={a.heap_mb} out_of_memory={a.out_of_memory}"
             )
             if a.stderr_tail:
                 console.print(f"    [dim]{escape(a.stderr_tail)}[/]")
@@ -259,3 +279,21 @@ def render_network_fallbacks(console: Console, report: RunReport) -> None:
     for r in report.artifacts:
         if (r.sources_miss or "").startswith("network:"):
             console.print(f"{r.rel}: {escape(r.sources_miss)}")
+
+
+def render_memory(console: Console, report: RunReport) -> None:
+    """The 10 engine attempts with the largest peak memory (#98)."""
+    rows = [
+        (a.peak_rss_mb, r.rel, a)
+        for r in report.artifacts for a in r.attempts if a.peak_rss_mb is not None
+    ]
+    if not rows:
+        console.print("no memory data in this report (an older decaf wrote it, or no engine ran)")
+        return
+    rows.sort(key=lambda row: (-row[0], row[1]))
+    for peak, rel, a in rows[:10]:
+        heap = "no cap" if a.heap_mb is None else f"heap {gb(a.heap_mb)}"
+        line = f"{gb(peak):>8}  {heap:<12}  {escape(a.engine)} {escape(a.level)}  {escape(rel)}"
+        if a.out_of_memory:
+            line += "  [yellow]out of heap[/]"
+        console.print(line)
