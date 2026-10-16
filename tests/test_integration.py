@@ -8,8 +8,8 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from decaf.cli import app
 from decaf import stubs
+from decaf.cli import app
 from decaf.engines import ENGINE_ORDER, ENGINES, ensure_engine, find_java, run_engine
 
 pytestmark = [pytest.mark.slow, pytest.mark.network]

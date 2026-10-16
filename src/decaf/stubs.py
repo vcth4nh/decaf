@@ -34,7 +34,10 @@ _ENGINES: dict[str, _Markers] = {
     ),
     "fernflower": _Markers(
         b"$FF: ",
-        re.compile(r"(?:^[ \t]*|->[ \t]*)// \$FF: (?!renamed from: )", re.MULTILINE),
+        re.compile(  # only the stub forms: "$FF: synthetic method" and the like mark clean code
+            r"(?:^[ \t]*|->[ \t]*)// \$FF: (?:Couldn't be decompiled|Limits for .+ are exceeded\.)",
+            re.MULTILINE,
+        ),
         None,
     ),
     "cfr": _Markers(

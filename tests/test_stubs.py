@@ -67,9 +67,12 @@ VF_INLINE = (
 )
 VF_LAMBDA = "class A {\n   Runnable r = () -> // $VF: Couldn't be decompiled\n   ;\n}\n"
 
-# Built from Fernflower 253 ClassWriter.methodToJava: the default text, or a limit message.
+# Built from Fernflower 253 ClassWriter.methodToJava and LimitContainer: the default text, or a limit message.
 FF_METHOD = "class A {\n   public void m() {\n      // $FF: Couldn't be decompiled\n   }\n}\n"
-FF_LIMIT = "class A {\n   public void m() {\n      // $FF: Method exceeds the decompiler limit\n   }\n}\n"
+FF_LIMIT = (
+    "class A {\n   public void m() {\n"
+    "      // $FF: Limits for direct nodes are exceeded. Current value: 20001, limit: 20000\n   }\n}\n"
+)
 
 # Real CFR 0.152 output: jenkins-core-2.568.1 hudson/Util.java (trimmed).
 CFR_METHOD = (
@@ -173,6 +176,10 @@ def test_scan_reads_windows_line_ends(tmp_path, engine, text, errors):
         ("vineflower", '      lines.add("$VF: Unable to decompile class");\n'),
         ("vineflower", f"      // $VF: Could not inline inconsistent finally blocks\n      // {VF_PLEASE}\n      try {{\n"),
         ("fernflower", "   // $FF: renamed from: a\n   public int field1;\n"),
+        ("fernflower", "   // $FF: synthetic class\n   static class A$1 {\n"),
+        ("fernflower", "   // $FF: synthetic field\n   static boolean $assertionsDisabled;\n"),
+        ("fernflower", "   // $FF: synthetic method\n   private static E[] $values() {\n"),
+        ("fernflower", "   // $FF: bridge method\n   public Object get() {\n"),
         ("jd", "      // Byte code: goto -> 12\n"),
         ("vineflower", CFR_METHOD),
         ("cfr", VF_METHOD),

@@ -2163,3 +2163,45 @@ def test_run_stubbed_inner_class_file_is_written_without_a_retry(fake_env, make_
     assert [a.engine for a in r.attempts] == ["vineflower"]  # A$1 is no expected stem: no retry
     assert (tmp_path / "out/a.jar/com/x/A$1.java").read_text() == STUB_TEXT["vineflower"]
     assert [s["path"] for s in r.stubs] == ["com/x/A$1.java"]
+
+
+def test_run_multi_release_stubs_keep_both_versions(fake_env, make_jar, tmp_path):
+    """p/A and META-INF/versions/9/p/A share a stem; each version is its own held file."""
+    input_dir = tmp_path / "in"
+    make_jar("mr.jar", {"p/A.class": b"a", "META-INF/versions/9/p/A.class": b"a9"}, base=input_dir)
+    base = stub_engine({"vineflower": {"p/A", "META-INF/versions/9/p/A"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name != "cfr":
+            return base(spec, jar_path, target, dest, timeout, java=java)
+        out = Path(dest) / "p/A.java"  # real CFR writes the package path, once
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("// cfr\nclass A {}\n")
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    out = tmp_path / "out/mr.jar"
+    assert (out / "p/A.java").read_text() == "// cfr\nclass A {}\n"
+    assert (out / "META-INF/versions/9/p/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["path"] for s in r.stubs] == ["META-INF/versions/9/p/A.java"]
+    assert [(a.engine, a.stubbed) for a in r.attempts] == [("vineflower", 2), ("cfr", 0)]
+
+
+def test_run_multi_release_versioned_stub_is_not_retried(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("mr.jar", {"p/A.class": b"a", "META-INF/versions/9/p/A.class": b"a9"}, base=input_dir)
+    calls: list[str] = []
+    base = stub_engine({"vineflower": {"META-INF/versions/9/p/A"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        calls.append(spec.name)
+        return base(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    out = tmp_path / "out/mr.jar"
+    assert calls == ["vineflower"]  # a versioned key is no expected stem: no retry
+    assert (out / "p/A.java").read_text() == "// vineflower\nclass X {}\n"
+    assert (out / "META-INF/versions/9/p/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["path"] for s in r.stubs] == ["META-INF/versions/9/p/A.java"] and r.partial

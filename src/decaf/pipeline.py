@@ -394,7 +394,20 @@ class _Held:
     """Stubbed engine files kept out of the output until a clean retry replaces them (#96)."""
 
     root: Path | None = None  # a _tmp_dir, made at the first stub
-    files: dict[str, tuple[str, stubs.Stub]] = field(default_factory=dict)  # stem -> (engine, stub)
+    files: dict[str, tuple[str, stubs.Stub]] = field(default_factory=dict)  # key -> (engine, stub)
+
+
+def _held_key(rel: str) -> str:
+    """A held file's key: normalize_java_rel's stem, but META-INF/versions/N/ stays (#96).
+
+    Each version of a multi-release class is its own file, so neither may evict the other.
+    """
+    for marker in _CONTAINER_ROOTS:
+        idx = rel.find(marker)
+        if idx != -1:
+            rel = rel[idx + len(marker) :]
+            break
+    return rel[: -len(PurePosixPath(rel).suffix)]
 
 
 def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> int:
@@ -406,9 +419,8 @@ def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> int:
     found = stubs.scan(tree, engine)
     for stub in found:
         src = tree / stub.path
-        norm = normalize_java_rel(stub.path)
-        stem = norm[: -len(PurePosixPath(norm).suffix)]  # the produced_stems rule
-        if stem in held.files:
+        key = _held_key(stub.path)
+        if key in held.files:
             src.unlink()
             continue
         if held.root is None:
@@ -416,15 +428,17 @@ def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> int:
         target = held.root / stub.path
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(src, target)
-        held.files[stem] = (engine, stub)
+        held.files[key] = (engine, stub)
     return len(found)
 
 
-def _release_held(held: _Held, clean: set[str]) -> None:
-    """Drop the held file of each class that a retry wrote without a stub."""
-    for stem in clean & held.files.keys():
-        _, stub = held.files.pop(stem)
-        (held.root / stub.path).unlink(missing_ok=True)
+def _release_held(held: _Held, tree: Path) -> None:
+    """Drop the held file of each class that this retry output holds without a stub."""
+    for p in tree.rglob("*"):
+        if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES:
+            entry = held.files.pop(_held_key(p.relative_to(tree).as_posix()), None)
+            if entry is not None:
+                (held.root / entry[1].path).unlink(missing_ok=True)
 
 
 def _write_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
@@ -510,9 +524,8 @@ def _retry_missing_classes(
             java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
             report.collisions += collisions
-            clean = produced_stems(dest)
-            produced |= clean
-            _release_held(held, clean)
+            produced |= produced_stems(dest)
+            _release_held(held, dest)
             missing = expected - produced - held.files.keys()
     _write_held(artifact.rel, ctx, report, held)
     report.missing_classes = len(missing)
