@@ -901,20 +901,21 @@ def _decompile_batch(
     done: list[ArtifactReport] = []
     requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
     for i, (a, target, report, stems, _) in enumerate(members):
-        report.attempts.append(
-            EngineAttempt(name, "batch", res.returncode, res.timed_out,
-                          len(produced[i]), res.stderr_tail)
-        )
+        attempt = EngineAttempt(name, "batch", res.returncode, res.timed_out,
+                                len(produced[i]), res.stderr_tail)
+        report.attempts.append(attempt)
         if i not in trees:
             requeue.append((a, target, report))
             continue
         try:
+            held = _Held()
+            attempt.stubbed = _hold_stubs(trees[i], name, ctx, held)
             java, collisions = ctx.writer.add_tree(trees[i], a.rel)
             report.java_files += java
             report.collisions += collisions
             report.method = name
             report.classes = len(stems)
-            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:], _Held())
+            _retry_missing_classes(a, target, stems, produced[i], ctx, report, ctx.chain[1:], held)
             report.outcome = "ok"
         except Exception:
             report.outcome = "failed"
