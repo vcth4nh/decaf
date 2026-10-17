@@ -409,7 +409,7 @@ def main(
     config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
     jobs: Annotated[int, typer.Option("--jobs", "-j", min=0, help="Parallel decompile workers (0 = min(4, cpus))")] = 0,
     cpus: Annotated[int, typer.Option("--cpus", min=0, help="Total CPU budget across all workers (0 = all cores minus one)")] = 0,
-    memory_budget: Annotated[Optional[str], typer.Option("--memory", help="Engine heap budget for all JVMs together, e.g. 8g (0 = no cap; default: 80% of RAM)")] = None,
+    memory_budget: Annotated[Optional[str], typer.Option("--memory", help="Engine heap budget for all JVMs together, e.g. 8g (0 = no cap; default: 80% of RAM, at most 25% of RAM for one JVM)")] = None,
     timeout: Annotated[float, typer.Option("--timeout", help="Per-archive engine timeout, seconds")] = 600.0,
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
@@ -446,7 +446,7 @@ def main(
             except ValueError:
                 raise _fail("--memory: use a size like 8g or 8192m, or 0 for no cap")
             if 0 < memory_mb < memory.SLOT_MIN_MB:
-                raise _fail("--memory: at least 1.3 GB (1 GiB of heap and 300 MB of JVM overhead for one job)")
+                raise _fail("--memory: at least 1.3 GB (1 GiB of heap and 327 MB of JVM overhead for one job)")
         try:
             cfg = load_config(config, extra_repos=repo or [])
         except ConfigError as exc:

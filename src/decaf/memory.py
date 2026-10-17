@@ -11,10 +11,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-OVERHEAD_MB = 300  # RSS of one JVM above its -Xmx (probe: 188 MB median, 286 MB max)
+OVERHEAD_MB = 300  # RSS of one JVM above its -Xmx, without the G1 tables (2026-10-17 runs: 232 MB max)
+G1_TABLES_DIV = 50  # the G1 tables take about 1/50 of the heap (NMT, Java 21, 1-12 GB heaps)
 FLOOR_MB = 1024  # the smallest heap of one job
-SLOT_MIN_MB = FLOOR_MB + OVERHEAD_MB  # 1324: one job's part of the budget, at least
+SLOT_MIN_MB = 1351  # the smallest share whose heap is FLOOR_MB: 1351 - 300 - 27 = 1024
 DEFAULT_SHARE = 0.80  # the default budget: 80% of the RAM
+JVM_DEFAULT_SHARE = 0.25  # the JVM's own default maximum heap: 25% of the RAM
 
 _CGROUP_FILES = (
     Path("/sys/fs/cgroup/memory.max"),  # cgroup v2: bytes, or "max"
@@ -96,28 +98,41 @@ def default_budget_mb() -> int | None:
     return int(ram * DEFAULT_SHARE) if ram else None
 
 
+def default_cap_mb() -> int | None:
+    """The cap on one JVM's heap with the auto budget: the JVM default, so no JVM gets more than in 1.10.0."""
+    ram = total_ram_mb()
+    return int(ram * JVM_DEFAULT_SHARE) if ram else None
+
+
+def heap_in(share_mb: int) -> int:
+    """The -Xmx that keeps a JVM's RSS inside its share: the share less the overhead and the G1 tables."""
+    return share_mb - OVERHEAD_MB - share_mb // G1_TABLES_DIV
+
+
 @dataclass(frozen=True)
 class MemoryPlan:
     budget_mb: int  # 0 = no cap
     jobs: int
     slot_mb: int  # budget_mb // jobs; 0 with no cap
+    cap_mb: int = 0  # the largest heap of one JVM; 0 = none (the auto budget sets it)
 
     def heap_mb(self, weight: int = 1) -> int | None:
         """The -Xmx of a JVM with this scheduler weight (a whale has 2); None = no cap."""
         if not self.budget_mb:
             return None
-        return max(256, min(weight, self.jobs) * self.slot_mb - OVERHEAD_MB)
+        heap = max(256, heap_in(min(weight, self.jobs) * self.slot_mb))
+        return min(heap, self.cap_mb) if self.cap_mb else heap
 
 
 NO_CAP = MemoryPlan(0, 1, 0)
 
 
-def plan(budget_mb: int, jobs: int) -> MemoryPlan:
+def plan(budget_mb: int, jobs: int, cap_mb: int = 0) -> MemoryPlan:
     """Split the budget as --cpus does: equal slots, and fewer jobs when a slot is below the floor."""
     if budget_mb <= 0:
         return MemoryPlan(0, jobs, 0)
     jobs = max(1, min(jobs, budget_mb // SLOT_MIN_MB))
-    return MemoryPlan(budget_mb, jobs, budget_mb // jobs)
+    return MemoryPlan(budget_mb, jobs, budget_mb // jobs, cap_mb)
 
 
 def estimate_heap_mb(engine: str, class_bytes: int) -> int | None:

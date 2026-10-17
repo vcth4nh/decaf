@@ -2295,24 +2295,33 @@ def test_run_reports_the_memory_plan(fake_env, make_jar, tmp_path):
     )
     s = report.settings
     assert (s["jobs"], s["cpu_budget"]) == (4, 2)  # the memory clamp left 4 jobs for 8 cpus
-    assert (s["memory_budget_mb"], s["heap_mb"], s["whale_heap_mb"]) == (6553, 1338, 2976)
-    line = "engine memory: up to 6.4 GB (4 jobs, 1.3 GB heap each; a whale gets 2.9 GB)"
+    assert (s["memory_budget_mb"], s["heap_mb"], s["whale_heap_mb"]) == (6553, 1306, 2911)
+    assert s["heap_cap_mb"] is None  # an explicit budget keeps the plain shares
+    line = "engine memory: up to 6.4 GB (4 jobs, 1.3 GB heap each; a whale gets 2.8 GB)"
     assert ("memory", line) in events
     kinds = [k for k, _ in events]
     assert kinds.index("scan") < kinds.index("memory") < kinds.index("decompile")
 
 
-def test_run_auto_budget_uses_the_ram(fake_env, make_jar, tmp_path, monkeypatch):
+def test_run_auto_budget_uses_the_ram_and_caps_each_jvm(fake_env, make_jar, tmp_path, monkeypatch):
     from decaf import memory
 
     input_dir = tmp_path / "in"
-    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
-    monkeypatch.setattr(memory, "default_budget_mb", lambda: 10000)
+    make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    monkeypatch.setattr(memory, "total_ram_mb", lambda: 12500)  # auto: budget 10000, cap 3125
+    seen: list[int | None] = []
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+        seen.append(heap_mb)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
     report = run(
-        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=2, cpus=2, memory_mb=None),
-        runner=capped_engine,
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=4, cpus=4, memory_mb=None),
+        runner=engine,
     )
-    assert (report.settings["memory_budget_mb"], report.settings["heap_mb"]) == (10000, 4700)
+    s = report.settings
+    assert (s["memory_budget_mb"], s["heap_mb"], s["whale_heap_mb"], s["heap_cap_mb"]) == (10000, 2150, 3125, 3125)
+    assert seen == [3125]  # the whale gets the cap, not its 4600 MB share: the JVM default of 1.10.0
 
 
 def test_run_unknown_ram_means_no_cap(fake_env, make_jar, tmp_path, monkeypatch):
@@ -2320,7 +2329,7 @@ def test_run_unknown_ram_means_no_cap(fake_env, make_jar, tmp_path, monkeypatch)
 
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
-    monkeypatch.setattr(memory, "default_budget_mb", lambda: None)
+    monkeypatch.setattr(memory, "total_ram_mb", lambda: None)
     events: list[tuple[str, str]] = []
     report = run(
         Settings(input=input_dir, output=tmp_path / "out", maven=False, memory_mb=None),
@@ -2328,6 +2337,7 @@ def test_run_unknown_ram_means_no_cap(fake_env, make_jar, tmp_path, monkeypatch)
         on_event=lambda k, s, d: events.append((k, d)),
     )
     assert (report.settings["memory_budget_mb"], report.settings["heap_mb"]) == (0, None)
+    assert report.settings["heap_cap_mb"] is None
     assert ("memory", "engine memory: no cap (RAM size unknown; set --memory)") in events
 
 
@@ -2389,10 +2399,10 @@ def test_run_gives_each_jvm_its_heap(fake_env, make_jar, tmp_path):
         runner=engine,
     )
     heaps = {(t, e): h for t, e, h in seen if e == "vineflower"}
-    assert heaps == {("whale.jar", "vineflower"): 3700, ("small.jar", "vineflower"): 1700}  # 2 x 2000 - 300
-    assert [h for _, e, h in seen if e == "cfr"] == [1700]  # the class retry runs in its artifact's slot
+    assert heaps == {("whale.jar", "vineflower"): 3620, ("small.jar", "vineflower"): 1660}  # heap_in(4000), heap_in(2000)
+    assert [h for _, e, h in seen if e == "cfr"] == [1660]  # the class retry runs in its artifact's slot
     attempts = {r.rel: [(a.engine, a.heap_mb) for a in r.attempts] for r in report.artifacts}
-    assert attempts["small.jar"] == [("vineflower", 1700), ("cfr", 1700)]
+    assert attempts["small.jar"] == [("vineflower", 1660), ("cfr", 1660)]
 
 
 def test_run_without_a_cap_records_no_heap(fake_env, make_jar, tmp_path):
@@ -2443,7 +2453,7 @@ def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path):
         runner=capped_engine,
         on_warn=warnings.append,
     )
-    assert "big.jar: vineflower may need about 1.2 GB of heap; its share is 1.1 GB (raise --memory)" in warnings
+    assert "big.jar: vineflower may need about 1.2 GB of heap; its share is 1.0 GB (raise --memory)" in warnings
     warnings.clear()
     run(
         Settings(input=input_dir, output=tmp_path / "out2", maven=False, jobs=1, cpus=1, memory_mb=0),
@@ -2451,6 +2461,23 @@ def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path):
         on_warn=warnings.append,
     )
     assert not any("may need about" in w for w in warnings)  # no cap, no share warning
+
+
+def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_path, monkeypatch):
+    from decaf import pipeline
+
+    input_dir = tmp_path / "in"
+    _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
+    reads: list[Path] = []
+    monkeypatch.setattr(pipeline, "_class_bytes", lambda target: reads.append(target) or 0)
+    for out, engine in (("out", "jd"), ("out2", "vineflower")):
+        run(
+            Settings(input=input_dir, output=tmp_path / out, maven=False, jobs=1, cpus=1, memory_mb=1400,
+                     engine=engine),
+            runner=capped_engine,
+            on_warn=lambda text: None,
+        )
+        assert len(reads) == (engine == "vineflower")  # jd has no size model: decaf does not read the jar
 
 
 def test_run_gives_batch_eligible_jars_no_estimate(fake_env, tmp_path):

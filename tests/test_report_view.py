@@ -438,6 +438,16 @@ def test_ending_warns_and_hints_about_out_of_heap():
     assert "hint: set --memory or lower -j" in console.file.getvalue()
 
 
+def test_ending_hint_names_the_auto_cap():
+    console = _console()
+    rep = _mem_report(_mem_art("w.jar", _att(8300, heap=8022, oom=True)), budget=25670)
+    rep.settings["heap_cap_mb"] = 8022  # the auto budget: a lower -j cannot give one JVM more
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert (
+        "hint: raise --memory (now 25.1 GB; the auto budget caps one JVM at 7.8 GB) or lower -j"
+    ) in console.file.getvalue()
+
+
 def test_render_artifact_shows_the_memory_fields():
     console = _console()
     render_artifact(console, _mem_report(_mem_art("w.jar", _att(5247, oom=True))), ["w.jar"])

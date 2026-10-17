@@ -549,8 +549,8 @@ def test_decompile_batch_passes_one_slot_of_heap(make_jar, tmp_path):
     ctx = _batch_ctx(tmp_path, batch)
     ctx.memory_plan = memory.plan(8000, 4)
     done, requeue = _decompile_batch([m1, m2], ctx)
-    assert requeue == [] and seen["heap"] == 1700
-    assert [r.attempts[0].heap_mb for r in done] == [1700, 1700]
+    assert requeue == [] and seen["heap"] == 1660
+    assert [r.attempts[0].heap_mb for r in done] == [1660, 1660]
 
 
 def test_decompile_batch_empty_member_file_requeues(make_jar, tmp_path):

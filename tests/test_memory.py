@@ -1,7 +1,7 @@
 import pytest
 
 from decaf import memory
-from decaf.memory import OVERHEAD_MB, SLOT_MIN_MB
+from decaf.memory import FLOOR_MB, SLOT_MIN_MB
 
 
 @pytest.mark.parametrize(
@@ -61,9 +61,22 @@ def test_default_budget_is_80_percent(monkeypatch):
     assert memory.default_budget_mb() is None
 
 
+def test_default_cap_is_the_jvm_default_heap(monkeypatch):
+    monkeypatch.setattr(memory, "total_ram_mb", lambda: 10000)
+    assert memory.default_cap_mb() == 2500  # 25% of the RAM: the JVM's own default maximum heap
+    monkeypatch.setattr(memory, "total_ram_mb", lambda: None)
+    assert memory.default_cap_mb() is None
+
+
+def test_heap_in_leaves_the_jvm_overhead():
+    assert memory.heap_in(SLOT_MIN_MB) == FLOOR_MB  # 1351 - 300 - 27
+    assert memory.heap_in(SLOT_MIN_MB - 1) < FLOOR_MB
+    assert memory.heap_in(24576) == 23785  # 24576 - 300 - 491: the G1 tables grow with the heap
+
+
 @pytest.mark.parametrize(
     "budget, heap, whale",
-    [(6553, 1338, 2976), (13107, 2976, 6252), (26214, 6253, 12806)],  # 80% of 8, 16, 32 GiB
+    [(6553, 1306, 2911), (13107, 2911, 6121), (26214, 6122, 12544)],  # 80% of 8, 16, 32 GiB
 )
 def test_plan_examples_with_four_jobs(budget, heap, whale):
     p = memory.plan(budget, 4)
@@ -71,18 +84,18 @@ def test_plan_examples_with_four_jobs(budget, heap, whale):
 
 
 def test_plan_clamps_jobs_to_the_floor():
-    assert memory.plan(6553, 8).jobs == 4  # 6553 // 1324
+    assert memory.plan(6553, 8).jobs == 4  # 6553 // 1351
     p = memory.plan(SLOT_MIN_MB, 4)
     assert (p.jobs, p.heap_mb(1)) == (1, 1024)
 
 
 def test_plan_whale_alone_in_one_job_gets_one_slot():
     p = memory.plan(2000, 1)
-    assert p.heap_mb(2) == p.heap_mb(1) == 2000 - OVERHEAD_MB
+    assert p.heap_mb(2) == p.heap_mb(1) == 1660  # 2000 - 300 - 40
 
 
 def test_plan_small_auto_budget_keeps_one_job():
-    assert (memory.plan(800, 4).jobs, memory.plan(800, 4).heap_mb(1)) == (1, 500)
+    assert (memory.plan(800, 4).jobs, memory.plan(800, 4).heap_mb(1)) == (1, 484)
     assert memory.plan(400, 4).heap_mb(1) == 256
 
 
@@ -90,6 +103,19 @@ def test_plan_without_a_cap():
     p = memory.plan(0, 4)
     assert (p.budget_mb, p.jobs, p.heap_mb(1), p.heap_mb(2)) == (0, 4, None, None)
     assert memory.NO_CAP.heap_mb(2) is None
+    assert memory.plan(0, 4, cap_mb=8022) == memory.plan(0, 4)  # no budget: the cap goes too
+
+
+def test_plan_cap_stops_each_heap():
+    p = memory.plan(25670, 4, cap_mb=8022)  # 31.3 GiB of RAM: the auto budget and the auto cap
+    assert (p.jobs, p.heap_mb(1), p.heap_mb(2)) == (4, 5989, 8022)  # the whale: 12278 without the cap
+    p = memory.plan(25670, 2, cap_mb=8022)
+    assert (p.heap_mb(1), p.heap_mb(2)) == (8022, 8022)
+
+
+def test_plan_cap_below_the_floor_wins():
+    p = memory.plan(1638, 4, cap_mb=512)  # 2 GiB of RAM: the JVM default, as in 1.10.0
+    assert (p.jobs, p.heap_mb(1), p.heap_mb(2)) == (1, 512, 512)
 
 
 def test_estimate_heap():
@@ -101,9 +127,15 @@ def test_estimate_heap():
 
 def test_budget_line():
     assert memory.budget_line(memory.plan(26214, 4)) == (
-        "engine memory: up to 25.6 GB (4 jobs, 6.1 GB heap each; a whale gets 12.5 GB)"
+        "engine memory: up to 25.6 GB (4 jobs, 6.0 GB heap each; a whale gets 12.2 GB)"
     )
-    assert memory.budget_line(memory.plan(2000, 1)) == "engine memory: up to 2.0 GB (1 job, 1.7 GB heap)"
+    assert memory.budget_line(memory.plan(2000, 1)) == "engine memory: up to 2.0 GB (1 job, 1.6 GB heap)"
+    assert memory.budget_line(memory.plan(25670, 4, cap_mb=8022)) == (
+        "engine memory: up to 25.1 GB (4 jobs, 5.8 GB heap each; a whale gets 7.8 GB)"
+    )
+    assert memory.budget_line(memory.plan(25670, 2, cap_mb=8022)) == (
+        "engine memory: up to 25.1 GB (2 jobs, 7.8 GB heap each)"
+    )
     assert memory.budget_line(memory.plan(0, 4)) == "engine memory: no cap (--memory 0)"
     assert memory.budget_line(memory.plan(0, 4), ram_unknown=True) == (
         "engine memory: no cap (RAM size unknown; set --memory)"

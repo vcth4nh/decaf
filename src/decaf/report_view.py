@@ -193,7 +193,13 @@ def render_ending(
     if warnings:
         console.print(f"[dim]{'Warnings':<{_BODY_LABEL_WIDTH}}[/]  " + " · ".join(warnings))
     if out_of_heap:
-        hint = f"raise --memory (now {gb(budget)}) or lower -j" if budget else "set --memory or lower -j"
+        cap = report.settings.get("heap_cap_mb")
+        if not budget:
+            hint = "set --memory or lower -j"
+        elif cap:  # a lower -j cannot give one JVM more than the cap of the auto budget
+            hint = f"raise --memory (now {gb(budget)}; the auto budget caps one JVM at {gb(cap)}) or lower -j"
+        else:
+            hint = f"raise --memory (now {gb(budget)}) or lower -j"
         console.print(f"[dim]hint: {hint}[/]")
 
     failed = [r for r in report.artifacts if r.outcome == "failed"]

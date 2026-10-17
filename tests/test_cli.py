@@ -1193,7 +1193,7 @@ def test_memory_option_wiring(tmp_path: Path, make_jar, monkeypatch, args, mb):
 @pytest.mark.parametrize(
     "value, message",
     [("12", "use a size like 8g or 8192m"), ("12k", "use a size like 8g or 8192m"),
-     ("1g", "at least 1.3 GB")],
+     ("1g", "at least 1.3 GB"), ("1350m", "1 GiB of heap and 327 MB of JVM overhead")],
 )
 def test_memory_option_rejects(tmp_path: Path, make_jar, monkeypatch, value, message):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")

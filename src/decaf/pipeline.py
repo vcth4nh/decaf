@@ -71,6 +71,8 @@ def _share_warning(artifact: Artifact, target: Path, ctx: Ctx) -> str | None:
     if heap is None:
         return None
     engine = ctx.chain[0]
+    if memory.estimate_heap_mb(engine, 0) is None:
+        return None  # no size model: do not read the jar
     est = memory.estimate_heap_mb(engine, _class_bytes(target))
     if est is None or est <= heap:
         return None
@@ -1149,10 +1151,11 @@ def run(
     total_cpus = settings.cpus or max(1, (os.cpu_count() or 1) - 1)  # auto: leave one core free
     jobs = settings.jobs or min(4, os.cpu_count() or 1)
     jobs = max(1, min(jobs, total_cpus))
-    budget_mb = settings.memory_mb
+    budget_mb, cap_mb = settings.memory_mb, 0
     if budget_mb is None:
         budget_mb = memory.default_budget_mb() or 0  # unknown RAM: no cap
-    mem_plan = memory.plan(budget_mb, jobs)
+        cap_mb = memory.default_cap_mb() or 0  # auto: no JVM gets more heap than the JVM default
+    mem_plan = memory.plan(budget_mb, jobs, cap_mb)
     jobs = mem_plan.jobs  # fewer jobs when a share would fall below the heap floor (#98)
     cpu_budget = max(1, total_cpus // jobs)
     fetch_jobs = min(8, 2 * jobs)  # IO-sized: stage 1 waits on the network, not cores
@@ -1333,6 +1336,7 @@ def run(
                     "memory_budget_mb": mem_plan.budget_mb,
                     "heap_mb": mem_plan.heap_mb(1),
                     "whale_heap_mb": mem_plan.heap_mb(2),
+                    "heap_cap_mb": mem_plan.cap_mb or None,
                     "timeout": settings.timeout,
                     "repos": maven._redacted(settings.repos),
                     "chain": chain,
