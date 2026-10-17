@@ -23,8 +23,9 @@ into a source tree that mirrors your input, or one merged package tree with
   cached. `--fresh-maven` re-derives verdicts; `decaf cache clean`
   wipes cached sources and verdicts.
 - **Five engines, automatic fallback:** Vineflower → CFR → Fernflower →
-  Procyon → JD-CLI. If an engine crashes, times out, or misses classes,
-  the next one takes over (whole-archive and per-class retries).
+  Procyon → JD-CLI. If an engine crashes, times out, misses classes, or
+  writes a stub in place of a method body, the next one takes over
+  (whole-archive and per-class retries).
 - **Compile check:** decaf compiles each decompiled file with `javac` and
   gives a class with decompiler errors to the next engine (see
   [Compile check](#compile-check)).
@@ -165,11 +166,12 @@ decaf uses the `javac` of the `java` on PATH. It must be at least as new as
 the class files: for newer class files, decaf prints the Java version that the
 check needs.
 
-The check makes a run longer. In one test, a run on `jenkins.war` took 23
-minutes with the check and 7 minutes without it, because the check examines
-most files of a war and its retries use more engines. A run on one library jar
-took 24 seconds with the check and 12 seconds without it. `--no-check` turns
-the check off.
+The check makes a run longer. In one test on `jenkins.war`, a normal run took
+7 minutes with the check and 5 minutes without it. Maven supplied the sources
+of 46 of its 80 archives, and decaf does not check Maven sources. With
+`--no-maven`, decaf decompiled and checked all 80 archives: 23 minutes with the
+check, 7 minutes without it. A run on one library jar took 24 seconds with the
+check and 12 seconds without it. `--no-check` turns the check off.
 
 ## Configuration
 

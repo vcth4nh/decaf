@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import __version__, casefs, check, engines, maven
+from . import __version__, casefs, check, engines, maven, stubs
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -87,6 +87,7 @@ class EngineAttempt:
     timed_out: bool
     java_files: int
     stderr_tail: str
+    stubbed: int = 0  # files of this attempt's output that hold an engine stub marker (#96)
     flagged: int = 0  # files that the compile check flagged in this attempt's output (#99)
 
 
@@ -108,15 +109,17 @@ class ArtifactReport:
     missing_classes: int = 0
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
+    stubs: list[dict] = field(default_factory=list)  # classes left stubbed in the output (#96)
     failure: str | None = None
     flagged: list[dict] = field(default_factory=list)  # files that stay flagged by the compile check (#99)
     check: dict | None = None  # compile-check counts over the final output; None = no check ran
 
     @property
     def partial(self) -> bool:
-        """ok but degraded: engine holes, flagged files, or decompiled sources-less due to network."""
+        """ok but degraded: engine holes, stubs, flagged files, or decompiled sources-less due to network."""
         return self.outcome == "ok" and (
             self.missing_classes > 0
+            or bool(self.stubs)
             or bool(self.flagged)
             or (self.sources_miss or "").startswith("network:")
         )
@@ -284,6 +287,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "network_misses": sum(
             1 for r in reports if (r.sources_miss or "").startswith("network:")
         ),
+        "stubbed_classes": sum(len(r.stubs) for r in reports),
         "checked_files": sum((r.check or {}).get("checked", 0) for r in reports),
         "flagged_files": sum((r.check or {}).get("flagged", 0) for r in reports),
         "noted_files": sum((r.check or {}).get("noted", 0) for r in reports),
@@ -400,20 +404,21 @@ def produced_stems(dest: Path) -> set[str]:
     }
 
 
-def _source_key(rel: str) -> str:
-    """Stem of a source or class file, but a META-INF/versions/N/ file keeps its prefix (#99).
+def _held_key(rel: str) -> str:
+    """A held file's key: normalize_java_rel's stem, but META-INF/versions/N/ stays (#96).
 
-    The variants of a multi-release class are separate files: the compile check holds,
-    replaces, and version-checks each one on its own.
+    Each version of a multi-release class is its own file, so neither may evict the other.
     """
-    norm = normalize_java_rel(rel)
-    head = rel[: len(rel) - len(norm)]
-    i = head.rfind("META-INF/versions/")
-    return (head[i:] if i != -1 else "") + norm.rsplit(".", 1)[0]
+    for marker in _CONTAINER_ROOTS:
+        idx = rel.find(marker)
+        if idx != -1:
+            rel = rel[idx + len(marker) :]
+            break
+    return rel[: -len(PurePosixPath(rel).suffix)]
 
 
 def _class_versions(source: Path) -> dict[str, int]:
-    """Lowest class-file major version of each top-level class file, by _source_key (#99)."""
+    """Lowest class-file major version of each top-level class file, by _held_key (#99)."""
     out: dict[str, int] = {}
 
     def keep(key: str, major: int | None) -> None:
@@ -424,7 +429,7 @@ def _class_versions(source: Path) -> dict[str, int]:
         for p in source.rglob("*.class"):
             if "$" not in p.name:
                 with open(p, "rb") as f:
-                    keep(_source_key(p.relative_to(source).as_posix()), check.class_major(f.read(8)))
+                    keep(_held_key(p.relative_to(source).as_posix()), check.class_major(f.read(8)))
         return out
     try:
         with zipfile.ZipFile(source) as zf:
@@ -432,7 +437,7 @@ def _class_versions(source: Path) -> dict[str, int]:
                 if not name.endswith(".class") or "$" in name.rsplit("/", 1)[-1]:
                     continue
                 with zf.open(name) as f:
-                    keep(_source_key(name), check.class_major(f.read(8)))
+                    keep(_held_key(name), check.class_major(f.read(8)))
     except (zipfile.BadZipFile, OSError):
         pass
     return out
@@ -488,19 +493,25 @@ def _family_classpath(artifact: Artifact, source: Path, ctx: Ctx) -> list[Path]:
 _METADATA_SOURCES = ("package-info.java", "module-info.java")
 
 
+@dataclass(frozen=True)
+class _HeldFile:
+    """One held engine file and its reasons: a stub (#96), a flagged check result (#99), or both."""
+
+    engine: str
+    path: str  # posix path in the engine output, and under _Held.root
+    stub: stubs.Stub | None = None
+    result: check.FileResult | None = None  # None: the file had no check
+
+
 @dataclass
 class _Held:
-    """Per-artifact compile-check state (#99): held flagged files and final results."""
+    """Engine files kept out of the output until a clean retry replaces them (#96, #99)."""
 
-    root: Path | None = None  # a _tmp_dir, made at the first flagged file
-    files: dict[str, tuple[str, str, check.FileResult]] = field(default_factory=dict)  # key -> (engine, path, result)
-    checks: dict[str, check.FileResult] = field(default_factory=dict)  # key -> result of the written file
-    versions: dict[str, int] | None = None  # key -> class major version, read once (keys: _source_key)
-
-
-def _held_stems(held: _Held) -> set[str]:
-    """Class stems of the held files: a retry re-decompiles all variants of a class."""
-    return {normalize_java_rel(rel).rsplit(".", 1)[0] for _, rel, _ in held.files.values()}
+    root: Path | None = None  # a _tmp_dir, made at the first held file
+    files: dict[str, _HeldFile] = field(default_factory=dict)  # key -> held file
+    written: set[str] = field(default_factory=set)  # keys of the files that went to the writer
+    checks: dict[str, check.FileResult] = field(default_factory=dict)  # key -> check result of the written file
+    versions: dict[str, int] | None = None  # key -> class major version, read once
 
 
 def _check_trees(
@@ -526,7 +537,7 @@ def _check_trees(
             if suffix == ".kt":
                 by_path[rel] = check.unchecked("kotlin")
                 continue
-            key = _source_key(rel)
+            key = _held_key(rel)
             major = held.versions.get(key) or held.versions.get(key.split("$", 1)[0])
             if limit is not None and major is not None and major > limit:
                 by_path[rel] = check.unchecked(
@@ -545,69 +556,98 @@ def _check_trees(
 
 
 def _apply_hold(
-    tree: Path, results: dict[str, check.FileResult], engine: str, held: _Held, ctx: Ctx
+    tree: Path,
+    found: dict[str, stubs.Stub],
+    results: dict[str, check.FileResult] | None,
+    engine: str,
+    held: _Held,
+    ctx: Ctx,
 ) -> int:
-    """Hold back the flagged files of one output; a passing file replaces a held one (#99).
+    """Hold back the stubbed (#96) and flagged (#99) files of one output; returns the flagged count.
 
-    Files match by _source_key. The files of one output never replace or delete each other.
+    Files match by _held_key. A retry file replaces a held file only when it has no stub and
+    is not flagged; a held file without a stub (flagged only) also needs a retry file that
+    passes the check. The files of one output never replace or delete each other, and a
+    retry of a held class drops its copy of a variant that the writer already has.
     """
     flagged = 0
-    written = set(held.checks)  # files that an earlier output wrote
+    retried = set(held.files)  # held keys; a held class is retried when its key is an expected stem
     held_now: set[str] = set()
-    for rel, result in sorted(results.items()):
-        p = tree / rel
-        if not p.is_file():
+    for p in sorted(tree.rglob("*")):
+        if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
             continue
-        key = _source_key(rel)
-        if result.status == "flagged":
-            flagged += 1
-        if key in written:
-            p.unlink()  # a retry repeats a variant that an earlier output wrote
-        elif key in held_now:
+        rel = p.relative_to(tree).as_posix()
+        key = _held_key(rel)
+        stub = found.get(rel)
+        result = results.get(rel) if results is not None else None
+        is_flagged = result is not None and result.status == "flagged"
+        flagged += is_flagged
+        if key in held_now:
             continue  # a sibling with the same key (root and WEB-INF/classes): keep both
-        elif key in held.files:
-            if result.passes:
-                _, held_rel, _ = held.files.pop(key)
-                (held.root / held_rel).unlink(missing_ok=True)
-                held.checks[key] = result
+        if key in held.files:
+            if stub is None and not is_flagged and (
+                held.files[key].stub is not None or result is None or result.passes
+            ):  # an unchecked file can replace a stub (a known loss), not a flagged file
+                old = held.files.pop(key)
+                (held.root / old.path).unlink(missing_ok=True)
+                held.written.add(key)
+                if result is not None:
+                    held.checks[key] = result
             else:
                 p.unlink()  # the earlier engine's held file stays
-        elif result.status == "flagged":
+        elif key in held.written and normalize_java_rel(rel).rsplit(".", 1)[0] in retried:
+            p.unlink()  # another variant of a held class: the writer has it already
+        elif stub is not None or is_flagged:
             if held.root is None:
                 held.root = _tmp_dir(ctx)
             target = held.root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(p, target)
-            held.files[key] = (engine, rel, result)
+            held.files[key] = _HeldFile(engine, rel, stub, result)
             held_now.add(key)
         else:
-            held.checks[key] = result
+            held.written.add(key)
+            if result is not None:
+                held.checks[key] = result
     return flagged
 
 
-def _hold_flagged(
+def _hold_output(
     tree: Path, engine: str, artifact: Artifact, source: Path, ctx: Ctx, held: _Held
-) -> int:
-    """Check one engine output before the writer copies it; returns its flagged count."""
+) -> tuple[int, int]:
+    """The hold step of one engine output, before the writer copies it: (stubbed, flagged).
+
+    Empty source files are no output (Fernflower writes one when a whole class fails),
+    so they go (#96). Then the stub scan and the compile check decide what to hold.
+    """
+    for p in list(tree.rglob("*")):
+        if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and p.stat().st_size == 0:
+            p.unlink()
+    found = {s.path: s for s in stubs.scan(tree, engine)}
     results = _check_trees([(tree, artifact, source, held)], ctx)
-    if results is None:
-        return 0
-    return _apply_hold(tree, results[0], engine, held, ctx)
+    flagged = _apply_hold(tree, found, results[0] if results is not None else None, engine, held, ctx)
+    return len(found), flagged
 
 
-def _finish_held(artifact: Artifact, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
-    """End of the chain: write the held files and fill the check report (#99)."""
+def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
+    """End of the chain: write the held files (the first engine's file) and list them (#96, #99)."""
     if held.files:
-        java, collisions = ctx.writer.add_tree(held.root, artifact.rel)
+        java, collisions = ctx.writer.add_tree(held.root, rel)
         report.java_files += java
         report.collisions += collisions
-        for key, (engine, rel, result) in held.files.items():
-            held.checks[key] = result
-            report.flagged.append({
-                "path": rel, "engine": engine, "kinds": list(result.kinds),
-                "errors": result.errors, "first": result.first,
-            })
-        report.flagged.sort(key=lambda e: e["path"])
+        ordered = sorted(held.files.values(), key=lambda f: f.path)
+        report.stubs = [
+            {"path": f.path, "engine": f.engine, "methods": f.stub.methods, "errors": list(f.stub.errors)}
+            for f in ordered if f.stub is not None
+        ]
+        report.flagged = [
+            {"path": f.path, "engine": f.engine, "kinds": list(f.result.kinds),
+             "errors": f.result.errors, "first": f.result.first}
+            for f in ordered if f.result is not None and f.result.status == "flagged"
+        ]
+        for key, f in held.files.items():
+            if f.result is not None:
+                held.checks[key] = f.result
     if ctx.checker is not None:
         report.check = check.summary(list(held.checks.values()))
 
@@ -652,39 +692,41 @@ def _retry_missing_classes(
     ctx: Ctx,
     report: ArtifactReport,
     chain: list[str],
-    held: _Held | None = None,
+    held: _Held,
 ) -> None:
-    held = held if held is not None else _Held()
-    missing = expected - produced - _held_stems(held)
-    for name in chain:
-        if engines.PROCESSES.closed:
-            break
-        retry = missing | (_held_stems(held) & expected)
-        if not retry:
-            break
-        retry_tree = _extract_failed_classes(source, retry, ctx)
-        if retry_tree is None:
-            break
-        dest = _tmp_dir(ctx)
-        if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
-        res = ctx.runner(
-            ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
-            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
-            **_stream_kw_for(ctx, name, artifact.rel),
-        )
-        attempt = EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
-        report.attempts.append(attempt)
-        if res.java_files > 0:
-            attempt.flagged = _hold_flagged(dest, name, artifact, source, ctx, held)
-            java, collisions = ctx.writer.add_tree(dest, artifact.rel)
-            report.java_files += java
-            report.collisions += collisions
-            produced |= produced_stems(dest)
-            missing = expected - produced - _held_stems(held)
+    """Retry missing and held classes down the chain; then write what stays held (#96, #99)."""
+    missing = expected - produced - held.files.keys()
+    try:
+        for name in chain:
+            if engines.PROCESSES.closed:
+                break
+            retry = missing | (held.files.keys() & expected)  # a versioned key is no expected stem (#96)
+            if not retry:
+                break
+            retry_tree = _extract_failed_classes(source, retry, ctx)
+            if retry_tree is None:
+                break
+            dest = _tmp_dir(ctx)
+            if ctx.on_event is not None:
+                ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
+            res = ctx.runner(
+                ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
+                ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+                **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+                **_stream_kw_for(ctx, name, artifact.rel),
+            )
+            attempt = EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
+            report.attempts.append(attempt)
+            if res.java_files > 0:
+                attempt.stubbed, attempt.flagged = _hold_output(dest, name, artifact, source, ctx, held)
+                java, collisions = ctx.writer.add_tree(dest, artifact.rel)
+                report.java_files += java
+                report.collisions += collisions
+                produced |= produced_stems(dest)
+                missing = expected - produced - held.files.keys()
+    finally:
+        _finish_held(artifact.rel, ctx, report, held)  # also when a retry raises: the held files are not lost
     report.missing_classes = len(missing)
-    _finish_held(artifact, ctx, report, held)
 
 
 def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport) -> None:
@@ -711,7 +753,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         attempt = EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail)
         report.attempts.append(attempt)
         if res.java_files > 0:
-            attempt.flagged = _hold_flagged(dest, name, artifact, source, ctx, held)
+            attempt.stubbed, attempt.flagged = _hold_output(dest, name, artifact, source, ctx, held)
             java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
             report.collisions += collisions
@@ -1054,12 +1096,12 @@ def _decompile_batch(
     trees: dict[int, Path] = {}
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
     helds: dict[int, _Held] = {}
-    flagged: dict[int, int] = {}
+    counts: dict[int, tuple[int, int]] = {}  # member -> (stubbed, flagged) of the batch output
     try:
         if res.returncode == 0 and not res.timed_out:
             for p in sorted(dest.rglob("*")):
-                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
-                    continue
+                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES or p.stat().st_size == 0:
+                    continue  # an empty file is no output (#96)
                 rel = p.relative_to(dest).as_posix()
                 stem = normalize_java_rel(rel)[: -len(p.suffix)]
                 i = _owner_index(stem, owners)
@@ -1072,19 +1114,21 @@ def _decompile_batch(
                 produced[i].add(stem)
         order = sorted(trees)
         helds = {i: _Held() for i in order}
+        found = {i: {s.path: s for s in stubs.scan(trees[i], name)} for i in order}
         results = _check_trees([(trees[i], members[i][0], members[i][1], helds[i]) for i in order], ctx)
-        if results is not None:
-            for i, by_path in zip(order, results):
-                flagged[i] = _apply_hold(trees[i], by_path, name, helds[i], ctx)
+        for n, i in enumerate(order):
+            by_path = results[n] if results is not None else None
+            counts[i] = (len(found[i]), _apply_hold(trees[i], found[i], by_path, name, helds[i], ctx))
     except Exception:
         trees = {}  # split unusable; every member requeues and redoes solo (self-healing)
 
     done: list[ArtifactReport] = []
     requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
     for i, (a, target, report, stems, _) in enumerate(members):
+        stubbed, flagged = counts.get(i, (0, 0))
         report.attempts.append(
             EngineAttempt(name, "batch", res.returncode, res.timed_out,
-                          len(produced[i]), res.stderr_tail, flagged.get(i, 0))
+                          len(produced[i]), res.stderr_tail, stubbed=stubbed, flagged=flagged)
         )
         if i not in trees:
             requeue.append((a, target, report))
