@@ -2,9 +2,10 @@ from pathlib import Path
 
 import pytest
 
+from decaf import check
 from decaf.engines import ENGINES, EngineResult
 from decaf.maven import Gav, Resolution
-from decaf.pipeline import Ctx, MergeWriter, Settings, _discover_nested, chain_for, process_artifact
+from decaf.pipeline import Ctx, MergeWriter, MirrorWriter, Settings, _discover_nested, chain_for, process_artifact
 from decaf.scanner import Artifact, ArtifactKind
 
 
@@ -25,7 +26,7 @@ def writing_runner(files_per_engine: dict[str, dict[str, str]]):
     return _run
 
 
-def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=False, engine="vineflower", writer=None):
+def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=False, engine="vineflower", writer=None, checker=None):
     settings = Settings(
         input=tmp_path,
         output=tmp_path / "out",
@@ -47,6 +48,8 @@ def make_ctx(tmp_path: Path, runner, *, resolver=None, fallback=True, maven=Fals
         sources_cache=tmp_path / "cache",
         runner=runner,
         resolver=resolver or (lambda *a, **k: None),
+        checker=checker,
+        java_major=21,
     )
 
 
@@ -1055,3 +1058,448 @@ def test_partial_predicate_and_totals():
     assert not replace(ok, outcome="failed", missing_classes=3).partial
     totals = compute_totals([ok, replace(ok, rel="b.jar", missing_classes=1)])
     assert totals["partial"] == 1
+    assert replace(ok, flagged=[{"path": "a/B.java"}]).partial
+    assert not replace(ok, outcome="failed", flagged=[{"path": "a/B.java"}]).partial
+    with_check = replace(ok, rel="c.jar", check={"checked": 5, "flagged": 1, "noted": 2, "unchecked": 3})
+    t = compute_totals([with_check, ok])
+    assert (t["checked_files"], t["flagged_files"], t["noted_files"], t["unchecked_files"]) == (5, 1, 2, 3)
+
+
+def test_new_report_fields_have_backward_compatible_defaults():
+    from decaf.pipeline import ArtifactReport, EngineAttempt
+
+    assert EngineAttempt("cfr", "archive", 0, False, 1, "").flagged == 0
+    r = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    assert r.flagged == [] and r.check is None
+    assert Settings(input=Path("in"), output=Path("out")).check is True
+
+
+def _class_header(major: int) -> bytes:
+    return b"\xca\xfe\xba\xbe\x00\x00" + major.to_bytes(2, "big") + b"rest"
+
+
+def test_class_versions_reads_top_level_majors(make_jar, tmp_path: Path):
+    from decaf.pipeline import _class_versions
+
+    jar = make_jar("v.jar", {
+        "WEB-INF/classes/com/a/A.class": _class_header(69),
+        "WEB-INF/classes/com/a/A$1.class": _class_header(70),
+        "com/b/B.class": _class_header(52),
+        "META-INF/versions/9/com/b/B.class": _class_header(53),
+        "x.txt": b"no",
+    })
+    assert _class_versions(jar) == {"com/a/A": 69, "com/b/B": 52, "META-INF/versions/9/com/b/B": 53}
+
+
+def test_family_classpath_war_and_nested_jar(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    dep = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    other = make_jar("other.jar", {"com/o/O.class": b"o"})
+    war = make_jar("app.war", {
+        "WEB-INF/classes/com/w/W.class": b"w",
+        "WEB-INF/lib/dep.jar": dep.read_bytes(),
+        "WEB-INF/lib/other.jar": other.read_bytes(),
+    })
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    war_a = Artifact(war, "app.war", ArtifactKind.ARCHIVE)
+    nested = _discover_nested(war_a, ctx)
+    cp = _family_classpath(war_a, war, ctx)
+    assert (cp[0] / "com/w/W.class").is_file()  # the class root comes first
+    assert cp[1] == war
+    assert [p.name for p in cp[2:]] == ["dep.jar", "other.jar"]
+    dep_a = next(a for a in nested if a.rel.endswith("dep.jar"))
+    cp_dep = _family_classpath(dep_a, dep_a.path, ctx)
+    assert cp_dep[0] == dep_a.path
+    assert cp_dep[1:] == [cp[0], war, cp[3]]  # parent group without the duplicate dep.jar
+
+
+def test_family_classpath_war_without_lib_keeps_its_class_root(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    war = make_jar("only.war", {"WEB-INF/classes/com/w/W.class": b"w"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    a = Artifact(war, "only.war", ArtifactKind.ARCHIVE)
+    _discover_nested(a, ctx)  # no nested archives
+    cp = _family_classpath(a, war, ctx)
+    assert len(cp) == 2 and (cp[0] / "com/w/W.class").is_file() and cp[1] == war
+
+
+def test_family_classpath_input_group_and_class_tree(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    a_jar = make_jar("in/a.jar", {"com/a/A.class": b"a"})
+    b_jar = make_jar("in/b.jar", {"com/b/B.class": b"b"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    ctx.input_group = [a_jar, b_jar, tmp_path / "in"]
+    assert _family_classpath(Artifact(a_jar, "a.jar", ArtifactKind.ARCHIVE), a_jar, ctx) == [
+        a_jar, b_jar, tmp_path / "in",
+    ]
+    tree = tmp_path / "copy"
+    tree.mkdir()
+    t = Artifact(tmp_path / "in", "_classes", ArtifactKind.CLASS_TREE)
+    assert _family_classpath(t, tree, ctx) == [tree, a_jar, b_jar, tmp_path / "in"]
+
+
+def test_family_classpath_single_file_input_has_no_input_group(make_jar, tmp_path: Path):
+    from decaf.pipeline import _family_classpath
+
+    jar = make_jar("solo.jar", {"com/s/S.class": b"s"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    assert _family_classpath(Artifact(jar, "solo.jar", ArtifactKind.ARCHIVE), jar, ctx) == [jar]
+
+
+def marker_checker(calls=None):
+    """Fake check: FLAG = flagged (name), NOTE = noted (type), ENV = unchecked, else clean."""
+
+    def _check(jobs, *, timeout, cpu_budget):
+        if calls is not None:
+            calls.append(jobs)
+        out = []
+        for job in jobs:
+            results = []
+            for f in job.files:
+                text = Path(f).read_text()
+                if "FLAG" in text:
+                    results.append(check.FileResult(
+                        "flagged", kinds=("name",), errors=1, first="1: cannot find symbol: variable xx",
+                    ))
+                elif "NOTE" in text:
+                    results.append(check.FileResult("noted", kinds=("type",), errors=1))
+                elif "ENV" in text:
+                    results.append(check.unchecked("absent classes"))
+                else:
+                    results.append(check.FileResult("clean"))
+            out.append(results)
+        return out
+
+    return _check
+
+
+def _app(make_jar):
+    return make_jar("app.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"})
+
+
+def test_flagged_file_replaced_by_clean_retry(make_jar, tmp_path: Path):
+    jar = _app(make_jar)
+    runner = writing_runner({
+        "vineflower": {"com/x/A.java": "class A {} // FLAG", "com/x/B.java": "class B {}"},
+        "cfr": {"com/x/A.java": "class A { /* cfr */ }"},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok" and not report.partial
+    assert report.flagged == [] and report.missing_classes == 0
+    assert [(a.engine, a.level, a.flagged) for a in report.attempts] == [
+        ("vineflower", "archive", 1), ("cfr", "class", 0),
+    ]
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "class A { /* cfr */ }"
+    assert report.check["checked"] == 2 and report.check["flagged"] == 0
+    retry_target = runner.calls[1][1]
+    assert sorted(p.name for p in retry_target.rglob("*.class")) == ["A.class"]
+
+
+def test_all_engines_flagged_keeps_first_file_and_is_partial(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({name: {"com/x/A.java": f"class A {{}} // FLAG {name}"} for name in ENGINES})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.partial and report.missing_classes == 0
+    assert report.flagged == [{
+        "path": "com/x/A.java", "engine": "vineflower", "kinds": ["name"],
+        "errors": 1, "first": "1: cannot find symbol: variable xx",
+    }]
+    assert "FLAG vineflower" in (tmp_path / "out/src/com/x/A.java").read_text()
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
+    assert report.check["flagged"] == 1
+
+
+def test_unchecked_retry_file_does_not_replace_held_file(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}, "cfr": {"com/x/A.java": "// ENV"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    ctx.chain = ["vineflower", "cfr"]
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// FLAG"
+    assert report.flagged[0]["engine"] == "vineflower"
+
+
+def test_kotlin_retry_file_does_not_replace_held_java(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}, "cfr": {"com/x/A.kt": "class A"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    ctx.chain = ["vineflower", "cfr"]
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]  # the held class was retried
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// FLAG"
+    assert not (tmp_path / "out/src/com/x/A.kt").exists()
+
+
+def test_noted_files_are_written_and_not_partial(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "// NOTE"}}), checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert not report.partial and [a.engine for a in report.attempts] == ["vineflower"]
+    assert report.check["noted"] == 1 and report.check["kinds"]["type"] == 1
+
+
+def test_no_fallback_writes_and_reports_flagged(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}})
+    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.partial and report.flagged[0]["path"] == "com/x/A.java"
+    assert [a.engine for a in report.attempts] == ["vineflower"]
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// FLAG"
+
+
+def test_without_checker_the_flow_is_unchanged(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}}))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.check is None and report.flagged == [] and not report.partial
+    assert [(a.engine, a.flagged) for a in report.attempts] == [("vineflower", 0)]
+
+
+def test_newer_class_version_is_not_sent(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": _class_header(69)})  # Java 25 class, java_major 21
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}), checker=marker_checker(calls))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert calls == []
+    assert report.check["unchecked_reasons"]["newer class version"] == 1
+    assert report.check["needs_java"] == 25
+
+
+def test_package_info_is_not_checked_or_counted(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    calls: list = []
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}", "com/x/package-info.java": "// FLAG"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(calls))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [Path(f).name for f in calls[0][0].files] == ["A.java"]
+    assert (tmp_path / "out/src/com/x/package-info.java").is_file()
+    assert report.check["checked"] == 1 and report.flagged == []
+
+
+def test_check_trees_returns_none_after_interrupt(make_jar, tmp_path: Path):
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import _check_trees, _Held
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    tree = tmp_path / "tree"
+    (tree / "com/x").mkdir(parents=True)
+    (tree / "com/x/A.java").write_text("// FLAG")
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
+    PROCESSES.kill_all()
+    try:
+        assert _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx) is None
+    finally:
+        PROCESSES.reset()
+    assert calls == []
+
+
+def test_clean_check_writes_the_same_tree(make_jar, tmp_path: Path):
+    jar = _app(make_jar)
+    files = {"vineflower": {"com/x/A.java": "class A {}", "com/x/B.java": "class B {}"}}
+    plain, checked = tmp_path / "plain", tmp_path / "checked"
+    plain.mkdir()
+    checked.mkdir()
+    r1, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), make_ctx(plain, writing_runner(files)))
+    r2, _ = process_artifact(
+        Artifact(jar, "app.jar", ArtifactKind.ARCHIVE),
+        make_ctx(checked, writing_runner(files), checker=marker_checker()),
+    )
+
+    def tree(root: Path) -> dict[str, str]:
+        return {p.relative_to(root).as_posix(): p.read_text() for p in (root / "out").rglob("*.java")}
+
+    assert tree(plain) == tree(checked)
+    assert [(a.engine, a.level) for a in r1.attempts] == [(a.engine, a.level) for a in r2.attempts]
+    assert r1.check is None and r2.check["checked"] == 2
+
+
+_MR9 = "META-INF/versions/9/com/x/A.java"
+
+
+def _run_mr(make_jar, tmp_path: Path, files: dict[str, dict[str, str]], *, fallback: bool, classes=None, calls=None):
+    """A multi-release jar in mirror mode; returns the report and the written {path: text}."""
+    jar = make_jar("mr.jar", classes or {"com/x/A.class": b"a", "META-INF/versions/9/com/x/A.class": b"a9"})
+    ctx = make_ctx(tmp_path, writing_runner(files), fallback=fallback, checker=marker_checker(calls),
+                   writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/mr.jar"
+    return report, {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
+
+
+def test_two_files_with_one_stem_in_one_output(make_jar, tmp_path: Path):
+    # The variants of a multi-release class are separate files: both are written, the flagged one is reported.
+    report, written = _run_mr(
+        make_jar, tmp_path, {"vineflower": {_MR9: "// FLAG", "com/x/A.java": "class A {}"}}, fallback=False,
+    )
+    assert written == {_MR9: "// FLAG", "com/x/A.java": "class A {}"}
+    assert [f["path"] for f in report.flagged] == [_MR9] and report.partial
+    assert report.check["checked"] == 2 and report.check["flagged"] == 1
+
+
+def test_sibling_that_does_not_pass_is_not_deleted(make_jar, tmp_path: Path):
+    report, written = _run_mr(
+        make_jar, tmp_path, {"vineflower": {_MR9: "// FLAG", "com/x/A.java": "// ENV"}}, fallback=False,
+    )
+    assert written == {_MR9: "// FLAG", "com/x/A.java": "// ENV"}
+    assert [f["path"] for f in report.flagged] == [_MR9]
+    assert report.check["unchecked_reasons"]["absent classes"] == 1
+
+
+def test_both_flagged_variants_are_written_and_reported(make_jar, tmp_path: Path):
+    report, written = _run_mr(
+        make_jar, tmp_path, {"vineflower": {_MR9: "// FLAG 9", "com/x/A.java": "// FLAG"}}, fallback=False,
+    )
+    assert written == {_MR9: "// FLAG 9", "com/x/A.java": "// FLAG"}
+    assert [f["path"] for f in report.flagged] == [_MR9, "com/x/A.java"]
+
+
+def test_same_key_sibling_in_one_output_is_not_deleted(make_jar, tmp_path: Path):
+    files = {"vineflower": {"WEB-INF/classes/com/x/A.java": "// FLAG", "com/x/A.java": "// ENV"}}
+    report, written = _run_mr(make_jar, tmp_path, files, fallback=False)
+    assert written == {"WEB-INF/classes/com/x/A.java": "// FLAG", "com/x/A.java": "// ENV"}
+    assert [f["path"] for f in report.flagged] == ["WEB-INF/classes/com/x/A.java"]
+
+
+def test_retry_of_a_held_class_keeps_the_written_variant(make_jar, tmp_path: Path):
+    # The retry re-decompiles both variants; the writer keeps its first copy of the clean one.
+    report, written = _run_mr(make_jar, tmp_path, {
+        "vineflower": {_MR9: "class A { /* vf 9 */ }", "com/x/A.java": "// FLAG"},
+        "cfr": {_MR9: "class A { /* cfr 9 */ }", "com/x/A.java": "class A { /* cfr */ }"},
+    }, fallback=True)
+    assert written == {_MR9: "class A { /* vf 9 */ }", "com/x/A.java": "class A { /* cfr */ }"}
+    assert report.flagged == [] and report.collisions == [] and not report.partial
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+
+
+def test_flagged_versioned_variant_is_not_retried(make_jar, tmp_path: Path):
+    # As for stubs (#96): a versioned key is no expected stem, so no retry.
+    report, written = _run_mr(make_jar, tmp_path, {
+        "vineflower": {_MR9: "// FLAG", "com/x/A.java": "class A {}"},
+        "cfr": {_MR9: "class A { /* cfr 9 */ }", "com/x/A.java": "class A { /* cfr */ }"},
+    }, fallback=True)
+    assert [a.engine for a in report.attempts] == ["vineflower"]
+    assert written == {_MR9: "// FLAG", "com/x/A.java": "class A {}"}
+    assert [f["path"] for f in report.flagged] == [_MR9] and report.partial
+
+
+def test_newer_multi_release_variant_is_not_sent(make_jar, tmp_path: Path):
+    calls: list = []
+    report, _ = _run_mr(
+        make_jar, tmp_path,
+        {"vineflower": {"META-INF/versions/25/com/x/A.java": "class A {}", "com/x/A.java": "class A {}"}},
+        fallback=False, calls=calls,
+        classes={"com/x/A.class": _class_header(52), "META-INF/versions/25/com/x/A.class": _class_header(69)},
+    )
+    sent = [Path(f).as_posix() for f in calls[0][0].files]
+    assert len(sent) == 1 and sent[0].endswith("/com/x/A.java") and "META-INF" not in sent[0]
+    assert report.check["unchecked_reasons"]["newer class version"] == 1 and report.check["needs_java"] == 25
+
+
+def test_decompile_batch_checks_once_and_retries_flagged_member(make_jar, tmp_path: Path):
+    from decaf.pipeline import _decompile_batch
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        for stem, text in (("com/a/A", "// FLAG"), ("com/b/B", "class B {}")):
+            out = Path(dest) / f"{stem}.java"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text)
+        return EngineResult(spec.name, 0, False, 2, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    calls: list = []
+    ctx = _batch_ctx(tmp_path, batch, chain=["vineflower", "cfr"])
+    ctx.runner = writing_runner({"cfr": {"com/a/A.java": "class A { /* cfr */ }"}})
+    ctx.checker = marker_checker(calls)
+    ctx.java_major = 21
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    assert len(calls) == 2 and len(calls[0]) == 2  # one call for the batch, one for the a.jar retry
+    a, b = done
+    assert (a.attempts[0].flagged, b.attempts[0].flagged) == (1, 0)
+    assert a.flagged == [] and not a.partial and a.attempts[-1].engine == "cfr"
+    assert b.check["checked"] == 1 and b.flagged == []
+    assert (tmp_path / "out/src/com/a/A.java").read_text() == "class A { /* cfr */ }"
+
+
+# One hold step for #96 stubs and #99 flags (spec "Interfaces", merge rule).
+_VF_STUB = "class A {\n   void m() {\n      // $VF: Couldn't be decompiled\n   }\n}\n"
+_CFR_STUB = "class A {\n    void m() {\n        /*\n         * This method has failed to decompile.\n         */\n    }\n}\n"
+
+
+def _run_one(make_jar, tmp_path: Path, files: dict[str, str], *, fallback: bool = True):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    ctx = make_ctx(tmp_path, writing_runner({k: {"com/x/A.java": v} for k, v in files.items()}),
+                   fallback=fallback, checker=marker_checker())
+    ctx.chain = ctx.chain[: len(files)] if fallback else ctx.chain
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    return report, (tmp_path / "out/src/com/x/A.java").read_text()
+
+
+def test_stubbed_and_flagged_file_is_listed_under_both_keys(make_jar, tmp_path: Path):
+    report, text = _run_one(make_jar, tmp_path, {"vineflower": _VF_STUB + "// FLAG\n"}, fallback=False)
+    assert [(a.stubbed, a.flagged) for a in report.attempts] == [(1, 1)]
+    assert [s["path"] for s in report.stubs] == ["com/x/A.java"]
+    assert [f["path"] for f in report.flagged] == ["com/x/A.java"]
+    assert text == _VF_STUB + "// FLAG\n" and report.partial and report.check["flagged"] == 1
+
+
+def test_flagged_retry_file_does_not_replace_a_stubbed_file(make_jar, tmp_path: Path):
+    report, text = _run_one(make_jar, tmp_path, {"vineflower": _VF_STUB, "cfr": "// FLAG cfr"})
+    assert text == _VF_STUB
+    assert [s["engine"] for s in report.stubs] == ["vineflower"] and report.flagged == []
+    assert [(a.engine, a.stubbed, a.flagged) for a in report.attempts] == [("vineflower", 1, 0), ("cfr", 0, 1)]
+
+
+def test_stubbed_retry_file_does_not_replace_a_flagged_file(make_jar, tmp_path: Path):
+    report, text = _run_one(make_jar, tmp_path, {"vineflower": "// FLAG", "cfr": _CFR_STUB})
+    assert text == "// FLAG"
+    assert [f["engine"] for f in report.flagged] == ["vineflower"] and report.stubs == []
+    assert [(a.engine, a.stubbed, a.flagged) for a in report.attempts] == [("vineflower", 0, 1), ("cfr", 1, 0)]
+
+
+def test_unchecked_retry_file_replaces_a_stubbed_file(make_jar, tmp_path: Path):
+    # A stub is a known loss; a stub-free file that the check cannot examine (absent classes) is better.
+    report, text = _run_one(make_jar, tmp_path, {"vineflower": _VF_STUB, "cfr": "// ENV"})
+    assert text == "// ENV"
+    assert report.stubs == [] and report.flagged == [] and not report.partial
+    assert report.check["unchecked_reasons"]["absent classes"] == 1
+
+
+def test_clean_retry_file_replaces_a_stubbed_and_flagged_file(make_jar, tmp_path: Path):
+    report, text = _run_one(make_jar, tmp_path, {"vineflower": _VF_STUB + "// FLAG\n", "cfr": "class A {}"})
+    assert text == "class A {}"
+    assert report.stubs == [] and report.flagged == [] and not report.partial
+    assert report.check["checked"] == 1 and report.check["flagged"] == 0
+
+
+def test_decompile_batch_holds_stubs_and_flags_in_one_step(make_jar, tmp_path: Path):
+    from decaf.pipeline import _decompile_batch
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        for stem, text in (("com/a/A", _VF_STUB), ("com/b/B", "// FLAG")):
+            out = Path(dest) / f"{stem}.java"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text)
+        return EngineResult(spec.name, 0, False, 2, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    calls: list = []
+    ctx = _batch_ctx(tmp_path, batch, chain=["vineflower", "cfr"])
+    ctx.runner = writing_runner({"cfr": {"com/a/A.java": "class A {}", "com/b/B.java": "class B {}"}})
+    ctx.checker = marker_checker(calls)
+    done, _ = _decompile_batch([m1, m2], ctx)
+    a, b = done
+    assert [(m.attempts[0].stubbed, m.attempts[0].flagged) for m in (a, b)] == [(1, 0), (0, 1)]
+    assert len(calls[0]) == 2  # one check call for the batch, one job for each member
+    assert a.stubs == b.stubs == [] and a.flagged == b.flagged == [] and not (a.partial or b.partial)
+    assert (tmp_path / "out/src/com/a/A.java").read_text() == "class A {}"
+    assert (tmp_path / "out/src/com/b/B.java").read_text() == "class B {}"

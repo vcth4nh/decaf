@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import decaf.engines as engines
-from decaf import casefs
+from decaf import casefs, check
 from decaf.engines import EngineResult
 from decaf.maven import Gav, Resolution
 from decaf.pipeline import DecafError, Settings, _case_failure, run
@@ -1271,7 +1271,7 @@ def test_run_passes_cds_dir_to_default_runner(monkeypatch, make_jar, tmp_path):
 
     monkeypatch.setattr(engines, "run_engine", spy)
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
-    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, check=False))
     assert seen["cds"] == tmp_path / "cache" / "engines"
 
 
@@ -1290,7 +1290,7 @@ def test_run_no_cds_below_java_19(monkeypatch, make_jar, tmp_path):
 
     monkeypatch.setattr(engines, "run_engine", spy)
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
-    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, check=False))
     assert seen["cds"] is None
 
 
@@ -1932,6 +1932,112 @@ def test_run_refuses_nested_archives_that_differ_only_by_case(fake_env, make_jar
     assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
     assert not (out / "app.war/WEB-INF/lib/A.jar").exists()
     assert report.totals["failed"] == 2
+
+
+def _marker_checker(calls):
+    def _check(jobs, *, timeout, cpu_budget):
+        calls.append(jobs)
+        return [
+            [check.FileResult("flagged", kinds=("name",), errors=1, first="1: x")
+             if "FLAG" in Path(f).read_text() else check.FileResult("clean") for f in job.files]
+            for job in jobs
+        ]
+    return _check
+
+
+def _flag_then_clean_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+    out = Path(dest) / "com/x/A.java"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("// FLAG" if spec.name == "vineflower" else "class A {}")
+    return EngineResult(spec.name, 0, False, 1, "")
+
+
+def test_run_injected_checker_reports_check_and_settings(fake_env, make_jar, tmp_path: Path):
+    input_dir = tmp_path / "in"
+    make_jar("app.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    calls: list = []
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=_flag_then_clean_engine, checker=_marker_checker(calls),
+    )
+    art = report.artifacts[0]
+    assert art.flagged == [] and art.check["checked"] == 1
+    assert [(a.engine, a.flagged) for a in art.attempts] == [("vineflower", 1), ("cfr", 0)]
+    assert report.totals["checked_files"] == 1
+    assert report.settings["check"] is True and report.settings["javac"] is None
+    assert calls[0][0].classpath == (input_dir / "app.jar",)  # own archive; the input group adds nothing new
+
+
+def test_run_no_check_setting_ignores_injected_checker(fake_env, make_jar, tmp_path: Path):
+    make_jar("app.jar", {"com/x/A.class": b"a"}, base=tmp_path / "in")
+    calls: list = []
+    report = run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, check=False),
+        runner=_flag_then_clean_engine, checker=_marker_checker(calls),
+    )
+    assert calls == [] and report.artifacts[0].check is None
+    assert report.settings["check"] is False
+
+
+def test_run_injected_runner_without_checker_has_no_check(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(check, "find_javac", lambda java: pytest.fail("must not look for javac"))
+    make_jar("app.jar", {"com/x/A.class": b"a"}, base=tmp_path / "in")
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=perfect_engine)
+    assert report.artifacts[0].check is None
+
+
+def _default_engines(monkeypatch):
+    monkeypatch.setattr(
+        engines, "run_engine",
+        lambda spec, jar, target, dest, timeout, **kw: perfect_engine(spec, jar, target, dest, timeout),
+    )
+    monkeypatch.setattr(
+        engines, "run_engine_batch",
+        lambda *a, **kw: pytest.fail("one artifact never batches"),
+    )
+
+
+def test_run_without_javac_warns_once_and_skips_check(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    _default_engines(monkeypatch)
+    monkeypatch.setattr(check, "find_javac", lambda java: None)
+    make_jar("app.jar", {"com/x/A.class": b"a"}, base=tmp_path / "in")
+    warns: list[str] = []
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), on_warn=warns.append)
+    assert warns == ["compile check skipped: no javac found for java"]
+    assert report.artifacts[0].check is None and report.settings["javac"] is None
+
+
+def test_run_install_failure_warns_and_skips_check(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    _default_engines(monkeypatch)
+    monkeypatch.setattr(check, "find_javac", lambda java: Path("/jdk/bin/javac"))
+
+    def broken_install(javac, major):
+        raise check.CheckError("checker compile failed: boom")
+
+    monkeypatch.setattr(check, "install", broken_install)
+    make_jar("app.jar", {"com/x/A.class": b"a"}, base=tmp_path / "in")
+    warns: list[str] = []
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), on_warn=warns.append)
+    assert warns == ["compile check skipped: checker compile failed: boom"]
+    assert report.artifacts[0].check is None
+
+
+def test_run_installs_and_binds_the_real_checker(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    _default_engines(monkeypatch)
+    monkeypatch.setattr(check, "find_javac", lambda java: Path("/jdk/bin/javac"))
+    monkeypatch.setattr(check, "install", lambda javac, major: tmp_path / "inst")
+    seen = {}
+
+    def fake_run_check(jobs, *, timeout, cpu_budget, java, install, tmp_root, cds_dir=None):
+        seen.update(java=java, install=install, cpu_budget=cpu_budget)
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    monkeypatch.setattr(check, "run_check", fake_run_check)
+    make_jar("app.jar", {"com/x/A.class": b"a"}, base=tmp_path / "in")
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    assert seen["install"] == tmp_path / "inst" and seen["java"] == "java" and seen["cpu_budget"] >= 1
+    assert report.settings["javac"] == str(Path("/jdk/bin/javac"))
+    assert report.artifacts[0].check["checked"] == 1
 
 
 STUB_TEXT = {

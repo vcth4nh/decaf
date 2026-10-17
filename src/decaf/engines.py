@@ -385,14 +385,14 @@ def _run_once(
     return _exec_command(spec, cmd, timeout, on_stderr_line)
 
 
-def _exec_command(
-    spec: EngineSpec,
+def run_process(
     cmd: list[str],
     timeout: float,
-    on_stderr_line: Callable[[str], None] | None,
-) -> EngineResult:
+    on_stderr_line: Callable[[str], None] | None = None,
+) -> tuple[int, bool, str]:
+    """Run one child JVM under the process registry: (returncode, timed_out, stderr tail)."""
     if PROCESSES.closed:
-        return EngineResult(spec.name, -1, False, 0, "interrupted")
+        return -1, False, "interrupted"
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
         **_SPAWN_KWARGS,
@@ -427,7 +427,17 @@ def _exec_command(
     finally:
         PROCESSES.unregister(proc)
     tail = (err or b"").decode(errors="replace")[-2000:]
-    return EngineResult(spec.name, proc.returncode or 0, timed_out, 0, tail)
+    return proc.returncode or 0, timed_out, tail
+
+
+def _exec_command(
+    spec: EngineSpec,
+    cmd: list[str],
+    timeout: float,
+    on_stderr_line: Callable[[str], None] | None,
+) -> EngineResult:
+    returncode, timed_out, tail = run_process(cmd, timeout, on_stderr_line)
+    return EngineResult(spec.name, returncode, timed_out, 0, tail)
 
 
 def run_engine_batch(

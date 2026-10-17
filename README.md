@@ -26,6 +26,9 @@ into a source tree that mirrors your input, or one merged package tree with
   Procyon → JD-CLI. If an engine crashes, times out, misses classes, or
   writes a stub in place of a method body, the next one takes over
   (whole-archive and per-class retries).
+- **Compile check:** decaf compiles each decompiled file with `javac` and
+  gives a class with decompiler errors to the next engine (see
+  [Compile check](#compile-check)).
 - **Engines auto-download** on first use (pinned versions, sha256-verified)
   into your user cache dir. Manage them with `decaf engines list|fetch|clean|update`.
 
@@ -34,6 +37,8 @@ into a source tree that mirrors your input, or one merged package tree with
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - Java 11+ on PATH (Java 21+ enables all five engines; Vineflower needs 17+,
   Fernflower 21+)
+- A JDK (with `javac`) for the compile check. With a JRE only, decaf runs
+  without the check and prints one note.
 - Linux, macOS, or Windows (the CPU budget is hard-enforced on Linux,
   hint-only elsewhere)
 - A case-sensitive output tree for archives whose classes differ only by case
@@ -137,6 +142,36 @@ merged into `OUTPUT/src/` by package — ready to open in an IDE. Duplicate clas
 deduped; conflicting duplicates are first-wins (deterministic by input path
 order) and recorded in the report. Container prefixes like `WEB-INF/classes/`
 are stripped. Resources are skipped (counted in the report).
+
+## Compile check
+
+After an engine writes a class, decaf compiles its source file alone with
+`javac` and writes no class files. This finds errors that the decompiler made,
+for example a variable that the engine renamed in its uses but not in its
+declaration. A class with a parse, name, or flow error goes to the next engine
+of the fallback chain, and the first version without such errors goes to the
+output. When all engines fail the check, the file of the first engine stays,
+the report lists it under `flagged`, and the artifact is partial (yellow `!`).
+Type errors, for example lost generic type arguments, are only counted
+(`noted`).
+
+The classpath of the check is the input itself: the archive, the other
+archives of the same war, fat jar, or input folder, and their
+`WEB-INF/classes` or `BOOT-INF/classes`. A file that refers to a class outside
+this classpath is not checked (`unchecked`), so an absent dependency never
+causes a false flag. Thus the check examines most files of a war or a fat jar,
+but few files of a single library jar without its dependencies.
+
+decaf uses the `javac` of the `java` on PATH. It must be at least as new as
+the class files: for newer class files, decaf prints the Java version that the
+check needs.
+
+The check makes a run longer. In one test on `jenkins.war`, a normal run took
+7 minutes with the check and 5 minutes without it. Maven supplied the sources
+of 46 of its 80 archives, and decaf does not check Maven sources. With
+`--no-maven`, decaf decompiled and checked all 80 archives: 23 minutes with the
+check, 7 minutes without it. A run on one library jar took 24 seconds with the
+check and 12 seconds without it. `--no-check` turns the check off.
 
 ## Configuration
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+from decaf import check
 from decaf.pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
 from decaf.report_view import (
     ReportError,
@@ -320,6 +321,58 @@ def test_ending_has_no_case_hint_without_case_failures():
     console = Console(file=buf, width=300, emoji=False, force_terminal=False, highlight=False)
     render_ending(console, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
     assert "fsutil" not in buf.getvalue()
+
+
+_FLAG = {"path": "a/B.java", "engine": "vineflower", "kinds": ["name"], "errors": 2,
+         "first": "3: cannot find symbol: variable xx"}
+
+
+def test_status_line_counts_flagged():
+    r = ArtifactReport(rel="j.jar", kind="archive", outcome="ok", method="vineflower",
+                       classes=3, java_files=3, flagged=[_FLAG])
+    assert _status_line(r) == "[yellow]![/] j.jar (vineflower, 3 classes, [yellow]1 flagged[/])"
+
+
+def test_ending_warnings_and_needs_java_line():
+    arts = [ArtifactReport(
+        rel="j.jar", kind="archive", outcome="ok", method="vineflower", flagged=[_FLAG],
+        check=check.summary([check.unchecked("newer class version", needs_java=25)] * 2),
+    )]
+    c = _console()
+    render_ending(c, report(artifacts=arts, totals=compute_totals(arts), settings={"java_major": 21}),
+                  output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    plain = c.file.getvalue()
+    assert "1 flagged files" in plain
+    assert "compile check: 2 files need Java 25+ (found Java 21)" in plain
+
+
+def test_render_artifact_check_lines():
+    a = ArtifactReport(
+        rel="j.jar", kind="archive", outcome="ok", method="vineflower",
+        attempts=[EngineAttempt("vineflower", "archive", 0, False, 3, "", flagged=1)],
+        flagged=[_FLAG],
+        check={**check.summary([check.unchecked("absent classes")]), "checked": 3, "flagged": 1},
+    )
+    c = _console()
+    render_artifact(c, report(artifacts=[a], totals=compute_totals([a])), ["j.jar"])
+    plain = c.file.getvalue()
+    assert "check: checked=3 flagged=1 noted=0 unchecked=1 (absent classes 1)" in plain
+    assert "flagged a/B.java (vineflower): name, 2 errors - 3: cannot find symbol: variable xx" in plain
+    assert "java_files=3 stubbed=0 flagged=1" in plain
+
+
+def test_old_report_without_check_keys_loads(tmp_path: Path):
+    data = json.loads(report().to_json())
+    for a in data["artifacts"]:
+        a.pop("flagged")
+        a.pop("check")
+        for at in a["attempts"]:
+            at.pop("flagged")
+    path = tmp_path / "decaf-report.json"
+    path.write_text(json.dumps(data))
+    loaded, _ = load_report(path)
+    assert all(a.flagged == [] and a.check is None for a in loaded.artifacts)
+    assert all(at.flagged == 0 for a in loaded.artifacts for at in a.attempts)
 
 
 _OOM_STUB = {"path": "p/A.java", "engine": "vineflower", "methods": 2, "errors": ["java.lang.OutOfMemoryError"]}
