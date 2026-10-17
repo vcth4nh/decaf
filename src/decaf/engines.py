@@ -268,6 +268,7 @@ if sys.platform == "win32":
 
     _K32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _PROCESS_VM_READ = 0x0010  # GetProcessMemoryInfo needs both rights (Microsoft docs)
 
     class _MemoryCounters(ctypes.Structure):
         _fields_ = [
@@ -285,7 +286,7 @@ if sys.platform == "win32":
     _K32.CloseHandle.argtypes = (wintypes.HANDLE,)
 
     def _open_query_handle(pid: int):
-        return _K32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid) or None
+        return _K32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_VM_READ, False, pid) or None
 
     def _peak_working_set(handle) -> int | None:
         if handle is None:
