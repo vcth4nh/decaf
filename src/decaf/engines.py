@@ -198,6 +198,8 @@ class EngineResult:
     timed_out: bool
     java_files: int
     stderr_tail: str
+    peak_rss_mb: int | None = None  # the JVM's peak resident memory; None = unknown (#98)
+    out_of_memory: bool = False  # java.lang.OutOfMemoryError in stderr (#98)
 
 
 class ProcessRegistry:
@@ -259,6 +261,99 @@ else:
     _SPAWN_KWARGS = {}  # Windows rejects preexec_fn; macOS has no prctl
 
 
+_OOM_BYTES = b"java.lang.OutOfMemoryError"
+
+if sys.platform == "win32":
+    from ctypes import wintypes
+
+    _K32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _PROCESS_VM_READ = 0x0010  # GetProcessMemoryInfo needs both rights (Microsoft docs)
+
+    class _MemoryCounters(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    _K32.OpenProcess.restype = wintypes.HANDLE
+    _K32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    _K32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+    _K32.K32GetProcessMemoryInfo.argtypes = (wintypes.HANDLE, ctypes.POINTER(_MemoryCounters), wintypes.DWORD)
+    _K32.CloseHandle.argtypes = (wintypes.HANDLE,)
+
+    def _open_query_handle(pid: int):
+        return _K32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_VM_READ, False, pid) or None
+
+    def _peak_working_set(handle) -> int | None:
+        if handle is None:
+            return None
+        try:
+            counters = _MemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            if not _K32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                return None
+            return counters.PeakWorkingSetSize
+        finally:
+            _K32.CloseHandle(handle)
+else:
+
+    def _open_query_handle(pid: int):
+        return None
+
+    def _peak_working_set(handle) -> int | None:
+        return None
+
+
+class _PeakWatch:
+    """Wait for an engine JVM and keep its peak resident memory (#98).
+
+    POSIX: a waiter thread reaps the child with os.wait4, which returns the
+    kernel's peak RSS; decaf then sets returncode itself, so Popen never waits
+    on the reaped pid. Windows: a handle opened at the start gives
+    PeakWorkingSetSize after the exit.
+    """
+
+    def __init__(self, proc: subprocess.Popen) -> None:
+        self._proc = proc
+        self._peak: int | None = None  # bytes
+        self._thread: threading.Thread | None = None
+        self._handle = None
+        if hasattr(os, "wait4"):
+            self._thread = threading.Thread(target=self._reap, daemon=True)
+            self._thread.start()
+        else:
+            self._handle = _open_query_handle(proc.pid)
+
+    def _reap(self) -> None:
+        try:
+            _, status, usage = os.wait4(self._proc.pid, 0)
+        except ChildProcessError:
+            return  # reaped elsewhere (a Popen.poll during a kill): its returncode stays
+        self._proc.returncode = os.waitstatus_to_exitcode(status)
+        self._peak = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+
+    def wait(self, timeout: float | None) -> bool:
+        """True when the JVM exited within timeout."""
+        if self._thread is not None:
+            self._thread.join(timeout)
+            return not self._thread.is_alive()
+        try:
+            self._proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        self._peak = _peak_working_set(self._handle)
+        self._handle = None
+        return True
+
+    @property
+    def peak_mb(self) -> int | None:
+        return None if self._peak is None else self._peak // 2**20
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
     if hasattr(os, "killpg"):
         try:
@@ -279,11 +374,14 @@ def build_command(
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
     engine_args: Sequence[str] = (),
+    heap_mb: int | None = None,
 ) -> list[str]:
     t, d, jar = str(target), str(dest), str(jar_path)
     # ActiveProcessorCount caps the JVM's visible cores, which sizes the
     # engine's own thread pools (e.g. vineflower --thread-count), GC, and JIT.
     prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
+    if heap_mb is not None:
+        prefix.append(f"-Xmx{heap_mb}m")  # this JVM's share of the memory budget (#98)
     if cds_dir is not None:
         prefix += [
             "-XX:+AutoCreateSharedArchive",
@@ -316,10 +414,13 @@ def build_batch_command(
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
     engine_args: Sequence[str] = (),
+    heap_mb: int | None = None,
 ) -> list[str]:
     if spec.name not in BATCH_ENGINES:
         raise EngineError(f"engine {spec.name!r} cannot batch")
     prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
+    if heap_mb is not None:
+        prefix.append(f"-Xmx{heap_mb}m")  # this JVM's share of the memory budget (#98)
     if cds_dir is not None:
         prefix += [
             "-XX:+AutoCreateSharedArchive",
@@ -350,12 +451,15 @@ def run_engine(
     cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
     engine_args: Sequence[str] = (),
+    heap_mb: int | None = None,
 ) -> EngineResult:
     dest.mkdir(parents=True, exist_ok=True)
     if target.is_dir() and spec.name not in NATIVE_DIR_ENGINES:
-        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args)
+        result = _run_per_class(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
+                                heap_mb=heap_mb)
     else:
-        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args)
+        result = _run_once(spec, jar_path, target, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
+                           heap_mb=heap_mb)
     _unpack_emitted_archives(dest)
     result.java_files = sum(
         1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES
@@ -374,6 +478,7 @@ def _run_once(
     cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
     engine_args: Sequence[str] = (),
+    heap_mb: int | None = None,
 ) -> EngineResult:
     if PROCESSES.closed:
         return EngineResult(spec.name, -1, False, 0, "interrupted")
@@ -381,6 +486,7 @@ def _run_once(
         spec, jar_path, target, dest, java=java, cpu_budget=cpu_budget,
         **({"cds_dir": cds_dir} if cds_dir is not None else {}),
         **({"engine_args": engine_args} if engine_args else {}),
+        **({"heap_mb": heap_mb} if heap_mb is not None else {}),
     )
     return _exec_command(spec, cmd, timeout, on_stderr_line)
 
@@ -398,36 +504,33 @@ def _exec_command(
         **_SPAWN_KWARGS,
     )
     PROCESSES.register(proc)
+    watch = _PeakWatch(proc)
+    chunks: list[bytes] = []
+
+    def _pump() -> None:  # always a thread: communicate() would reap the JVM before wait4 can
+        for raw in proc.stderr:
+            chunks.append(raw)
+            if on_stderr_line is not None:
+                on_stderr_line(raw.decode(errors="replace").rstrip("\r\n"))
+
+    reader = threading.Thread(target=_pump, daemon=True)
+    reader.start()
     timed_out = False
     try:
-        if on_stderr_line is None:
-            _, err = proc.communicate(timeout=timeout)
-        else:
-            chunks: list[bytes] = []
-
-            def _pump() -> None:
-                for raw in proc.stderr:
-                    chunks.append(raw)
-                    on_stderr_line(raw.decode(errors="replace").rstrip("\r\n"))
-
-            reader = threading.Thread(target=_pump, daemon=True)
-            reader.start()
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _kill_group(proc)
-                proc.wait()
-            reader.join()
-            err = b"".join(chunks)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_group(proc)
-        _, err = proc.communicate()
+        if not watch.wait(timeout):
+            timed_out = True
+            _kill_group(proc)
+            watch.wait(None)
     finally:
         PROCESSES.unregister(proc)
-    tail = (err or b"").decode(errors="replace")[-2000:]
-    return EngineResult(spec.name, proc.returncode or 0, timed_out, 0, tail)
+    reader.join()
+    proc.stderr.close()
+    err = b"".join(chunks)
+    tail = err.decode(errors="replace")[-2000:]
+    return EngineResult(
+        spec.name, proc.returncode or 0, timed_out, 0, tail,
+        peak_rss_mb=watch.peak_mb, out_of_memory=_OOM_BYTES in err,
+    )
 
 
 def run_engine_batch(
@@ -440,6 +543,7 @@ def run_engine_batch(
     cpu_budget: int | None = None,
     cds_dir: Path | None = None,
     engine_args: Sequence[str] = (),
+    heap_mb: int | None = None,
 ) -> EngineResult:
     """One JVM, many source archives, merged output tree (BATCH_ENGINES only)."""
     dest.mkdir(parents=True, exist_ok=True)
@@ -447,6 +551,7 @@ def run_engine_batch(
         spec, jar_path, targets, dest, java=java, cpu_budget=cpu_budget,
         **({"cds_dir": cds_dir} if cds_dir is not None else {}),
         **({"engine_args": engine_args} if engine_args else {}),
+        **({"heap_mb": heap_mb} if heap_mb is not None else {}),
     )
     result = _exec_command(spec, cmd, timeout, None)
     _unpack_emitted_archives(dest)
@@ -467,21 +572,28 @@ def _run_per_class(
     cds_dir: Path | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
     engine_args: Sequence[str] = (),
+    heap_mb: int | None = None,
 ) -> EngineResult:
     returncode = 0
     timed_out = False
     tails: list[str] = []
+    peak: int | None = None
+    out_of_memory = False
     for f in sorted(root.rglob("*.class")):
         if "$" in f.name:
             continue  # inner classes ride along with their outer class
-        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args)
+        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
+                      heap_mb=heap_mb)
         returncode = returncode or r.returncode
         timed_out = timed_out or r.timed_out
         if r.stderr_tail:
             tails.append(r.stderr_tail)
+        if r.peak_rss_mb is not None:
+            peak = max(peak or 0, r.peak_rss_mb)
+        out_of_memory = out_of_memory or r.out_of_memory
         if timed_out:
             break
-    return EngineResult(spec.name, returncode, timed_out, 0, "\n".join(tails)[-2000:])
+    return EngineResult(spec.name, returncode, timed_out, 0, "\n".join(tails)[-2000:], peak, out_of_memory)
 
 
 def _unpack_emitted_archives(dest: Path) -> None:

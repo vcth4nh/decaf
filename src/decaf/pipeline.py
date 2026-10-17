@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from . import __version__, casefs, engines, maven, stubs
+from . import __version__, casefs, engines, maven, memory, stubs
 from .engines import ENGINES
 from .maven import extract_sources
 from .scanner import (
@@ -52,6 +52,34 @@ _PROGRESS_INTERVAL = 1.0  # seconds between batch-dest polls (display only)
 
 def _decompile_weight(artifact: Artifact) -> int:
     return 2 if artifact.classes >= _WHALE_CLASSES else 1
+
+
+def _class_bytes(target: Path) -> int:
+    """The uncompressed size of a decompile target's class files (#98)."""
+    if target.is_dir():
+        return sum(p.stat().st_size for p in target.rglob("*.class") if p.is_file())
+    try:
+        with zipfile.ZipFile(target) as zf:
+            return sum(i.file_size for i in zf.infolist() if i.filename.endswith(".class"))
+    except (zipfile.BadZipFile, OSError):
+        return 0
+
+
+def _share_warning(artifact: Artifact, target: Path, ctx: Ctx) -> str | None:
+    """A warning when the size model says the primary engine needs more heap than the share."""
+    heap = ctx.memory_plan.heap_mb(_decompile_weight(artifact))
+    if heap is None:
+        return None
+    engine = ctx.chain[0]
+    if memory.estimate_heap_mb(engine, 0) is None:
+        return None  # no size model: do not read the jar
+    est = memory.estimate_heap_mb(engine, _class_bytes(target))
+    if est is None or est <= heap:
+        return None
+    return (
+        f"{artifact.rel}: {engine} may need about {memory.gb(est)} of heap; "
+        f"its share is {memory.gb(heap)} (raise --memory)"
+    )
 
 
 def normalize_java_rel(rel: str) -> str:
@@ -88,6 +116,9 @@ class EngineAttempt:
     java_files: int
     stderr_tail: str
     stubbed: int = 0  # files of this attempt's output that hold an engine stub marker (#96)
+    peak_rss_mb: int | None = None  # the JVM's peak resident memory (#98)
+    heap_mb: int | None = None  # the -Xmx it got; None = no cap
+    out_of_memory: bool = False  # java.lang.OutOfMemoryError in stderr or in a stub
 
 
 @dataclass
@@ -284,6 +315,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
             1 for r in reports if (r.sources_miss or "").startswith("network:")
         ),
         "stubbed_classes": sum(len(r.stubs) for r in reports),
+        "out_of_memory_attempts": sum(1 for r in reports for a in r.attempts if a.out_of_memory),
     }
 
 
@@ -301,6 +333,7 @@ class Settings:
     max_depth: int = 1  # archive-in-archive levels to extract; 0 = top-level only
     jobs: int = 0  # 0 = auto: min(4, cpu count)
     cpus: int = 0  # total CPU budget across all workers; 0 = all cores
+    memory_mb: int | None = 0  # engine heap budget in MB; None = auto (80% of RAM, the CLI default); 0 = no cap (#98)
     timeout: float = 600.0
     repos: tuple[str, ...] = ()
     verbose: bool = False
@@ -335,6 +368,7 @@ class Ctx:
     resolver: Callable
     batch_runner: Callable | None = None
     cpu_budget: int | None = None  # visible cores per engine JVM
+    memory_plan: memory.MemoryPlan = memory.NO_CAP  # the heap shares of the engine JVMs (#98)
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events (scan/engines/fetch/queued/decompile/progress)
@@ -410,13 +444,13 @@ def _held_key(rel: str) -> str:
     return rel[: -len(PurePosixPath(rel).suffix)]
 
 
-def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> int:
+def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> list[stubs.Stub]:
     """Prepare one engine output before the writer copies it (#96).
 
     Empty source files are no output (Fernflower writes one when a whole class
     fails), so they go. Stubbed files move aside: the first engine's file of a
-    class stays held; a later stubbed copy is deleted. Returns the number of
-    stubbed files in this output.
+    class stays held; a later stubbed copy is deleted. Returns the stubs found
+    in this output.
     """
     for p in list(tree.rglob("*")):
         if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and p.stat().st_size == 0:
@@ -434,7 +468,7 @@ def _hold_stubs(tree: Path, engine: str, ctx: Ctx, held: _Held) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(src, target)
         held.files[key] = (engine, stub)
-    return len(found)
+    return found
 
 
 def _release_held(held: _Held, tree: Path) -> None:
@@ -457,6 +491,31 @@ def _write_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None
         {"path": stub.path, "engine": engine, "methods": stub.methods, "errors": list(stub.errors)}
         for engine, stub in sorted(held.files.values(), key=lambda v: v[1].path)
     ]
+
+
+_OOM = "java.lang.OutOfMemoryError"
+
+
+def _has_oom(found: list[stubs.Stub]) -> bool:
+    return any(_OOM in s.errors for s in found)
+
+
+def _attempt(
+    name: str,
+    level: str,
+    res: engines.EngineResult,
+    java_files: int,
+    found: list[stubs.Stub],
+    heap_mb: int | None,
+) -> EngineAttempt:
+    """The report entry of one engine run: its result, its stubs (#96), its memory (#98)."""
+    return EngineAttempt(
+        name, level, res.returncode, res.timed_out, java_files, res.stderr_tail,
+        stubbed=len(found),
+        peak_rss_mb=res.peak_rss_mb,
+        heap_mb=heap_mb,
+        out_of_memory=res.out_of_memory or _has_oom(found),
+    )
 
 
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
@@ -502,6 +561,7 @@ def _retry_missing_classes(
     held: _Held,
 ) -> None:
     """Retry missing and stubbed classes down the chain; then write what stays stubbed (#96)."""
+    heap = ctx.memory_plan.heap_mb(_decompile_weight(artifact))  # class retries run in their artifact's slot
     missing = expected - produced - held.files.keys()
     try:
         for name in chain:
@@ -520,12 +580,11 @@ def _retry_missing_classes(
                 ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
                 ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
                 **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+                **({"heap_mb": heap} if heap is not None else {}),
                 **_stream_kw_for(ctx, name, artifact.rel),
             )
-            stubbed = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else 0
-            report.attempts.append(
-                EngineAttempt(name, "class", res.returncode, res.timed_out, res.java_files, res.stderr_tail, stubbed)
-            )
+            found = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else []
+            report.attempts.append(_attempt(name, "class", res, res.java_files, found, heap))
             if res.java_files > 0:
                 java, collisions = ctx.writer.add_tree(dest, artifact.rel)
                 report.java_files += java
@@ -544,6 +603,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
     report.classes = len(expected)
     produced: set[str] = set()
     held = _Held()
+    heap = ctx.memory_plan.heap_mb(_decompile_weight(artifact))
 
     used_index: int | None = None
     for i, name in enumerate(ctx.chain):
@@ -557,12 +617,11 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
             **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
+            **({"heap_mb": heap} if heap is not None else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
-        stubbed = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else 0
-        report.attempts.append(
-            EngineAttempt(name, "archive", res.returncode, res.timed_out, res.java_files, res.stderr_tail, stubbed)
-        )
+        found = _hold_stubs(dest, name, ctx, held) if res.java_files > 0 else []
+        report.attempts.append(_attempt(name, "archive", res, res.java_files, found, heap))
         if res.java_files > 0:
             java, collisions = ctx.writer.add_tree(dest, artifact.rel)
             report.java_files += java
@@ -863,6 +922,7 @@ def _decompile_batch(
     if engines.PROCESSES.closed:
         return [], [(a, t, r) for a, t, r, _, _ in members]
     name = ctx.chain[0]
+    heap = ctx.memory_plan.heap_mb(1)  # a batch JVM takes one slot
     dest = _tmp_dir(ctx)
     owners: dict[str, int] = {}
     for i, (_, _, _, stems, claims) in enumerate(members):
@@ -890,6 +950,7 @@ def _decompile_batch(
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
             **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
+            **({"heap_mb": heap} if heap is not None else {}),
         )
     except Exception:
         res = engines.EngineResult(name, -1, False, 0, traceback.format_exc()[-2000:])
@@ -921,15 +982,16 @@ def _decompile_batch(
     done: list[ArtifactReport] = []
     requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
     for i, (a, target, report, stems, _) in enumerate(members):
-        attempt = EngineAttempt(name, "batch", res.returncode, res.timed_out,
-                                len(produced[i]), res.stderr_tail)
+        attempt = _attempt(name, "batch", res, len(produced[i]), [], heap)
         report.attempts.append(attempt)
         if i not in trees:
             requeue.append((a, target, report))
             continue
         try:
             held = _Held()
-            attempt.stubbed = _hold_stubs(trees[i], name, ctx, held)
+            found = _hold_stubs(trees[i], name, ctx, held)
+            attempt.stubbed = len(found)
+            attempt.out_of_memory = attempt.out_of_memory or _has_oom(found)
             java, collisions = ctx.writer.add_tree(trees[i], a.rel)
             report.java_files += java
             report.collisions += collisions
@@ -1089,9 +1151,21 @@ def run(
     total_cpus = settings.cpus or max(1, (os.cpu_count() or 1) - 1)  # auto: leave one core free
     jobs = settings.jobs or min(4, os.cpu_count() or 1)
     jobs = max(1, min(jobs, total_cpus))
+    budget_mb, cap_mb = settings.memory_mb, 0
+    if budget_mb is None:
+        budget_mb = memory.default_budget_mb() or 0  # unknown RAM: no cap
+        cap_mb = memory.default_cap_mb() or 0  # auto: no JVM gets more heap than the JVM default
+    mem_plan = memory.plan(budget_mb, jobs, cap_mb)
+    jobs = mem_plan.jobs  # fewer jobs when a share would fall below the heap floor (#98)
     cpu_budget = max(1, total_cpus // jobs)
     fetch_jobs = min(8, 2 * jobs)  # IO-sized: stage 1 waits on the network, not cores
     queue_bound = 2 * jobs  # decompiles queued beyond the running `jobs` before stage 1 stalls
+    if on_event is not None:
+        ram_unknown = settings.memory_mb is None and not budget_mb
+        on_event("memory", "", memory.budget_line(mem_plan, ram_unknown=ram_unknown))
+    if mem_plan.budget_mb and on_warn is not None:
+        for line in memory.heap_env_warnings(os.environ):
+            on_warn(line)
     affinity_base: set[int] | None = None
     if hasattr(os, "sched_setaffinity"):
         # ActiveProcessorCount only sizes JVM pools — JIT/GC warmup still bursts past
@@ -1125,6 +1199,7 @@ def run(
             resolver=resolver,
             batch_runner=batch_runner,
             cpu_budget=cpu_budget,
+            memory_plan=mem_plan,
             cds_dir=cds_dir,
             on_stderr=on_stderr,
             on_event=on_event,
@@ -1218,6 +1293,10 @@ def run(
                                             (a, target, report, *_stems_and_claims(target))
                                         )
                                     else:
+                                        if on_warn is not None:
+                                            text = _share_warning(a, target, ctx)
+                                            if text is not None:
+                                                on_warn(text)
                                         heappush(ready, (-a.classes, next(seq), a, target, report))
                                     continue
                             reports.append(report)
@@ -1254,6 +1333,10 @@ def run(
                     "fetch_jobs": fetch_jobs,
                     "cpus": total_cpus,
                     "cpu_budget": cpu_budget,
+                    "memory_budget_mb": mem_plan.budget_mb,
+                    "heap_mb": mem_plan.heap_mb(1),
+                    "whale_heap_mb": mem_plan.heap_mb(2),
+                    "heap_cap_mb": mem_plan.cap_mb or None,
                     "timeout": settings.timeout,
                     "repos": maven._redacted(settings.repos),
                     "chain": chain,

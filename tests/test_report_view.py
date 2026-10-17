@@ -391,3 +391,88 @@ def test_old_report_without_stub_keys_renders(tmp_path: Path):
     detail = _console()
     assert render_artifact(detail, loaded, ["*"]) == 5
     assert "stubbed=0" in detail.file.getvalue()
+
+
+def _mem_report(*arts, budget=26214):
+    arts = list(arts)
+    return RunReport(settings={"memory_budget_mb": budget}, artifacts=arts, totals=compute_totals(arts),
+                     duration_seconds=1.0)
+
+
+def _mem_art(rel, *attempts):
+    return ArtifactReport(rel=rel, kind="archive", outcome="ok", method="vineflower",
+                          classes=1, java_files=1, attempts=list(attempts))
+
+
+def _att(peak, heap=6253, oom=False, engine="vineflower", level="archive"):
+    return EngineAttempt(engine, level, 0, False, 1, "", 0, peak, heap, oom)
+
+
+def test_ending_shows_the_memory_line():
+    console = _console()
+    rep = _mem_report(_mem_art("a.jar", _att(512)), _mem_art("w.jar", _att(5247)))
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert "budget 25.6 GB · largest peak 5.1 GB (w.jar, vineflower)" in console.file.getvalue()
+
+
+def test_ending_memory_line_without_a_cap_and_without_peaks():
+    console = _console()
+    rep = _mem_report(_mem_art("w.jar", _att(8204, heap=None)), budget=0)
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert "no cap · largest peak 8.0 GB (w.jar, vineflower)" in console.file.getvalue()
+    console = _console()
+    render_ending(console, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert "Memory" not in console.file.getvalue()  # no engine attempt with a peak
+
+
+def test_ending_warns_and_hints_about_out_of_heap():
+    console = _console()
+    rep = _mem_report(_mem_art("b.jar", _att(1500, heap=1031, oom=True), _att(400, heap=1031, engine="cfr")))
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    plain = console.file.getvalue()
+    assert "1 attempts ran out of heap" in plain
+    assert "hint: raise --memory (now 25.6 GB) or lower -j" in plain
+    console = _console()
+    render_ending(console, _mem_report(_mem_art("b.jar", _att(1500, heap=None, oom=True)), budget=0),
+                  output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert "hint: set --memory or lower -j" in console.file.getvalue()
+
+
+def test_ending_hint_names_the_auto_cap():
+    console = _console()
+    rep = _mem_report(_mem_art("w.jar", _att(8300, heap=8022, oom=True)), budget=25670)
+    rep.settings["heap_cap_mb"] = 8022  # the auto budget: a lower -j cannot give one JVM more
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert (
+        "hint: raise --memory (now 25.1 GB; the auto budget caps one JVM at 7.8 GB) or lower -j"
+    ) in console.file.getvalue()
+
+
+def test_render_artifact_shows_the_memory_fields():
+    console = _console()
+    render_artifact(console, _mem_report(_mem_art("w.jar", _att(5247, oom=True))), ["w.jar"])
+    assert "peak_rss_mb=5247 heap_mb=6253 out_of_memory=True" in console.file.getvalue()
+
+
+def test_render_memory_lists_the_ten_largest_peaks():
+    from decaf.report_view import render_memory
+
+    arts = [_mem_art("b.jar", _att(9999, oom=True)), _mem_art("a.jar", _att(512))]
+    arts += [_mem_art(f"c{i:02d}.jar", _att(100 + i)) for i in range(12)]
+    console = _console()
+    render_memory(console, _mem_report(*arts))
+    lines = console.file.getvalue().splitlines()
+    assert len(lines) == 10
+    assert lines[0] == "  9.8 GB  heap 6.1 GB   vineflower archive  b.jar  out of heap"
+    assert lines[1].endswith("a.jar")
+    assert lines[2].endswith("c11.jar") and lines[9].endswith("c04.jar")
+
+
+def test_render_memory_without_data():
+    from decaf.report_view import render_memory
+
+    console = _console()
+    render_memory(console, report())
+    assert console.file.getvalue().strip() == (
+        "no memory data in this report (an older decaf wrote it, or no engine ran)"
+    )

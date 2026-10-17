@@ -20,7 +20,7 @@ from rich.table import Column, Table
 from rich.text import Text
 from typer.core import TyperGroup
 
-from . import __version__, engines
+from . import __version__, engines, memory
 from . import report_view, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
 from .pipeline import ArtifactReport, DecafError, Settings, run
@@ -298,6 +298,8 @@ class _RunDisplay:
             if kind == "scan":
                 self._scanned = True
                 self._p.console.print(f"found {self._total} artifacts ({detail})")
+            elif kind == "memory":
+                self._p.console.print(detail)
             elif kind == "engines":
                 self._engines_event(subject, detail)
             elif kind == "queued":
@@ -407,6 +409,7 @@ def main(
     config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
     jobs: Annotated[int, typer.Option("--jobs", "-j", min=0, help="Parallel decompile workers (0 = min(4, cpus))")] = 0,
     cpus: Annotated[int, typer.Option("--cpus", min=0, help="Total CPU budget across all workers (0 = all cores minus one)")] = 0,
+    memory_budget: Annotated[Optional[str], typer.Option("--memory", help="Engine heap budget for all JVMs together, e.g. 8g (0 = no cap; default: 80% of RAM, at most 25% of RAM for one JVM)")] = None,
     timeout: Annotated[float, typer.Option("--timeout", help="Per-archive engine timeout, seconds")] = 600.0,
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
@@ -436,6 +439,17 @@ def main(
             raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
         if engine_args and not no_fallback:
             raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
+        memory_mb: int | None = None  # None = auto: 80% of the RAM (#98)
+        if memory_budget is not None:
+            try:
+                memory_mb = memory.parse_size(memory_budget)
+            except ValueError:
+                raise _fail("--memory: use a size like 8g or 8192m, or 0 for no cap")
+            if 0 < memory_mb < memory.SLOT_MIN_MB:
+                raise _fail(
+                    f"--memory: at least {memory.SLOT_MIN_MB}m (1 GiB of heap and "
+                    f"{memory.SLOT_MIN_MB - memory.FLOOR_MB} MB of JVM overhead for one job)"
+                )
         try:
             cfg = load_config(config, extra_repos=repo or [])
         except ConfigError as exc:
@@ -454,6 +468,7 @@ def main(
             max_depth=max_depth,
             jobs=jobs,
             cpus=cpus,
+            memory_mb=memory_mb,
             timeout=timeout,
             repos=cfg.repositories,
             verbose=verbose,
@@ -555,6 +570,7 @@ def report_cmd(
     problems: Annotated[bool, typer.Option("--problems", help="List failed and partial artifacts, grouped by cause")] = False,
     artifact: Annotated[Optional[list[str]], typer.Option("--artifact", help="Show full detail for artifacts matching this glob (repeatable)")] = None,
     network_fallbacks: Annotated[bool, typer.Option("--network-fallbacks", help="List artifacts that lost sources to network failures")] = False,
+    memory_peaks: Annotated[bool, typer.Option("--memory", help="List the 10 engine attempts with the largest peak memory")] = False,
 ) -> None:
     """Inspect a decaf-report.json offline."""
     try:
@@ -574,7 +590,7 @@ def report_cmd(
             f"rendering is best-effort[/]"
         )
 
-    if not (problems or artifact or network_fallbacks):
+    if not (problems or artifact or network_fallbacks or memory_peaks):
         report_view.render_ending(
             console, report,
             output=report.settings.get("output", str(resolved.parent)),
@@ -590,6 +606,8 @@ def report_cmd(
             console.print("no artifacts match")
     if network_fallbacks:
         report_view.render_network_fallbacks(console, report)
+    if memory_peaks:
+        report_view.render_memory(console, report)
 
 
 @engines_app.command("update")

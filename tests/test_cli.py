@@ -193,7 +193,8 @@ def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):
     import decaf.engines as engines
     from decaf.engines import EngineResult
 
-    def fake_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None):
+    def fake_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None,
+                    heap_mb=None):
         out = Path(dest) / "com/x/A.java"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("class A {}")
@@ -1167,3 +1168,68 @@ def test_report_empty_json_object_renders_zeros(tmp_path: Path):
     plain = ANSI.sub("", result.output)
     assert "Completed" in plain
     assert "0 processed · 0 complete" in plain
+
+
+def _capture_settings(monkeypatch):
+    captured = {}
+
+    def capture(settings, **kw):
+        captured["settings"] = settings
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", capture)
+    return captured
+
+
+@pytest.mark.parametrize(
+    "args, mb", [([], None), (["--memory", "8g"], 8192), (["--memory", "0"], 0), (["--memory", "1351m"], 1351)]
+)
+def test_memory_option_wiring(tmp_path: Path, make_jar, monkeypatch, args, mb):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    captured = _capture_settings(monkeypatch)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), *args])
+    assert result.exit_code == 0, result.output
+    assert captured["settings"].memory_mb == mb
+
+
+@pytest.mark.parametrize(
+    "value, message",
+    [("12", "use a size like 8g or 8192m"), ("12k", "use a size like 8g or 8192m"),
+     ("1g", "at least 1351m"), ("1350m", "at least 1351m"),
+     ("1.3g", "--memory: at least 1351m (1 GiB of heap and 327 MB of JVM overhead for one job)")],
+)
+def test_memory_option_rejects(tmp_path: Path, make_jar, monkeypatch, value, message):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    _capture_settings(monkeypatch)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--memory", value])
+    assert result.exit_code == 2
+    assert message in ANSI.sub("", result.output)
+
+
+def test_run_output_shows_the_budget_line(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    line = "engine memory: up to 6.4 GB (4 jobs, 1.3 GB heap each; a whale gets 2.9 GB)"
+
+    def fake_run(settings, **kw):
+        kw["on_found"](1)
+        kw["on_event"]("scan", "", "1 top-level + 0 nested")
+        kw["on_event"]("memory", "", line)
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    plain = ANSI.sub("", result.output)
+    assert plain.index("found 1 artifacts") < plain.index(line)
+
+
+def test_report_memory_lists_the_peaks(tmp_path: Path):
+    arts = [ArtifactReport(
+        rel="w.jar", kind="archive", outcome="ok", method="vineflower", classes=1, java_files=1,
+        attempts=[EngineAttempt("vineflower", "archive", 0, False, 1, "", 0, 5247, 6253, False)],
+    )]
+    rep = RunReport(settings={"memory_budget_mb": 26214}, artifacts=arts, totals=compute_totals(arts),
+                    duration_seconds=1.0)
+    out = _write_report(tmp_path / "out", rep)
+    result = runner.invoke(app, ["report", str(out), "--memory"])
+    assert result.exit_code == 0
+    assert "5.1 GB  heap 6.1 GB   vineflower archive  w.jar" in ANSI.sub("", result.output)

@@ -105,3 +105,20 @@ def test_cli_reports_every_engine_stub_real(tmp_path: Path):
     root = out / "spring-boot-3.5.12.jar"
     marked = {s.path for name in ENGINE_ORDER for s in stubs.scan(root, name)}
     assert marked == {s["path"] for s in art["stubs"]}
+
+
+def test_cli_caps_and_measures_engine_memory_real(fixture_jar, tmp_path: Path):
+    """Each real engine JVM gets its share and reports its peak (#98)."""
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    shutil.copyfile(fixture_jar, input_dir / "greeter.jar")
+    out = tmp_path / "out"
+    result = runner.invoke(app, [str(input_dir), "-o", str(out), "--no-maven", "--memory", "2g"])
+    assert result.exit_code == 0, result.output
+    report = json.loads((out / "decaf-report.json").read_text())
+    assert report["settings"]["memory_budget_mb"] == 2048
+    attempts = [a for art in report["artifacts"] for a in art["attempts"]]
+    assert attempts
+    for a in attempts:
+        assert a["heap_mb"] == 1708  # one job: 2048 - 300 - 2048 // 50
+        assert 0 < a["peak_rss_mb"] <= 2048  # inside the share
