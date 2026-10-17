@@ -1181,7 +1181,9 @@ def _capture_settings(monkeypatch):
     return captured
 
 
-@pytest.mark.parametrize("args, mb", [([], None), (["--memory", "8g"], 8192), (["--memory", "0"], 0)])
+@pytest.mark.parametrize(
+    "args, mb", [([], None), (["--memory", "8g"], 8192), (["--memory", "0"], 0), (["--memory", "1351m"], 1351)]
+)
 def test_memory_option_wiring(tmp_path: Path, make_jar, monkeypatch, args, mb):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     captured = _capture_settings(monkeypatch)
@@ -1193,7 +1195,8 @@ def test_memory_option_wiring(tmp_path: Path, make_jar, monkeypatch, args, mb):
 @pytest.mark.parametrize(
     "value, message",
     [("12", "use a size like 8g or 8192m"), ("12k", "use a size like 8g or 8192m"),
-     ("1g", "at least 1.3 GB"), ("1350m", "1 GiB of heap and 327 MB of JVM overhead")],
+     ("1g", "at least 1351m"), ("1350m", "at least 1351m"),
+     ("1.3g", "--memory: at least 1351m (1 GiB of heap and 327 MB of JVM overhead for one job)")],
 )
 def test_memory_option_rejects(tmp_path: Path, make_jar, monkeypatch, value, message):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")

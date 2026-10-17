@@ -519,7 +519,7 @@ def test_run_engine_measures_the_peak_rss(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(engines, "build_command", _fake_build(script))
     res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
     assert res.returncode == 0
-    assert res.peak_rss_mb is not None and res.peak_rss_mb >= 64
+    assert res.peak_rss_mb is not None and 64 <= res.peak_rss_mb < 1024  # MB: a wrong ru_maxrss unit gives 65536+
 
 
 def test_run_engine_keeps_the_exit_code(tmp_path: Path, monkeypatch):
@@ -584,3 +584,19 @@ def test_run_per_class_keeps_the_largest_peak(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(engines, "_run_once", lambda *a, **k: next(results))
     res = run_engine(ENGINES["cfr"], JAR, root, tmp_path / "out", timeout=10)
     assert (res.peak_rss_mb, res.out_of_memory) == (30, True)
+
+
+def test_run_per_class_gives_each_class_jvm_the_heap(tmp_path: Path, monkeypatch):
+    root = tmp_path / "classes"
+    (root / "p").mkdir(parents=True)
+    (root / "p/A.class").write_bytes(b"a")
+    (root / "p/B.class").write_bytes(b"b")
+    heaps = []
+
+    def once(*args, heap_mb=None, **kwargs):
+        heaps.append(heap_mb)
+        return EngineResult("cfr", 0, False, 0, "")
+
+    monkeypatch.setattr(engines, "_run_once", once)
+    run_engine(ENGINES["cfr"], JAR, root, tmp_path / "out", timeout=10, heap_mb=1700)
+    assert heaps == [1700, 1700]  # one JVM for each class, each with the artifact's heap

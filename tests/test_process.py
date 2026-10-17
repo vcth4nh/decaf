@@ -534,6 +534,42 @@ def test_decompile_batch_retries_a_stubbed_member_class(make_jar, tmp_path):
     assert (out / "com/b/B.java").read_text() == "class X {}\n"
 
 
+def test_decompile_batch_flags_a_member_with_an_out_of_memory_stub(make_jar, tmp_path):
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    oom_stub = (
+        "class A {\n   void m() {\n      // $VF: Couldn't be decompiled\n"
+        "      // Please report this to the Vineflower issue tracker, at https://github.com/Vineflower/vineflower/issues"
+        " with a copy of the class file (if you have the rights to distribute it!)\n"
+        "      // java.lang.OutOfMemoryError: Java heap space\n   }\n}\n"
+    )
+
+    def stubbing_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        (Path(dest) / "com/a/A.java").write_text(oom_stub)  # out of heap inside one method of a.jar
+        return res
+
+    def clean_retry(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        out = Path(dest) / "com/a/A.java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f"// {spec.name}\nclass A {{}}\n")
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, stubbing_batch, chain=["vineflower", "cfr"])
+    ctx.runner = clean_retry
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    a, b = done
+    assert [(x.engine, x.level, x.out_of_memory) for x in a.attempts] == [
+        ("vineflower", "batch", True),
+        ("cfr", "class", False),
+    ]
+    assert [(x.level, x.out_of_memory) for x in b.attempts] == [("batch", False)]  # its JVM was the same
+
+
 def test_decompile_batch_passes_one_slot_of_heap(make_jar, tmp_path):
     from decaf import memory
     from decaf.pipeline import _decompile_batch

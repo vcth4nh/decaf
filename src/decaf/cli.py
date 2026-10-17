@@ -446,7 +446,10 @@ def main(
             except ValueError:
                 raise _fail("--memory: use a size like 8g or 8192m, or 0 for no cap")
             if 0 < memory_mb < memory.SLOT_MIN_MB:
-                raise _fail("--memory: at least 1.3 GB (1 GiB of heap and 327 MB of JVM overhead for one job)")
+                raise _fail(
+                    f"--memory: at least {memory.SLOT_MIN_MB}m (1 GiB of heap and "
+                    f"{memory.SLOT_MIN_MB - memory.FLOOR_MB} MB of JVM overhead for one job)"
+                )
         try:
             cfg = load_config(config, extra_repos=repo or [])
         except ConfigError as exc:
