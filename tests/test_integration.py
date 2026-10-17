@@ -120,5 +120,5 @@ def test_cli_caps_and_measures_engine_memory_real(fixture_jar, tmp_path: Path):
     attempts = [a for art in report["artifacts"] for a in art["attempts"]]
     assert attempts
     for a in attempts:
-        assert a["heap_mb"] == 1748  # one job: 2048 - 300
-        assert 0 < a["peak_rss_mb"] <= a["heap_mb"] + 300
+        assert a["heap_mb"] == 1708  # one job: 2048 - 300 - 2048 // 50
+        assert 0 < a["peak_rss_mb"] <= 2048  # inside the share

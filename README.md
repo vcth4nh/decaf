@@ -111,14 +111,17 @@ Memory use is budgeted too. All engine JVMs together get one heap budget:
 `--memory 8g` to set it, `--memory 0` to turn the cap off (each JVM then takes
 the JVM default, 25% of the RAM). The budget is split in equal shares, one for
 each job; a whale (3000 or more classes) gets two shares, and `-j` is lowered
-when a share would fall below 1 GiB of heap. Before the decompile starts,
-decaf prints the split and warns when an artifact probably needs more heap
-than its share. The report records the peak memory and the heap of each
-engine attempt, the ending shows the largest peak and counts the attempts that
-ran out of heap, and `decaf report out --memory` lists the ten largest peaks.
-A heap flag in `JAVA_TOOL_OPTIONS` or `JDK_JAVA_OPTIONS` loses to decaf's
-`-Xmx`; one in `_JAVA_OPTIONS` overrides it, and decaf warns that the budget is
-then not enforced.
+when a share would fall below 1 GiB of heap. Each heap is its share less the
+JVM's own memory: 300 MB plus 2% of the share. With the default budget, no JVM
+gets more heap than the JVM default either, so a whale or a low `-j` never
+gets more than before; an explicit `--memory` uses the plain shares. Before
+the decompile starts, decaf prints the split and warns when an artifact
+probably needs more heap than its share. The report records the peak memory
+and the heap of each engine attempt, the ending shows the largest peak and
+counts the attempts that ran out of heap, and `decaf report out --memory`
+lists the ten largest peaks. A heap flag in `JAVA_TOOL_OPTIONS` or
+`JDK_JAVA_OPTIONS` loses to decaf's `-Xmx`; one in `_JAVA_OPTIONS` overrides
+it, and decaf warns that the budget is then not enforced.
 
 ### Inspecting a report
 
@@ -127,6 +130,7 @@ decaf report                          # ./decaf-out/decaf-report.json, outcome-l
 decaf report out --problems           # failed + partial artifacts, grouped by cause
 decaf report out --artifact '*.jar'   # full detail for artifacts matching a glob (repeatable)
 decaf report out --network-fallbacks  # artifacts that lost sources to network failures
+decaf report out --memory             # the ten engine attempts with the largest peak memory
 ```
 
 `decaf report` re-renders a `decaf-report.json` offline, without re-running anything —
