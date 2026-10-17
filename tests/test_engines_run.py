@@ -78,11 +78,11 @@ def test_run_engine_forwards_cpu_budget(tmp_path: Path, monkeypatch):
     assert seen["budget"] == 5
 
 
-def _fake_build(script: str):
+def _fake_build(script: str, python: str = sys.executable):
     """Replace build_command with one that runs a python script; {dest} is substituted."""
 
     def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
-        return [sys.executable, "-c", script.format(dest=str(dest), target=str(target))]
+        return [python, "-c", script.format(dest=str(dest), target=str(target))]
 
     return _b
 
@@ -516,7 +516,9 @@ def test_run_engine_forwards_heap(tmp_path: Path, monkeypatch):
 
 def test_run_engine_measures_the_peak_rss(tmp_path: Path, monkeypatch):
     script = "b = bytearray(64 * 1024 * 1024)\nfor i in range(0, len(b), 4096):\n    b[i] = 1\n"
-    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    # On Windows, the python.exe of a venv is a launcher that starts the interpreter as a child
+    # process, and decaf measures the process that it starts: start the interpreter itself.
+    monkeypatch.setattr(engines, "build_command", _fake_build(script, python=sys._base_executable))
     res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
     assert res.returncode == 0
     assert res.peak_rss_mb is not None and 64 <= res.peak_rss_mb < 1024  # MB: a wrong ru_maxrss unit gives 65536+
