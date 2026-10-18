@@ -19,15 +19,18 @@ def test_parse_size_rejects(text):
         memory.parse_size(text)  # "12k" rounds to 0 MB: an error, never a silent "no cap"
 
 
-def _ram(monkeypatch, tmp_path, physical, v2=None, v1=None):
-    files = []
-    for name, text in (("v2", v2), ("v1", v1)):
-        p = tmp_path / name
+def _ram(monkeypatch, tmp_path, physical, v2=None, v1=None, proc=None, files=None):
+    """total_ram_mb() with fake cgroup trees in tmp_path: v2 and v1 are the root limit files,
+    proc is /proc/self/cgroup, and files maps more paths in the trees to their text."""
+    tree = {"v2/memory.max": v2, "v1/memory.limit_in_bytes": v1, "cgroup": proc, **(files or {})}
+    for rel, text in tree.items():
         if text is not None:
-            p.write_text(text)
-        files.append(p)
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text(text)
     monkeypatch.setattr(memory, "_physical_ram", lambda: physical)
-    monkeypatch.setattr(memory, "_CGROUP_FILES", tuple(files))
+    monkeypatch.setattr(memory, "_CGROUP_V2", tmp_path / "v2")
+    monkeypatch.setattr(memory, "_CGROUP_V1", tmp_path / "v1")
+    monkeypatch.setattr(memory, "_PROC_CGROUP", tmp_path / "cgroup")
     return memory.total_ram_mb()
 
 
@@ -48,6 +51,37 @@ def test_total_ram_ignores_junk_and_reports_unknown(monkeypatch, tmp_path):
     assert _ram(monkeypatch, tmp_path, 16 * 2**30, v2="junk") == 16384
     assert _ram(monkeypatch, tmp_path, None) is None
     assert _ram(monkeypatch, tmp_path, None, v2="4294967296") == 4096
+
+
+_SCOPE = "0::/user.slice/user-1000.slice/run-1.scope\n"  # cgroup v2: systemd-run --scope
+
+
+@pytest.mark.parametrize(
+    "scope, parent, mb",
+    [("17179869184\n", "max\n", 16384),  # #104: the scope has MemoryMax=16G
+     ("max\n", "8589934592\n", 8192),  # the limit is on a parent slice
+     ("4294967296\n", "8589934592\n", 4096)],  # the lowest limit wins
+)
+def test_total_ram_takes_the_limits_of_the_own_cgroup_and_its_parents(monkeypatch, tmp_path, scope, parent, mb):
+    files = {"v2/user.slice/user-1000.slice/run-1.scope/memory.max": scope,
+             "v2/user.slice/user-1000.slice/memory.max": parent}
+    assert _ram(monkeypatch, tmp_path, 32 * 2**30, proc=_SCOPE, files=files) == mb
+
+
+def test_total_ram_takes_the_cgroup_v1_memory_controller(monkeypatch, tmp_path):
+    proc = "5:cpu,cpuacct:/user.slice/job-7\n4:memory:/slurm/job-7\n0::/user.slice/job-7\n"
+    files = {"v1/slurm/job-7/memory.limit_in_bytes": "3221225472\n",
+             "v1/user.slice/job-7/memory.limit_in_bytes": "1073741824\n"}  # the cpu path: not a memory cgroup
+    assert _ram(monkeypatch, tmp_path, 32 * 2**30, v1="9223372036854771712\n", proc=proc, files=files) == 3072
+
+
+@pytest.mark.parametrize(
+    "proc, v2, v1, mb",
+    [("0::/\n", "4294967296\n", None, 4096),  # cgroup v2 with its own namespace: the root is the container
+     ("4:memory:/docker/abc\n", None, "2147483648\n", 2048)],  # cgroup v1: the container's cgroup is at the root
+)
+def test_total_ram_keeps_the_limit_of_a_container(monkeypatch, tmp_path, proc, v2, v1, mb):
+    assert _ram(monkeypatch, tmp_path, 32 * 2**30, v2=v2, v1=v1, proc=proc) == mb
 
 
 def test_physical_ram_is_known_here():
