@@ -6,6 +6,13 @@ All notable changes to decaf are documented here.
 
 ### Added
 
+- Engine memory is measured and budgeted (#98). Each engine attempt records
+  its peak memory and its heap limit in the report; the ending shows the
+  largest peak and counts the attempts that ran out of heap, with a hint; and
+  `decaf report --memory` lists the ten largest peaks. Before the decompile
+  starts, decaf prints how the budget is split and warns when an artifact
+  probably needs more heap than its share. `--memory SIZE` sets the budget
+  for all engine JVMs together.
 - Compile check of decompiled sources (#99). After an engine writes its
   output, decaf compiles each `.java` file alone with `javac`, with the
   classes of the input on the classpath. A class with a parse, name, or flow
@@ -23,6 +30,17 @@ All notable changes to decaf are documented here.
   --artifact` shows these lists. When files are flagged, the end of the run
   points to `decaf report OUTPUT --problems`. The check needs a JDK and is on
   by default. `--no-check` turns it off.
+
+### Changed
+
+- Engine JVMs now get `-Xmx` from a budget of 80% of the RAM by default (or
+  of a lower memory limit of decaf's cgroup or a parent cgroup), split in
+  equal shares (a whale gets two, and `-j` is lowered when a share
+  would fall below 1 GiB). Each heap is its share less 300 MB plus 2% of the
+  share for the JVM itself. With the default budget, no JVM gets more heap
+  than the JVM default (25% of the RAM). Before, each JVM could take 25% of
+  the RAM, so four jobs could fill it. `--memory 0` restores the JVM default
+  (#98).
 
 ### Fixed
 

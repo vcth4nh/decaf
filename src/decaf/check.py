@@ -299,7 +299,7 @@ def run_check(
     write_jobs(jobs_file, jobs)
     threads = max(1, cpu_budget or 1)
     cmd = build_command(java, install, jobs_file, result_file, threads=threads, cds_dir=cds_dir)
-    _, timed_out, _ = engines.run_process(cmd, timeout)
+    _, timed_out, _, _, _ = engines.run_process(cmd, timeout)
     try:
         text = result_file.read_text(encoding="utf-8", errors="replace")
     except OSError:

@@ -109,6 +109,7 @@ def test_report_json_and_totals(tmp_path: Path):
         "collisions": 0,
         "network_misses": 0,
         "stubbed_classes": 0,
+        "out_of_memory_attempts": 0,
         "checked_files": 0,
         "flagged_files": 0,
         "noted_files": 0,

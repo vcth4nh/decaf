@@ -2,6 +2,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -77,11 +78,11 @@ def test_run_engine_forwards_cpu_budget(tmp_path: Path, monkeypatch):
     assert seen["budget"] == 5
 
 
-def _fake_build(script: str):
+def _fake_build(script: str, python: str = sys.executable):
     """Replace build_command with one that runs a python script; {dest} is substituted."""
 
     def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
-        return [sys.executable, "-c", script.format(dest=str(dest), target=str(target))]
+        return [python, "-c", script.format(dest=str(dest), target=str(target))]
 
     return _b
 
@@ -97,7 +98,10 @@ def test_run_engine_success(tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(engines, "build_command", _fake_build(script))
     res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
-    assert res == EngineResult("cfr", 0, False, 2, "all good")
+    assert (res.engine, res.returncode, res.timed_out, res.java_files, res.stderr_tail) == (
+        "cfr", 0, False, 2, "all good",
+    )
+    assert res.out_of_memory is False
 
 
 def test_run_engine_streams_stderr_lines_live(tmp_path: Path, monkeypatch):
@@ -482,7 +486,7 @@ def test_run_engine_batch_threads_engine_args(tmp_path: Path, monkeypatch):
 
 def test_run_process_reports_exit_code_and_stderr_tail():
     PROCESSES.reset()
-    rc, timed_out, tail = engines.run_process(
+    rc, timed_out, tail, _, _ = engines.run_process(
         [sys.executable, "-c", "import sys; sys.stderr.write('bad thing'); sys.exit(3)"], 30
     )
     assert (rc, timed_out) == (3, False)
@@ -491,13 +495,133 @@ def test_run_process_reports_exit_code_and_stderr_tail():
 
 def test_run_process_times_out():
     PROCESSES.reset()
-    _, timed_out, _ = engines.run_process([sys.executable, "-c", "import time; time.sleep(30)"], 0.5)
+    _, timed_out, _, _, _ = engines.run_process([sys.executable, "-c", "import time; time.sleep(30)"], 0.5)
     assert timed_out is True
 
 
 def test_run_process_refuses_after_registry_closed():
     PROCESSES.kill_all()
     try:
-        assert engines.run_process([sys.executable, "-c", "pass"], 5) == (-1, False, "interrupted")
+        assert engines.run_process([sys.executable, "-c", "pass"], 5) == (-1, False, "interrupted", None, False)
     finally:
         PROCESSES.reset()
+
+
+def test_build_command_heap_flag():
+    cmd = build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J, cpu_budget=3, heap_mb=2048)
+    assert cmd[:3] == [J, "-XX:ActiveProcessorCount=3", "-Xmx2048m"]
+    assert build_command(ENGINES["cfr"], JAR, APP, OUT, java=J, heap_mb=512)[:2] == [J, "-Xmx512m"]
+    for name in ENGINES:
+        assert "-Xmx512m" in build_command(ENGINES[name], JAR, APP, OUT, java=J, heap_mb=512)
+        assert not any(t.startswith("-Xmx") for t in build_command(ENGINES[name], JAR, APP, OUT, java=J))
+
+
+def test_build_batch_command_heap_flag():
+    from decaf.engines import build_batch_command
+
+    a, b = Path("/in/a.jar"), Path("/in/b.jar")
+    cmd = build_batch_command(ENGINES["vineflower"], JAR, [a, b], OUT, java=J, cpu_budget=2, heap_mb=1700)
+    assert cmd[:3] == [J, "-XX:ActiveProcessorCount=2", "-Xmx1700m"]
+    assert not any(t.startswith("-Xmx") for t in build_batch_command(ENGINES["cfr"], JAR, [a, b], OUT, java=J))
+
+
+def test_run_engine_forwards_heap(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None, heap_mb=None):
+        seen["heap"] = heap_mb
+        return [sys.executable, "-c", "pass"]
+
+    monkeypatch.setattr(engines, "build_command", _b)
+    run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=10, heap_mb=1700)
+    assert seen["heap"] == 1700
+
+
+def test_run_engine_measures_the_peak_rss(tmp_path: Path, monkeypatch):
+    script = "b = bytearray(64 * 1024 * 1024)\nfor i in range(0, len(b), 4096):\n    b[i] = 1\n"
+    # On Windows, the python.exe of a venv is a launcher that starts the interpreter as a child
+    # process, and decaf measures the process that it starts: start the interpreter itself.
+    monkeypatch.setattr(engines, "build_command", _fake_build(script, python=sys._base_executable))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
+    assert res.returncode == 0
+    assert res.peak_rss_mb is not None and 64 <= res.peak_rss_mb < 1024  # MB: a wrong ru_maxrss unit gives 65536+
+
+
+def test_run_engine_keeps_the_exit_code(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(engines, "build_command", _fake_build("import sys; sys.exit(3)"))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    assert res.returncode == 3
+
+
+def test_run_engine_flags_out_of_memory_in_the_full_stderr(tmp_path: Path, monkeypatch):
+    script = (
+        "import sys\n"
+        "sys.stderr.write('Exception in thread main java.lang.OutOfMemoryError: Java heap space\\n')\n"
+        "sys.stderr.write('x' * 5000)\n"
+    )
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    assert "OutOfMemoryError" not in res.stderr_tail  # cut from the 2000-character tail
+    assert res.out_of_memory is True
+
+
+def test_run_engine_timeout_keeps_a_peak(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(engines, "build_command", _fake_build("import time; time.sleep(60)"))
+    start = time.monotonic()
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=1)
+    assert res.timed_out is True
+    assert isinstance(res.peak_rss_mb, int)
+    assert time.monotonic() - start < 10
+
+
+def test_kill_all_ends_a_measured_run(tmp_path: Path, monkeypatch):
+    PROCESSES.reset()
+    monkeypatch.setattr(engines, "build_command", _fake_build("import time; time.sleep(60)"))
+    killer = threading.Timer(1.0, PROCESSES.kill_all)
+    killer.start()
+    start = time.monotonic()
+    try:
+        res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
+    finally:
+        killer.join()
+        PROCESSES.reset()
+    assert time.monotonic() - start < 10
+    assert res.returncode != 0
+
+
+def test_run_engine_drains_a_large_stderr(tmp_path: Path, monkeypatch):
+    script = "import sys\nsys.stderr.write('x' * (5 * 1024 * 1024))\nsys.stderr.write('END')\n"
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
+    assert res.returncode == 0
+    assert res.stderr_tail.endswith("END") and len(res.stderr_tail) == 2000
+
+
+def test_run_per_class_keeps_the_largest_peak(tmp_path: Path, monkeypatch):
+    root = tmp_path / "classes"
+    (root / "p").mkdir(parents=True)
+    (root / "p/A.class").write_bytes(b"a")
+    (root / "p/B.class").write_bytes(b"b")
+    results = iter([
+        EngineResult("cfr", 0, False, 0, "", 10, False),
+        EngineResult("cfr", 0, False, 0, "", 30, True),
+    ])
+    monkeypatch.setattr(engines, "_run_once", lambda *a, **k: next(results))
+    res = run_engine(ENGINES["cfr"], JAR, root, tmp_path / "out", timeout=10)
+    assert (res.peak_rss_mb, res.out_of_memory) == (30, True)
+
+
+def test_run_per_class_gives_each_class_jvm_the_heap(tmp_path: Path, monkeypatch):
+    root = tmp_path / "classes"
+    (root / "p").mkdir(parents=True)
+    (root / "p/A.class").write_bytes(b"a")
+    (root / "p/B.class").write_bytes(b"b")
+    heaps = []
+
+    def once(*args, heap_mb=None, **kwargs):
+        heaps.append(heap_mb)
+        return EngineResult("cfr", 0, False, 0, "")
+
+    monkeypatch.setattr(engines, "_run_once", once)
+    run_engine(ENGINES["cfr"], JAR, root, tmp_path / "out", timeout=10, heap_mb=1700)
+    assert heaps == [1700, 1700]  # one JVM for each class, each with the artifact's heap

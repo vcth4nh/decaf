@@ -240,7 +240,7 @@ def test_run_check_maps_results_and_missing_lines(tmp_path: Path, monkeypatch):
             "0\t1\tE\tA\tcompiler.err.missing.ret.stmt\t3\tmissing return statement\n"
             "0\t1\tT\t2\n"
         )
-        return 0, False, ""
+        return 0, False, "", None, False
 
     monkeypatch.setattr(check.engines, "run_process", fake_process)
     jobs = [check.Job("0", (tmp_path / "a.jar",), (tmp_path / "A.java", tmp_path / "B.java", tmp_path / "C.java"))]
@@ -251,7 +251,7 @@ def test_run_check_maps_results_and_missing_lines(tmp_path: Path, monkeypatch):
 
 
 def test_run_check_timeout_marks_unfinished_files(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(check.engines, "run_process", lambda cmd, timeout, on_stderr_line=None: (-9, True, ""))
+    monkeypatch.setattr(check.engines, "run_process", lambda cmd, timeout, on_stderr_line=None: (-9, True, "", None, False))
     jobs = [check.Job("0", (), (tmp_path / "A.java",))]
     out = check.run_check(jobs, timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
     assert out == [[unchecked("timeout")]]
