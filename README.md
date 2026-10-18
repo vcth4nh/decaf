@@ -107,7 +107,8 @@ decompile workers through a bounded queue, so network waits don't idle
 decompile slots.
 
 Memory use is budgeted too. All engine JVMs together get one heap budget:
-80% of the RAM by default (or of a lower container memory limit),
+80% of the RAM by default (or of a lower memory limit of decaf's cgroup or a
+parent cgroup, for example in a container or a systemd scope),
 `--memory 8g` to set it, `--memory 0` to turn the cap off (each JVM then takes
 the JVM default, 25% of the RAM). The budget is split in equal shares, one for
 each job; a whale (3000 or more classes) gets two shares, and `-j` is lowered

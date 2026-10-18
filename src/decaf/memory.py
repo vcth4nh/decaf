@@ -9,7 +9,7 @@ import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 OVERHEAD_MB = 300  # RSS of one JVM above its -Xmx, without the G1 tables (2026-10-17 runs: 232 MB max)
 G1_TABLES_DIV = 50  # the G1 tables take about 1/50 of the heap (NMT, Java 21, 1-12 GB heaps)
@@ -18,10 +18,9 @@ SLOT_MIN_MB = 1351  # the smallest share whose heap is FLOOR_MB: 1351 - 300 - 27
 DEFAULT_SHARE = 0.80  # the default budget: 80% of the RAM
 JVM_DEFAULT_SHARE = 0.25  # the JVM's own default maximum heap: 25% of the RAM
 
-_CGROUP_FILES = (
-    Path("/sys/fs/cgroup/memory.max"),  # cgroup v2: bytes, or "max"
-    Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),  # cgroup v1: about 2**63 = no limit
-)
+_CGROUP_V2 = Path("/sys/fs/cgroup")  # cgroup v2 tree: memory.max is bytes, or "max"
+_CGROUP_V1 = Path("/sys/fs/cgroup/memory")  # cgroup v1 tree: memory.limit_in_bytes, about 2**63 = no limit
+_PROC_CGROUP = Path("/proc/self/cgroup")  # the cgroup of this process in each tree
 
 # The heap that writes all files (2026-10-16 probe): MB fixed + MB per MiB of class bytes.
 _MODELS = {"vineflower": (73, 48), "cfr": (85, 22)}
@@ -87,9 +86,34 @@ def _cgroup_limit(path: Path) -> int | None:
     return value if value < 1 << 60 else None
 
 
+def _cgroup_files() -> list[Path]:
+    """The limit files of this process's cgroup and of each parent, then the root files (#104).
+
+    The root files alone miss a limit on a child cgroup: a systemd scope, a batch job, or a
+    container in the host's cgroup namespace. A container with its own namespace has the path "/".
+    """
+    try:
+        lines = _PROC_CGROUP.read_text().splitlines()
+    except OSError:
+        lines = []  # no /proc: not Linux
+    files = []
+    for line in lines:
+        _, _, rest = line.partition(":")
+        controllers, _, path = rest.partition(":")  # "0::/a/b" (v2) or "4:memory:/a/b" (v1)
+        if not controllers:
+            tree, name = _CGROUP_V2, "memory.max"
+        elif "memory" in controllers.split(","):
+            tree, name = _CGROUP_V1, "memory.limit_in_bytes"
+        else:
+            continue
+        parts = PurePosixPath(path).parts[1:]
+        files += [tree.joinpath(*parts[:i], name) for i in range(len(parts), 0, -1)]
+    return files + [_CGROUP_V2 / "memory.max", _CGROUP_V1 / "memory.limit_in_bytes"]
+
+
 def total_ram_mb() -> int | None:
-    """The physical RAM, or a lower cgroup limit (containers), in MB; None when unknown."""
-    sizes = [s for s in (_physical_ram(), *map(_cgroup_limit, _CGROUP_FILES)) if s]
+    """The physical RAM, or a lower limit of this process's cgroup or a parent, in MB; None when unknown."""
+    sizes = [s for s in (_physical_ram(), *map(_cgroup_limit, _cgroup_files())) if s]
     return min(sizes) // 2**20 if sizes else None
 
 

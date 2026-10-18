@@ -16,8 +16,9 @@ All notable changes to decaf are documented here.
 
 ### Changed
 
-- Engine JVMs now get `-Xmx` from a budget of 80% of the RAM by default,
-  split in equal shares (a whale gets two, and `-j` is lowered when a share
+- Engine JVMs now get `-Xmx` from a budget of 80% of the RAM by default (or
+  of a lower memory limit of decaf's cgroup or a parent cgroup), split in
+  equal shares (a whale gets two, and `-j` is lowered when a share
   would fall below 1 GiB). Each heap is its share less 300 MB plus 2% of the
   share for the JVM itself. With the default budget, no JVM gets more heap
   than the JVM default (25% of the RAM). Before, each JVM could take 25% of
