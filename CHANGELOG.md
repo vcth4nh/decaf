@@ -17,8 +17,12 @@ All notable changes to decaf are documented here.
   step: a retry file replaces a held file only when it has no stub and
   passes the check. The report gets `check` counts for each artifact,
   `attempts[].flagged`, and the totals `checked_files`, `flagged_files`,
-  `noted_files`, and `unchecked_files`. The check needs a JDK and is on by
-  default. `--no-check` turns it off.
+  `noted_files`, and `unchecked_files`. For each artifact, it also lists the
+  `flagged` and `noted` files with their javac errors (at most 100 for each
+  file), and the `unchecked` files with their reasons; `decaf report
+  --artifact` shows these lists. When files are flagged, the end of the run
+  points to `decaf report OUTPUT --problems`. The check needs a JDK and is on
+  by default. `--no-check` turns it off.
 
 ### Fixed
 

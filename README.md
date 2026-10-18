@@ -152,8 +152,11 @@ declaration. A class with a parse, name, or flow error goes to the next engine
 of the fallback chain, and the first version without such errors goes to the
 output. When all engines fail the check, the file of the first engine stays,
 the report lists it under `flagged`, and the artifact is partial (yellow `!`).
-Type errors, for example lost generic type arguments, are only counted
-(`noted`).
+Type errors, for example lost generic type arguments, do not cause a retry:
+the report lists such files under `noted`. For each flagged and noted file,
+the report gives the javac errors in line order (at most 100). It also lists
+the files that the check could not examine under `unchecked`, with the reason.
+`decaf report OUTPUT --artifact NAME` shows these lists.
 
 The classpath of the check is the input itself: the archive, the other
 archives of the same war, fat jar, or input folder, and their

@@ -46,7 +46,9 @@ def test_type_and_other_errors_only_are_noted():
         "0\t0\tE\tA\tcompiler.err.does.not.override.abstract\t9\tX is not abstract and does not override abstract method y()",
         "0\t0\tT\t5",
     ), False)
-    assert r.status == "noted" and r.kinds == ("other", "type") and r.errors == 2 and r.first is None
+    first = "2: incompatible types: java.util.ArrayList<java.lang.Integer> cannot be converted to java.util.List<java.lang.String>"
+    assert r.status == "noted" and r.kinds == ("other", "type") and r.errors == 2 and r.first == first
+    assert r.messages == (first, "9: X is not abstract and does not override abstract method y()")
     assert r.passes is True
 
 
@@ -59,6 +61,14 @@ def test_flagged_first_is_lowest_line_of_retry_kinds():
     ), False)
     assert r.kinds == ("flow", "name", "type") and r.errors == 3
     assert r.first == "7: cannot find symbol: variable tx"
+    assert r.messages == ("1: incompatible types: a", "7: cannot find symbol: variable tx", "20: missing return statement")
+
+
+def test_messages_stop_at_the_cap():
+    lines = [f"0\t0\tE\tA\tcompiler.err.missing.ret.stmt\t{n}\tmissing return statement" for n in range(150, 0, -1)]
+    r = classify(raw(*lines, "0\t0\tT\t5"), False)
+    assert r.errors == 150 and len(r.messages) == check.MESSAGES_PER_FILE == 100
+    assert (r.messages[0], r.messages[-1]) == ("1: missing return statement", "100: missing return statement")
 
 
 @pytest.mark.parametrize("line", [
@@ -73,7 +83,17 @@ def test_flagged_first_is_lowest_line_of_retry_kinds():
 ])
 def test_environment_errors_make_the_file_unchecked(line):
     r = classify(raw(line, "0\t0\tE\tA\tcompiler.err.missing.ret.stmt\t9\tmissing return statement", "0\t0\tT\t5"), False)
-    assert r == unchecked("absent classes")
+    assert (r.status, r.reason, r.messages) == ("unchecked", "absent classes", ())
+
+
+def test_absent_classes_first_is_the_lowest_line_of_the_environment_errors():
+    r = classify(raw(
+        "0\t0\tE\tA\tcompiler.err.missing.ret.stmt\t3\tmissing return statement",
+        "0\t0\tE\tA\tcompiler.err.doesnt.exist\t12\tpackage org.b does not exist",
+        "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t5\tcannot find symbol   symbol:   class Thing   location: class Env",
+        "0\t0\tT\t5",
+    ), False)
+    assert r == unchecked("absent classes", first="5: cannot find symbol: class Thing")
 
 
 def test_old_source_keyword_identifier_is_unchecked():
@@ -81,7 +101,7 @@ def test_old_source_keyword_identifier_is_unchecked():
         "0\t0\tE\tP\tcompiler.err.enum.as.identifier\t1\tas of release 5, 'enum' is a keyword, and may not be used as an identifier",
         "0\t0\tT\t5",
     ), False)
-    assert r == unchecked("old source")
+    assert r == unchecked("old source", first="1: as of release 5, 'enum' is a keyword, and may not be used as an identifier")
 
 
 def test_crash_and_unfinished_files():

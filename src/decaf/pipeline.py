@@ -112,6 +112,8 @@ class ArtifactReport:
     stubs: list[dict] = field(default_factory=list)  # classes left stubbed in the output (#96)
     failure: str | None = None
     flagged: list[dict] = field(default_factory=list)  # files that stay flagged by the compile check (#99)
+    noted: list[dict] = field(default_factory=list)  # checked files with only type or other errors (#99)
+    unchecked: list[dict] = field(default_factory=list)  # files that the compile check could not examine (#99)
     check: dict | None = None  # compile-check counts over the final output; None = no check ran
 
     @property
@@ -510,7 +512,7 @@ class _Held:
     root: Path | None = None  # a _tmp_dir, made at the first held file
     files: dict[str, _HeldFile] = field(default_factory=dict)  # key -> held file
     written: set[str] = field(default_factory=set)  # keys of the files that went to the writer
-    checks: dict[str, check.FileResult] = field(default_factory=dict)  # key -> check result of the written file
+    checks: dict[str, _HeldFile] = field(default_factory=dict)  # key -> the written file and its check result
     versions: dict[str, int] | None = None  # key -> class major version, read once
 
 
@@ -592,7 +594,7 @@ def _apply_hold(
                 (held.root / old.path).unlink(missing_ok=True)
                 held.written.add(key)
                 if result is not None:
-                    held.checks[key] = result
+                    held.checks[key] = _HeldFile(engine, rel, None, result)
             else:
                 p.unlink()  # the earlier engine's held file stays
         elif key in held.written and normalize_java_rel(rel).rsplit(".", 1)[0] in retried:
@@ -608,7 +610,7 @@ def _apply_hold(
         else:
             held.written.add(key)
             if result is not None:
-                held.checks[key] = result
+                held.checks[key] = _HeldFile(engine, rel, None, result)
     return flagged
 
 
@@ -640,16 +642,26 @@ def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> Non
             {"path": f.path, "engine": f.engine, "methods": f.stub.methods, "errors": list(f.stub.errors)}
             for f in ordered if f.stub is not None
         ]
-        report.flagged = [
-            {"path": f.path, "engine": f.engine, "kinds": list(f.result.kinds),
-             "errors": f.result.errors, "first": f.result.first}
-            for f in ordered if f.result is not None and f.result.status == "flagged"
-        ]
         for key, f in held.files.items():
             if f.result is not None:
-                held.checks[key] = f.result
+                held.checks[key] = f
     if ctx.checker is not None:
-        report.check = check.summary(list(held.checks.values()))
+        done = sorted(held.checks.values(), key=lambda f: f.path)
+        report.flagged = [_check_entry(f) for f in done if f.result.status == "flagged"]
+        report.noted = [_check_entry(f) for f in done if f.result.status == "noted"]
+        report.unchecked = [
+            {"path": f.path, "engine": f.engine, "reason": f.result.reason,
+             "needs_java": f.result.needs_java, "first": f.result.first}
+            for f in done if f.result.status == "unchecked"
+        ]
+        report.check = check.summary([f.result for f in done])
+
+
+def _check_entry(f: _HeldFile) -> dict:
+    """A flagged or noted file in the report, with its errors in line order (#99)."""
+    r = f.result
+    return {"path": f.path, "engine": f.engine, "kinds": list(r.kinds), "errors": r.errors,
+            "first": r.first, "messages": list(r.messages)}
 
 
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:

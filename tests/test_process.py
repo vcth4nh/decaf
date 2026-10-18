@@ -1163,11 +1163,15 @@ def marker_checker(calls=None):
                 if "FLAG" in text:
                     results.append(check.FileResult(
                         "flagged", kinds=("name",), errors=1, first="1: cannot find symbol: variable xx",
+                        messages=("1: cannot find symbol: variable xx",),
                     ))
                 elif "NOTE" in text:
-                    results.append(check.FileResult("noted", kinds=("type",), errors=1))
+                    results.append(check.FileResult(
+                        "noted", kinds=("type",), errors=1, first="1: incompatible types: a",
+                        messages=("1: incompatible types: a",),
+                    ))
                 elif "ENV" in text:
-                    results.append(check.unchecked("absent classes"))
+                    results.append(check.unchecked("absent classes", first="1: package org.absent does not exist"))
                 else:
                     results.append(check.FileResult("clean"))
             out.append(results)
@@ -1208,6 +1212,7 @@ def test_all_engines_flagged_keeps_first_file_and_is_partial(make_jar, tmp_path:
     assert report.flagged == [{
         "path": "com/x/A.java", "engine": "vineflower", "kinds": ["name"],
         "errors": 1, "first": "1: cannot find symbol: variable xx",
+        "messages": ["1: cannot find symbol: variable xx"],
     }]
     assert "FLAG vineflower" in (tmp_path / "out/src/com/x/A.java").read_text()
     assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
@@ -1243,6 +1248,30 @@ def test_noted_files_are_written_and_not_partial(make_jar, tmp_path: Path):
     assert report.check["noted"] == 1 and report.check["kinds"]["type"] == 1
 
 
+def test_report_lists_noted_and_unchecked_files(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b", "com/x/C.class": b"c"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// NOTE", "com/x/B.java": "// ENV", "com/x/C.java": "class C {}"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.noted == [{
+        "path": "com/x/A.java", "engine": "vineflower", "kinds": ["type"], "errors": 1,
+        "first": "1: incompatible types: a", "messages": ["1: incompatible types: a"],
+    }]
+    assert report.unchecked == [{
+        "path": "com/x/B.java", "engine": "vineflower", "reason": "absent classes", "needs_java": None,
+        "first": "1: package org.absent does not exist",
+    }]
+    assert not report.partial and report.flagged == []
+
+
+def test_noted_retry_file_is_listed_with_its_engine(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}, "cfr": {"com/x/A.java": "// NOTE cfr"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.flagged == [] and [(n["path"], n["engine"]) for n in report.noted] == [("com/x/A.java", "cfr")]
+
+
 def test_no_fallback_writes_and_reports_flagged(make_jar, tmp_path: Path):
     jar = make_jar("app.jar", {"com/x/A.class": b"a"})
     runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}})
@@ -1258,6 +1287,7 @@ def test_without_checker_the_flow_is_unchanged(make_jar, tmp_path: Path):
     ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}}))
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     assert report.check is None and report.flagged == [] and not report.partial
+    assert report.noted == report.unchecked == []
     assert [(a.engine, a.flagged) for a in report.attempts] == [("vineflower", 0)]
 
 
@@ -1269,6 +1299,10 @@ def test_newer_class_version_is_not_sent(make_jar, tmp_path: Path):
     assert calls == []
     assert report.check["unchecked_reasons"]["newer class version"] == 1
     assert report.check["needs_java"] == 25
+    assert report.unchecked == [{
+        "path": "com/x/A.java", "engine": "vineflower", "reason": "newer class version", "needs_java": 25,
+        "first": None,
+    }]
 
 
 def test_package_info_is_not_checked_or_counted(make_jar, tmp_path: Path):
@@ -1406,7 +1440,7 @@ def test_decompile_batch_checks_once_and_retries_flagged_member(make_jar, tmp_pa
     from decaf.pipeline import _decompile_batch
 
     def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
-        for stem, text in (("com/a/A", "// FLAG"), ("com/b/B", "class B {}")):
+        for stem, text in (("com/a/A", "// FLAG"), ("com/b/B", "// NOTE")):
             out = Path(dest) / f"{stem}.java"
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(text)
@@ -1426,6 +1460,7 @@ def test_decompile_batch_checks_once_and_retries_flagged_member(make_jar, tmp_pa
     assert (a.attempts[0].flagged, b.attempts[0].flagged) == (1, 0)
     assert a.flagged == [] and not a.partial and a.attempts[-1].engine == "cfr"
     assert b.check["checked"] == 1 and b.flagged == []
+    assert (a.noted, [(n["path"], n["engine"]) for n in b.noted]) == ([], [("com/b/B.java", "vineflower")])
     assert (tmp_path / "out/src/com/a/A.java").read_text() == "class A { /* cfr */ }"
 
 
@@ -1449,6 +1484,12 @@ def test_stubbed_and_flagged_file_is_listed_under_both_keys(make_jar, tmp_path: 
     assert [s["path"] for s in report.stubs] == ["com/x/A.java"]
     assert [f["path"] for f in report.flagged] == ["com/x/A.java"]
     assert text == _VF_STUB + "// FLAG\n" and report.partial and report.check["flagged"] == 1
+
+
+def test_stubbed_file_with_a_noted_result_is_listed_as_noted(make_jar, tmp_path: Path):
+    report, text = _run_one(make_jar, tmp_path, {"vineflower": _VF_STUB + "// NOTE\n"}, fallback=False)
+    assert text == _VF_STUB + "// NOTE\n" and [s["path"] for s in report.stubs] == ["com/x/A.java"]
+    assert [(n["path"], n["engine"]) for n in report.noted] == [("com/x/A.java", "vineflower")]
 
 
 def test_flagged_retry_file_does_not_replace_a_stubbed_file(make_jar, tmp_path: Path):

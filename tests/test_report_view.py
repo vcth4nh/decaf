@@ -324,7 +324,8 @@ def test_ending_has_no_case_hint_without_case_failures():
 
 
 _FLAG = {"path": "a/B.java", "engine": "vineflower", "kinds": ["name"], "errors": 2,
-         "first": "3: cannot find symbol: variable xx"}
+         "first": "3: cannot find symbol: variable xx",
+         "messages": ["3: cannot find symbol: variable xx", "8: incompatible types: a"]}
 
 
 def test_status_line_counts_flagged():
@@ -344,6 +345,13 @@ def test_ending_warnings_and_needs_java_line():
     plain = c.file.getvalue()
     assert "1 flagged files" in plain
     assert "compile check: 2 files need Java 25+ (found Java 21)" in plain
+    assert 'compile check: run "decaf report out --problems" for more information' in plain
+
+
+def test_ending_has_no_check_hint_without_flagged_files():
+    c = _console()
+    render_ending(c, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert "--problems" not in c.file.getvalue()
 
 
 def test_render_artifact_check_lines():
@@ -351,6 +359,14 @@ def test_render_artifact_check_lines():
         rel="j.jar", kind="archive", outcome="ok", method="vineflower",
         attempts=[EngineAttempt("vineflower", "archive", 0, False, 3, "", flagged=1)],
         flagged=[_FLAG],
+        noted=[{"path": "a/C.java", "engine": "cfr", "kinds": ["type"], "errors": 1,
+                "first": "4: incompatible types: List[]", "messages": ["4: incompatible types: List[]"]}],
+        unchecked=[
+            {"path": "a/D.java", "engine": "vineflower", "reason": "absent classes", "needs_java": None,
+             "first": "1: package org.absent does not exist"},
+            {"path": "a/E.java", "engine": "vineflower", "reason": "newer class version", "needs_java": 25,
+             "first": None},
+        ],
         check={**check.summary([check.unchecked("absent classes")]), "checked": 3, "flagged": 1},
     )
     c = _console()
@@ -358,20 +374,24 @@ def test_render_artifact_check_lines():
     plain = c.file.getvalue()
     assert "check: checked=3 flagged=1 noted=0 unchecked=1 (absent classes 1)" in plain
     assert "flagged a/B.java (vineflower): name, 2 errors - 3: cannot find symbol: variable xx" in plain
+    assert "\n    3: cannot find symbol: variable xx\n    8: incompatible types: a\n" in plain
+    assert "  noted a/C.java (cfr): type, 1 errors - 4: incompatible types: List[]\n" in plain
+    assert "  unchecked a/D.java (vineflower): absent classes - 1: package org.absent does not exist\n" in plain
+    assert "  unchecked a/E.java (vineflower): newer class version (needs Java 25+)\n" in plain
     assert "java_files=3 stubbed=0 flagged=1" in plain
 
 
 def test_old_report_without_check_keys_loads(tmp_path: Path):
     data = json.loads(report().to_json())
     for a in data["artifacts"]:
-        a.pop("flagged")
-        a.pop("check")
+        for key in ("flagged", "noted", "unchecked", "check"):
+            a.pop(key)
         for at in a["attempts"]:
             at.pop("flagged")
     path = tmp_path / "decaf-report.json"
     path.write_text(json.dumps(data))
     loaded, _ = load_report(path)
-    assert all(a.flagged == [] and a.check is None for a in loaded.artifacts)
+    assert all(a.flagged == a.noted == a.unchecked == [] and a.check is None for a in loaded.artifacts)
     assert all(at.flagged == 0 for a in loaded.artifacts for at in a.attempts)
 
 

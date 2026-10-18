@@ -188,6 +188,8 @@ def render_ending(
     if newer and needs:
         found = report.settings.get("java_major")
         console.print(f"[dim]compile check: {newer} files need Java {needs}+ (found Java {found})[/]")
+    if flagged:
+        console.print(f'[dim]compile check: run "decaf report {escape(str(output))} --problems" for more information[/]')
 
     failed = [r for r in report.artifacts if r.outcome == "failed"]
     if failed:
@@ -256,10 +258,17 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
                 + (f" ({escape(reasons)})" if reasons else "")
             )
         for f in r.flagged:
+            console.print(_check_line("flagged", f))
+            for m in f.get("messages") or []:
+                console.print(f"    {escape(str(m))}")
+        for f in r.noted:
+            console.print(_check_line("noted", f))
+        for f in r.unchecked:
+            needs = f" (needs Java {f.get('needs_java')}+)" if f.get("needs_java") else ""
+            first = f" - {escape(str(f.get('first')))}" if f.get("first") else ""
             console.print(
-                f"  flagged {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
-                f"{escape(', '.join(f.get('kinds') or []))}, {f.get('errors', 0)} errors - "
-                f"{escape(str(f.get('first')))}"
+                f"  unchecked {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
+                f"{escape(str(f.get('reason')))}{needs}{first}"
             )
         if r.failure:
             console.print(f"  failure={escape(r.failure)}")
@@ -277,6 +286,15 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
             if a.stderr_tail:
                 console.print(f"    [dim]{escape(a.stderr_tail)}[/]")
     return len(matches)
+
+
+def _check_line(label: str, f: dict) -> str:
+    """One flagged or noted file: kinds, error count, and the error that decided its status (#99)."""
+    return (
+        f"  {label} {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
+        f"{escape(', '.join(f.get('kinds') or []))}, {f.get('errors', 0)} errors - "
+        f"{escape(str(f.get('first')))}"
+    )
 
 
 def render_network_fallbacks(console: Console, report: RunReport) -> None:

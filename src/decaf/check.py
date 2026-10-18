@@ -19,6 +19,7 @@ UNCHECKED_REASONS = (
     "absent classes", "kotlin", "newer class version", "old source", "javac crash", "timeout",
 )
 CLASS_VERSION_OFFSET = 44  # class-file major version = Java version + 44
+MESSAGES_PER_FILE = 100  # javac's own default -Xmaxerrs
 
 _OLD_SOURCE = frozenset({
     "compiler.err.enum.as.identifier",
@@ -69,16 +70,17 @@ class FileResult:
     reason: str | None = None  # one of UNCHECKED_REASONS when unchecked
     kinds: tuple[str, ...] = ()  # sorted kinds of the decompiler errors
     errors: int = 0  # number of decompiler errors
-    first: str | None = None  # "<line>: <message>" of the first parse/name/flow error
+    first: str | None = None  # "<line>: <message>" of the first error that decided the status
     needs_java: int | None = None  # newer class version: the Java version it needs
+    messages: tuple[str, ...] = ()  # "<line>: <message>" of each error in line order, at most MESSAGES_PER_FILE
 
     @property
     def passes(self) -> bool:
         return self.status in ("clean", "noted")
 
 
-def unchecked(reason: str, needs_java: int | None = None) -> FileResult:
-    return FileResult("unchecked", reason=reason, needs_java=needs_java)
+def unchecked(reason: str, needs_java: int | None = None, first: str | None = None) -> FileResult:
+    return FileResult("unchecked", reason=reason, first=first, needs_java=needs_java)
 
 
 @dataclass
@@ -138,26 +140,31 @@ def _short(message: str) -> str:
     return text[:200]
 
 
+def _line(error: tuple[str, str, int, str]) -> str:
+    return f"{error[2]}: {_short(error[3])}"
+
+
 def classify(raw: _Raw | None, timed_out: bool) -> FileResult:
     """Status of one file from its result lines (spec section 3)."""
     if raw is not None and raw.crash is not None:
         return unchecked("javac crash")
     if raw is None or not raw.done:
         return unchecked("timeout" if timed_out else "javac crash")
-    if any(phase == "P" and code in _OLD_SOURCE for phase, code, _, _ in raw.errors):
-        return unchecked("old source")
-    if any(_is_env(code, message) for _, code, _, message in raw.errors):
-        return unchecked("absent classes")
-    if not raw.errors:
+    errors = sorted(raw.errors, key=lambda e: (e[2], e[3]))  # (phase, code, line, message) in line order
+    old = [e for e in errors if e[0] == "P" and e[1] in _OLD_SOURCE]
+    if old:
+        return unchecked("old source", first=_line(old[0]))
+    env = [e for e in errors if _is_env(e[1], e[3])]
+    if env:
+        return unchecked("absent classes", first=_line(env[0]))
+    if not errors:
         return FileResult("clean")
-    kinds = tuple(sorted({_kind(phase, code) for phase, code, _, _ in raw.errors}))
-    retry = sorted(
-        (line, message) for phase, code, line, message in raw.errors if _kind(phase, code) in RETRY_KINDS
-    )
+    kinds = tuple(sorted({_kind(phase, code) for phase, code, _, _ in errors}))
+    messages = tuple(_line(e) for e in errors[:MESSAGES_PER_FILE])
+    retry = [e for e in errors if _kind(e[0], e[1]) in RETRY_KINDS]
     if retry:
-        line, message = retry[0]
-        return FileResult("flagged", kinds=kinds, errors=len(raw.errors), first=f"{line}: {_short(message)}")
-    return FileResult("noted", kinds=kinds, errors=len(raw.errors))
+        return FileResult("flagged", kinds=kinds, errors=len(errors), first=_line(retry[0]), messages=messages)
+    return FileResult("noted", kinds=kinds, errors=len(errors), first=messages[0], messages=messages)
 
 
 def write_jobs(path: Path, jobs: list[Job]) -> None:

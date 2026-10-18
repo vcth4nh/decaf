@@ -49,11 +49,16 @@ def test_real_javac_statuses(checker, tmp_path: Path):
     got = dict(zip(SOURCES, out[0]))
     assert got["Ex.java"].status == "flagged" and got["Ex.java"].kinds == ("name",)
     assert got["Ex.java"].first == "3: cannot find symbol: variable xx"
+    assert got["Ex.java"].messages == ("3: cannot find symbol: variable xx",)
     assert got["Stub.java"].status == "flagged" and got["Stub.java"].kinds == ("flow",)
-    assert got["Kw.java"] == check.unchecked("old source")
-    assert got["Env.java"] == check.unchecked("absent classes")
+    assert got["Kw.java"] == check.unchecked(
+        "old source", first="1: as of release 5, 'enum' is a keyword, and may not be used as an identifier"
+    )
+    assert got["Env.java"] == check.unchecked("absent classes", first="1: package org.absent does not exist")
     assert got["Clean.java"].status == "clean"
     assert got["Noted.java"].status == "noted" and got["Noted.java"].kinds == ("type",)
+    assert got["Noted.java"].first.startswith("2: incompatible types")
+    assert got["Noted.java"].messages == (got["Noted.java"].first,)
     assert got["Ünï.java"].status == "clean"
 
 
