@@ -105,6 +105,8 @@ def _status_line(r: ArtifactReport) -> str:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
             if r.stubs:
                 detail += f", [yellow]{len(r.stubs)} stubbed[/]"
+            if r.flagged:
+                detail += f", [yellow]{len(r.flagged)} flagged[/]"
         glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
         line = f"{glyph} {escape(r.rel)} ({detail})"
         if r.method == "maven" and r.sources_cached:
@@ -178,12 +180,15 @@ def render_ending(
 
     missing = sum(r.missing_classes for r in report.artifacts)
     stubbed = sum(len(r.stubs) for r in report.artifacts)
+    flagged = sum(len(r.flagged) for r in report.artifacts)
     out_of_heap = sum(1 for r in report.artifacts for a in r.attempts if a.out_of_memory)
     warnings = []
     if missing:
         warnings.append(f"{missing} missing classes")
     if stubbed:
         warnings.append(f"{stubbed} stubbed classes")
+    if flagged:
+        warnings.append(f"{flagged} flagged files")
     if t["collisions"]:
         warnings.append(f"{t['collisions']} collisions")
     if t["network_misses"]:
@@ -192,6 +197,15 @@ def render_ending(
         warnings.append(f"{out_of_heap} attempts ran out of heap")
     if warnings:
         console.print(f"[dim]{'Warnings':<{_BODY_LABEL_WIDTH}}[/]  " + " · ".join(warnings))
+    newer = sum(
+        (r.check or {}).get("unchecked_reasons", {}).get("newer class version", 0) for r in report.artifacts
+    )
+    needs = max(((r.check or {}).get("needs_java") or 0 for r in report.artifacts), default=0)
+    if newer and needs:
+        found = report.settings.get("java_major")
+        console.print(f"[dim]compile check: {newer} files need Java {needs}+ (found Java {found})[/]")
+    if flagged:
+        console.print(f'[dim]compile check: run "decaf report {escape(str(output))} --problems" for more information[/]')
     if out_of_heap:
         cap = report.settings.get("heap_cap_mb")
         if not budget:
@@ -261,6 +275,26 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
             f"resources_copied={r.resources_copied} resources_skipped={r.resources_skipped} "
             f"missing_classes={r.missing_classes} stubbed={len(r.stubs)} collisions={len(r.collisions)}"
         )
+        if r.check:
+            reasons = ", ".join(f"{k} {v}" for k, v in (r.check.get("unchecked_reasons") or {}).items() if v)
+            console.print(
+                f"  check: checked={r.check.get('checked', 0)} flagged={r.check.get('flagged', 0)} "
+                f"noted={r.check.get('noted', 0)} unchecked={r.check.get('unchecked', 0)}"
+                + (f" ({escape(reasons)})" if reasons else "")
+            )
+        for f in r.flagged:
+            console.print(_check_line("flagged", f))
+            for m in f.get("messages") or []:
+                console.print(f"    {escape(str(m))}")
+        for f in r.noted:
+            console.print(_check_line("noted", f))
+        for f in r.unchecked:
+            needs = f" (needs Java {f.get('needs_java')}+)" if f.get("needs_java") else ""
+            first = f" - {escape(str(f.get('first')))}" if f.get("first") else ""
+            console.print(
+                f"  unchecked {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
+                f"{escape(str(f.get('reason')))}{needs}{first}"
+            )
         if r.failure:
             console.print(f"  failure={escape(r.failure)}")
         for s in r.stubs:
@@ -272,12 +306,22 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
         for a in r.attempts:
             console.print(
                 f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} "
-                f"java_files={a.java_files} stubbed={a.stubbed} "
+                f"java_files={a.java_files} stubbed={a.stubbed} flagged={a.flagged} "
                 f"peak_rss_mb={a.peak_rss_mb} heap_mb={a.heap_mb} out_of_memory={a.out_of_memory}"
             )
             if a.stderr_tail:
                 console.print(f"    [dim]{escape(a.stderr_tail)}[/]")
     return len(matches)
+
+
+def _check_line(label: str, f: dict) -> str:
+    """One flagged or noted file: kinds, error count, and the error that decided its status (#99)."""
+    n = f.get("errors", 0)
+    return (
+        f"  {label} {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
+        f"{escape(', '.join(f.get('kinds') or []))}, {n} error{'' if n == 1 else 's'} - "
+        f"{escape(str(f.get('first')))}"
+    )
 
 
 def render_network_fallbacks(console: Console, report: RunReport) -> None:

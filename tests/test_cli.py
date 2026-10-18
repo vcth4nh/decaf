@@ -44,7 +44,7 @@ def test_help_lists_flags():
     assert result.exit_code == 0
     plain = ANSI.sub("", result.output)
     for flag in ["--output", "--engine", "--no-fallback", "--merge", "--no-maven",
-                 "--fresh-maven",
+                 "--fresh-maven", "--no-check",
                  "--max-depth", "--repo", "--config", "--jobs", "--cpus", "--timeout",
                  "--force"]:
         assert flag in plain
@@ -209,7 +209,7 @@ def test_full_stack_through_cli(tmp_path: Path, make_jar, monkeypatch):
 
     make_jar("app.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
     out = tmp_path / "out"
-    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out), "--no-maven"])
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(out), "--no-maven", "--no-check"])
     assert result.exit_code == 0, result.output
     assert (out / "app.jar/com/x/A.java").is_file()  # mirror layout is the default
     report = json.loads((out / "decaf-report.json").read_text())
@@ -1179,6 +1179,15 @@ def _capture_settings(monkeypatch):
 
     monkeypatch.setattr(cli, "run", capture)
     return captured
+
+
+def test_no_check_flag_wiring(tmp_path: Path, make_jar, monkeypatch):
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    captured = _capture_settings(monkeypatch)
+    assert runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")]).exit_code == 0
+    assert captured["settings"].check is True
+    assert runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out2"), "--no-check"]).exit_code == 0
+    assert captured["settings"].check is False
 
 
 @pytest.mark.parametrize(

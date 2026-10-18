@@ -122,3 +122,4 @@ def test_cli_caps_and_measures_engine_memory_real(fixture_jar, tmp_path: Path):
     for a in attempts:
         assert a["heap_mb"] == 1708  # one job: 2048 - 300 - 2048 // 50
         assert 0 < a["peak_rss_mb"] <= 2048  # inside the share
+    assert report["totals"]["checked_files"] > 0 and report["totals"]["unchecked_files"] == 0  # the checker JVM too (#99)

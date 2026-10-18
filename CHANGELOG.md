@@ -13,6 +13,24 @@ All notable changes to decaf are documented here.
   starts, decaf prints how the budget is split and warns when an artifact
   probably needs more heap than its share. `--memory SIZE` sets the budget
   for all engine JVMs together.
+- Compile check of decompiled sources (#99). After an engine writes its
+  output, decaf compiles each `.java` file alone with `javac`, with the
+  classes of the input on the classpath. A class with a parse, name, or flow
+  error (for example a variable that the engine renamed in its uses but not
+  in its declaration) goes to the next engine. A class that stays wrong is
+  listed under `flagged`, and its artifact is partial. A file that refers to
+  a class outside the input is not checked, so an absent dependency never
+  causes a false flag. The check and the stub scan (#96) share one hold
+  step: a retry file replaces a held file only when it has no stub and
+  passes the check. The report gets `check` counts for each artifact,
+  `attempts[].flagged`, and the totals `checked_files`, `flagged_files`,
+  `noted_files`, and `unchecked_files`. For each artifact, it also lists the
+  `flagged` and `noted` files with their javac errors (at most 100 for each
+  file), and the `unchecked` files with their reasons; `decaf report
+  --artifact` shows these lists. When files are flagged, the end of the run
+  points to `decaf report OUTPUT --problems`. The checker JVM gets the same
+  heap as the engine JVM of its job (#98). The check needs a JDK and is on by
+  default. `--no-check` turns it off.
 
 ### Changed
 

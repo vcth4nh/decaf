@@ -484,6 +484,29 @@ def test_run_engine_batch_threads_engine_args(tmp_path: Path, monkeypatch):
     assert "-dgs=1" in seen["cmd"]
 
 
+def test_run_process_reports_exit_code_and_stderr_tail():
+    PROCESSES.reset()
+    rc, timed_out, tail, _, _ = engines.run_process(
+        [sys.executable, "-c", "import sys; sys.stderr.write('bad thing'); sys.exit(3)"], 30
+    )
+    assert (rc, timed_out) == (3, False)
+    assert "bad thing" in tail
+
+
+def test_run_process_times_out():
+    PROCESSES.reset()
+    _, timed_out, _, _, _ = engines.run_process([sys.executable, "-c", "import time; time.sleep(30)"], 0.5)
+    assert timed_out is True
+
+
+def test_run_process_refuses_after_registry_closed():
+    PROCESSES.kill_all()
+    try:
+        assert engines.run_process([sys.executable, "-c", "pass"], 5) == (-1, False, "interrupted", None, False)
+    finally:
+        PROCESSES.reset()
+
+
 def test_build_command_heap_flag():
     cmd = build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J, cpu_budget=3, heap_mb=2048)
     assert cmd[:3] == [J, "-XX:ActiveProcessorCount=3", "-Xmx2048m"]
