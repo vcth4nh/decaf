@@ -28,8 +28,9 @@ All notable changes to decaf are documented here.
   `flagged` and `noted` files with their javac errors (at most 100 for each
   file), and the `unchecked` files with their reasons; `decaf report
   --artifact` shows these lists. When files are flagged, the end of the run
-  points to `decaf report OUTPUT --problems`. The check needs a JDK and is on
-  by default. `--no-check` turns it off.
+  points to `decaf report OUTPUT --problems`. The checker JVM gets the same
+  heap as the engine JVM of its job (#98). The check needs a JDK and is on by
+  default. `--no-check` turns it off.
 
 ### Changed
 

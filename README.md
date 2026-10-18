@@ -194,7 +194,9 @@ The check makes a run longer. In one test on `jenkins.war`, a normal run took
 of 46 of its 80 archives, and decaf does not check Maven sources. With
 `--no-maven`, decaf decompiled and checked all 80 archives: 23 minutes with the
 check, 7 minutes without it. A run on one library jar took 24 seconds with the
-check and 12 seconds without it. `--no-check` turns the check off.
+check and 12 seconds without it. The checker JVM runs in the job of its engine,
+after the engine JVM stops, and gets the same heap. `--no-check` turns the
+check off.
 
 ## Configuration
 

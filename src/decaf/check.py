@@ -272,9 +272,12 @@ def build_command(
     *,
     threads: int,
     cds_dir: Path | None = None,
+    heap_mb: int | None = None,
 ) -> list[str]:
-    """The one place that builds the checker command (#98 adds its heap flag here)."""
+    """The one place that builds the checker command."""
     cmd = [java, f"-XX:ActiveProcessorCount={threads}"]
+    if heap_mb is not None:
+        cmd.append(f"-Xmx{heap_mb}m")  # the heap share of the engine JVM in the same slot (#98)
     if cds_dir is not None:
         cmd += [
             "-XX:+AutoCreateSharedArchive",
@@ -292,13 +295,14 @@ def run_check(
     install: Path,
     tmp_root: Path,
     cds_dir: Path | None = None,
+    heap_mb: int | None = None,
 ) -> list[list[FileResult]]:
     """One checker JVM for all jobs: one result for each file of each job, in order."""
     work = Path(tempfile.mkdtemp(prefix="check-", dir=tmp_root))
     jobs_file, result_file = work / "jobs.bin", work / "results.tsv"
     write_jobs(jobs_file, jobs)
     threads = max(1, cpu_budget or 1)
-    cmd = build_command(java, install, jobs_file, result_file, threads=threads, cds_dir=cds_dir)
+    cmd = build_command(java, install, jobs_file, result_file, threads=threads, cds_dir=cds_dir, heap_mb=heap_mb)
     _, timed_out, _, _, _ = engines.run_process(cmd, timeout)
     try:
         text = result_file.read_text(encoding="utf-8", errors="replace")

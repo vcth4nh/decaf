@@ -2519,6 +2519,31 @@ def test_run_without_a_cap_records_no_heap(fake_env, make_jar, tmp_path):
     assert all(a.heap_mb is None for r in report.artifacts for a in r.attempts)
 
 
+def test_run_gives_each_checker_jvm_the_heap_of_its_engine_jvm(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("small.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+    make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    seen: list[tuple[str, int | None]] = []
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "vineflower" and Path(target).name == "small.jar":
+            (Path(dest) / "com/x/B.java").unlink()  # B goes missing: a cfr class retry follows
+            res.java_files -= 1
+        return res
+
+    def checker(jobs, *, timeout, cpu_budget, heap_mb=None):
+        seen.extend((job.classpath[0].name, heap_mb) for job in jobs)
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=4, cpus=4, memory_mb=8000),
+        runner=engine, checker=checker,
+    )
+    # small.jar: the archive check and the class-retry check; then the whale check
+    assert sorted(seen) == [("small.jar", 1660), ("small.jar", 1660), ("whale.jar", 3620)]
+
+
 def test_run_flags_out_of_memory_attempts(fake_env, make_jar, tmp_path):
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)

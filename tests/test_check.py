@@ -230,6 +230,14 @@ def test_build_command_with_and_without_cds(tmp_path: Path):
     ]
 
 
+def test_build_command_heap_flag(tmp_path: Path):
+    inst = tmp_path / "abc123-21"
+    cmd = check.build_command(
+        "java", inst, tmp_path / "j", tmp_path / "r", threads=3, cds_dir=tmp_path / "cds", heap_mb=2048
+    )
+    assert cmd[:4] == ["java", "-XX:ActiveProcessorCount=3", "-Xmx2048m", "-XX:+AutoCreateSharedArchive"]
+
+
 def test_run_check_maps_results_and_missing_lines(tmp_path: Path, monkeypatch):
     seen = {}
 
@@ -248,6 +256,21 @@ def test_run_check_maps_results_and_missing_lines(tmp_path: Path, monkeypatch):
     assert [r.status for r in out[0]] == ["clean", "flagged", "unchecked"]
     assert out[0][2].reason == "javac crash"
     assert seen["cmd"][-1] == "2"
+
+
+def test_run_check_gives_the_checker_jvm_its_heap(tmp_path: Path, monkeypatch):
+    cmds = []
+
+    def fake_process(cmd, timeout, on_stderr_line=None):
+        cmds.append(cmd)
+        return 0, False, "", None, False
+
+    monkeypatch.setattr(check.engines, "run_process", fake_process)
+    jobs = [check.Job("0", (), (tmp_path / "A.java",))]
+    for heap in (1660, None):
+        check.run_check(jobs, timeout=5, cpu_budget=2, java="java", install=tmp_path, tmp_root=tmp_path, heap_mb=heap)
+    assert "-Xmx1660m" in cmds[0]
+    assert not any(t.startswith("-Xmx") for t in cmds[1])
 
 
 def test_run_check_timeout_marks_unfinished_files(tmp_path: Path, monkeypatch):

@@ -592,6 +592,28 @@ def test_decompile_batch_passes_one_slot_of_heap(make_jar, tmp_path):
     assert [r.attempts[0].heap_mb for r in done] == [1660, 1660]
 
 
+def test_decompile_batch_gives_the_checker_one_slot_of_heap(make_jar, tmp_path):
+    from decaf import memory
+    from decaf.pipeline import _decompile_batch
+
+    heaps = []
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    def checker(jobs, *, timeout, cpu_budget, heap_mb=None):
+        heaps.append(heap_mb)
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, batch)
+    ctx.checker = checker
+    ctx.memory_plan = memory.plan(8000, 4)
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == [] and heaps == [1660]  # one checker JVM for the batch, with the heap of the batch JVM
+
+
 def test_decompile_batch_empty_member_file_requeues(make_jar, tmp_path):
     from decaf.pipeline import _decompile_batch
 
@@ -1383,7 +1405,7 @@ def test_check_trees_returns_none_after_interrupt(make_jar, tmp_path: Path):
     ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
     PROCESSES.kill_all()
     try:
-        assert _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx) is None
+        assert _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None) is None
     finally:
         PROCESSES.reset()
     assert calls == []

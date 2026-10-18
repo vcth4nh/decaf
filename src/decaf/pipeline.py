@@ -551,9 +551,12 @@ class _Held:
 
 
 def _check_trees(
-    items: list[tuple[Path, Artifact, Path, _Held]], ctx: Ctx
+    items: list[tuple[Path, Artifact, Path, _Held]], ctx: Ctx, heap_mb: int | None
 ) -> list[dict[str, check.FileResult]] | None:
-    """One check call for (tree, artifact, source, held) items; results by path in each tree."""
+    """One check call for (tree, artifact, source, held) items; results by path in each tree.
+
+    The checker JVM runs in the slot of the engine JVM, after it, so it gets the same heap (#98).
+    """
     if ctx.checker is None or engines.PROCESSES.closed:
         return None
     limit = ctx.java_major + check.CLASS_VERSION_OFFSET if ctx.java_major else None
@@ -585,7 +588,10 @@ def _check_trees(
         sent.append(paths)
         jobs.append(check.Job(str(n), tuple(_family_classpath(artifact, source, ctx)), tuple(tree / r for r in paths)))
     if any(job.files for job in jobs):
-        answers = ctx.checker(jobs, timeout=ctx.settings.timeout, cpu_budget=ctx.cpu_budget)
+        answers = ctx.checker(
+            jobs, timeout=ctx.settings.timeout, cpu_budget=ctx.cpu_budget,
+            **({"heap_mb": heap_mb} if heap_mb is not None else {}),
+        )
         for by_path, paths, answer in zip(results, sent, answers):
             by_path.update(zip(paths, answer))
     return results
@@ -649,7 +655,7 @@ def _apply_hold(
 
 
 def _hold_output(
-    tree: Path, engine: str, artifact: Artifact, source: Path, ctx: Ctx, held: _Held
+    tree: Path, engine: str, artifact: Artifact, source: Path, ctx: Ctx, held: _Held, heap_mb: int | None
 ) -> tuple[list[stubs.Stub], int]:
     """The hold step of one engine output, before the writer copies it: (its stubs, flagged).
 
@@ -660,7 +666,7 @@ def _hold_output(
         if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and p.stat().st_size == 0:
             p.unlink()
     found = stubs.scan(tree, engine)
-    results = _check_trees([(tree, artifact, source, held)], ctx)
+    results = _check_trees([(tree, artifact, source, held)], ctx, heap_mb)
     flagged = _apply_hold(
         tree, {s.path: s for s in found}, results[0] if results is not None else None, engine, held, ctx
     )
@@ -792,7 +798,7 @@ def _retry_missing_classes(
                 **({"heap_mb": heap} if heap is not None else {}),
                 **_stream_kw_for(ctx, name, artifact.rel),
             )
-            found, flagged = _hold_output(dest, name, artifact, source, ctx, held) if res.java_files > 0 else ([], 0)
+            found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
             report.attempts.append(_attempt(name, "class", res, res.java_files, found, heap, flagged))
             if res.java_files > 0:
                 java, collisions = ctx.writer.add_tree(dest, artifact.rel)
@@ -828,7 +834,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             **({"heap_mb": heap} if heap is not None else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
-        found, flagged = _hold_output(dest, name, artifact, source, ctx, held) if res.java_files > 0 else ([], 0)
+        found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
         report.attempts.append(_attempt(name, "archive", res, res.java_files, found, heap, flagged))
         if res.java_files > 0:
             java, collisions = ctx.writer.add_tree(dest, artifact.rel)
@@ -1194,7 +1200,7 @@ def _decompile_batch(
         order = sorted(trees)
         helds = {i: _Held() for i in order}
         found = {i: {s.path: s for s in stubs.scan(trees[i], name)} for i in order}
-        results = _check_trees([(trees[i], members[i][0], members[i][1], helds[i]) for i in order], ctx)
+        results = _check_trees([(trees[i], members[i][0], members[i][1], helds[i]) for i in order], ctx, heap)
         for n, i in enumerate(order):
             by_path = results[n] if results is not None else None
             counts[i] = (list(found[i].values()), _apply_hold(trees[i], found[i], by_path, name, helds[i], ctx))
