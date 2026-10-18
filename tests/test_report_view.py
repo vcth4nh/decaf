@@ -375,7 +375,7 @@ def test_render_artifact_check_lines():
     assert "check: checked=3 flagged=1 noted=0 unchecked=1 (absent classes 1)" in plain
     assert "flagged a/B.java (vineflower): name, 2 errors - 3: cannot find symbol: variable xx" in plain
     assert "\n    3: cannot find symbol: variable xx\n    8: incompatible types: a\n" in plain
-    assert "  noted a/C.java (cfr): type, 1 errors - 4: incompatible types: List[]\n" in plain
+    assert "  noted a/C.java (cfr): type, 1 error - 4: incompatible types: List[]\n" in plain
     assert "  unchecked a/D.java (vineflower): absent classes - 1: package org.absent does not exist\n" in plain
     assert "  unchecked a/E.java (vineflower): newer class version (needs Java 25+)\n" in plain
     assert "java_files=3 stubbed=0 flagged=1" in plain

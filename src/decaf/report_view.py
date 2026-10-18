@@ -316,9 +316,10 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
 
 def _check_line(label: str, f: dict) -> str:
     """One flagged or noted file: kinds, error count, and the error that decided its status (#99)."""
+    n = f.get("errors", 0)
     return (
         f"  {label} {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
-        f"{escape(', '.join(f.get('kinds') or []))}, {f.get('errors', 0)} errors - "
+        f"{escape(', '.join(f.get('kinds') or []))}, {n} error{'' if n == 1 else 's'} - "
         f"{escape(str(f.get('first')))}"
     )
 
