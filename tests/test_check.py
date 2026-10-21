@@ -1,6 +1,7 @@
 import hashlib
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -105,8 +106,13 @@ def test_old_source_keyword_identifier_is_unchecked():
 
 
 def test_crash_and_unfinished_files():
-    assert classify(raw("0\t0\tX\tjava.lang.AssertionError: isSubtype UNKNOWN", "0\t0\tT\t5"), False) == unchecked("javac crash")
+    assert classify(raw("0\t0\tX\tjava.lang.AssertionError: isSubtype UNKNOWN", "0\t0\tT\t5"), False) == unchecked(
+        "javac crash", first="java.lang.AssertionError: isSubtype UNKNOWN"  # the cause shows in the report (#108)
+    )
     assert classify(None, False) == unchecked("javac crash")
+    assert classify(None, False, "java.lang.OutOfMemoryError: Java heap space") == unchecked(
+        "javac crash", first="java.lang.OutOfMemoryError: Java heap space"
+    )
     assert classify(None, True) == unchecked("timeout")
     assert classify(raw("0\t0\tE\tA\tcompiler.err.missing.ret.stmt\t9\tm"), True) == unchecked("timeout")
 
@@ -195,7 +201,7 @@ def test_install_reuses_an_existing_install(tmp_path: Path, monkeypatch):
     digest = hashlib.sha256(check.SOURCE.read_bytes()).hexdigest()[:12]
     target = tmp_path / f"{digest}-21"
     target.mkdir()
-    (target / "Checker.class").write_bytes(b"x")
+    (target / check.JAR).write_bytes(b"x")
     monkeypatch.setattr(check.subprocess, "run", lambda *a, **k: pytest.fail("must not compile"))
     assert check.install(Path("/jdk/bin/javac"), 21, root=tmp_path) == target
 
@@ -221,7 +227,7 @@ def test_build_command_with_and_without_cds(tmp_path: Path):
     inst = tmp_path / "abc123-21"
     jobs, res = tmp_path / "j", tmp_path / "r"
     assert check.build_command("java", inst, jobs, res, threads=3) == [
-        "java", "-XX:ActiveProcessorCount=3", "-cp", str(inst), "Checker", str(jobs), str(res), "3",
+        "java", "-XX:ActiveProcessorCount=3", "-cp", str(inst / "checker.jar"), "Checker", str(jobs), str(res), "3",
     ]
     cmd = check.build_command("java", inst, jobs, res, threads=2, cds_dir=tmp_path / "cds")
     assert cmd[2:4] == [
@@ -281,3 +287,42 @@ def test_run_check_timeout_marks_unfinished_files(tmp_path: Path, monkeypatch):
     jobs = [check.Job("0", (), (tmp_path / "A.java",))]
     out = check.run_check(jobs, timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
     assert out == [[unchecked("timeout")]]
+
+
+def _class_file(name: str, long_first: bool = False) -> bytes:
+    """A minimal class file whose this_class is name; long_first puts a Long (two pool slots) first."""
+    utf = name.encode()
+    pool = b"\x05" + bytes(8) if long_first else b""
+    first = 3 if long_first else 1
+    pool += b"\x01" + len(utf).to_bytes(2, "big") + utf + b"\x07" + first.to_bytes(2, "big")
+    count = first + 2
+    return (b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + count.to_bytes(2, "big") + pool
+            + b"\x00\x21" + (first + 1).to_bytes(2, "big") + b"\x00\x00")
+
+
+def test_class_name_reads_this_class():
+    assert check.class_name(_class_file("p/A")) == "p/A"
+    assert check.class_name(_class_file("q/B$1", long_first=True)) == "q/B$1"
+    assert check.class_name(b"not a class") is None
+    assert check.class_name(_class_file("p/A")[:12]) is None
+
+
+def test_run_check_gives_the_crash_text(tmp_path: Path, monkeypatch):
+    """#108: a checker JVM that stops with no result line shows its cause, e.g. an out-of-memory error."""
+    tail = "Exception in thread \"main\" java.lang.OutOfMemoryError: Java heap space\n"
+    monkeypatch.setattr(check.engines, "run_process", lambda cmd, timeout: (1, False, tail, None, True))
+    out = check.run_check([check.Job("0", (), (tmp_path / "A.java",))], timeout=5, cpu_budget=1,
+                          java="java", install=tmp_path, tmp_root=tmp_path)
+    assert out == [[unchecked("javac crash", first='Exception in thread "main" java.lang.OutOfMemoryError: Java heap space')]]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a shell script stands in for java")
+def test_find_javac_reads_a_property_dump_that_is_no_utf8(tmp_path: Path):
+    """#108: a property value in another encoding must not stop the run."""
+    jdk = tmp_path / "jdk"
+    (jdk / "bin").mkdir(parents=True)
+    (jdk / "bin/javac").write_text("")
+    java = tmp_path / "java"
+    java.write_bytes(b"#!/bin/sh\nprintf '    java.home = " + str(jdk).encode() + b"\\n    user.dir = /x\\377y\\n' >&2\n")
+    java.chmod(0o755)
+    assert check.find_javac(str(java)) == jdk / "bin/javac"

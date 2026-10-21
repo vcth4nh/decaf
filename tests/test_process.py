@@ -1439,6 +1439,25 @@ def test_family_classpath_input_group_and_class_tree(make_jar, tmp_path: Path):
     assert _family_classpath(t, tree, ctx) == [tree, a_jar, b_jar, tmp_path / "in"]
 
 
+def test_check_of_a_class_folder_uses_its_package_roots(tmp_path: Path):
+    """#108: a folder such as build/classes/java/main/p needs its root on the classpath, not the folder above."""
+    from decaf.pipeline import _check_trees, _Held, _tree_roots
+    from test_check import _class_file
+
+    source = tmp_path / "copy"
+    for rel, name in (("build/classes/java/main/p/A.class", "p/A"), ("q/B.class", "q/B")):
+        (source / rel).parent.mkdir(parents=True, exist_ok=True)
+        (source / rel).write_bytes(_class_file(name))
+    assert _tree_roots(source) == [source, source / "build/classes/java/main"]
+    tree = tmp_path / "out-tree"
+    (tree / "build/classes/java/main/p").mkdir(parents=True)
+    (tree / "build/classes/java/main/p/A.java").write_text("package p; class A {}")
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
+    _check_trees([(tree, Artifact(tmp_path / "in", "_classes", ArtifactKind.CLASS_TREE), source, _Held())], ctx, None)
+    assert calls[0][0].classpath[:2] == (source, source / "build/classes/java/main")
+
+
 def test_family_classpath_single_file_input_has_no_input_group(make_jar, tmp_path: Path):
     from decaf.pipeline import _family_classpath
 

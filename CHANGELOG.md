@@ -64,9 +64,25 @@ All notable changes to decaf are documented here.
   410 (for example 400 or 407) no longer counts as missing sources. A
   cached "no sources" verdict now counts only for the same file-name hints,
   so a renamed jar is looked up again.
+- The compile check lost results and hid its failures (#108). The checker
+  wrote the results of a job only at its end, so a kill at the timeout
+  made all its files `unchecked: timeout`, also the files with flags. Now
+  each result is written when its file is done. A file that the check could
+  not finish now shows its cause in `first` (for example the javac
+  exception, or the last line of the checker's stderr), and the ending
+  counts such files. An unreadable jar on the classpath now costs only its
+  own classes. A class folder such as `build/classes/java/main` now goes on
+  the classpath at its package root, so its classes find each other. The
+  checker classes now run from a jar, so the CDS archive of the checker
+  works, and a property dump of `java` that is not UTF-8 no longer stops
+  the run.
 
 ### Security
 
+- The compile check gave the jars of the input to javac as class path
+  entries, so javac followed their `Class-Path` manifests, also to files
+  outside the input. Now each jar goes in as the root of its zip file
+  system, and javac reads no manifest of an input jar.
 - Archive names and engine output could put terminal control codes on the
   screen, because decaf escaped only the rich markup. Now each control
   character (C0, DEL, and C1) prints as `\xNN`.

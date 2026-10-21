@@ -542,9 +542,26 @@ def _container_group(rel: str, path: Path, ctx: Ctx) -> list[Path]:
     return ([root] if root is not None else []) + [path] + nested
 
 
-def _family_classpath(artifact: Artifact, source: Path, ctx: Ctx) -> list[Path]:
-    """Classpath of an artifact's check: its own group, then its parent's or the input group (#99)."""
-    cp = [source] if source.is_dir() else _container_group(artifact.rel, source, ctx)
+def _tree_roots(source: Path) -> list[Path]:
+    """The package roots of a class folder, e.g. build/classes/java/main, from the class names (#108)."""
+    roots: set[Path] = set()
+    for p in source.rglob("*.class"):
+        try:
+            name = check.class_name(p.read_bytes())
+        except OSError:
+            continue
+        rel = p.relative_to(source).as_posix()[: -len(".class")]
+        if name and (rel == name or rel.endswith("/" + name)):
+            roots.add(source / rel[: len(rel) - len(name)])
+    return sorted(roots) or [source]
+
+
+def _family_classpath(artifact: Artifact, source: Path, ctx: Ctx, roots: list[Path] | None = None) -> list[Path]:
+    """Classpath of an artifact's check: its own group, then its parent's or the input group (#99).
+
+    A class folder goes in as its package roots (#108).
+    """
+    cp = list(roots or [source]) if source.is_dir() else _container_group(artifact.rel, source, ctx)
     if "!/" in artifact.rel:
         parent = artifact.rel.rsplit("!/", 1)[0]
         with ctx.family_lock:
@@ -583,6 +600,7 @@ class _Held:
     checks: dict[str, _HeldFile] = field(default_factory=dict)  # key -> the written file and its check result
     versions: dict[str, int] | None = None  # key -> class major version, read once
     copies: set[str] | None = None  # the _copied_keys of the source, read once
+    roots: list[Path] | None = None  # the _tree_roots of a class folder, read once
 
     def stems(self) -> set[str]:
         """The class stems of the held files: a copy's key loses its container root (#107)."""
@@ -605,6 +623,8 @@ def _check_trees(
     for n, (tree, artifact, source, held) in enumerate(items):
         if held.versions is None:
             held.versions = _class_versions(source)
+        if held.roots is None and source.is_dir():
+            held.roots = _tree_roots(source)
         by_path: dict[str, check.FileResult] = {}
         paths: list[str] = []
         for p in sorted(tree.rglob("*")):
@@ -625,7 +645,8 @@ def _check_trees(
             paths.append(rel)
         results.append(by_path)
         sent.append(paths)
-        jobs.append(check.Job(str(n), tuple(_family_classpath(artifact, source, ctx)), tuple(tree / r for r in paths)))
+        classpath = _family_classpath(artifact, source, ctx, held.roots)
+        jobs.append(check.Job(str(n), tuple(classpath), tuple(tree / r for r in paths)))
     if any(job.files for job in jobs):
         answers = ctx.checker(
             jobs, timeout=ctx.settings.timeout, cpu_budget=ctx.cpu_budget,
@@ -1435,7 +1456,8 @@ def run(
     if not settings.check:
         checker = None
     input_group = (
-        [a.path for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)]
+        [p for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)
+         for p in (_tree_roots(a.path) if a.kind is ArtifactKind.CLASS_TREE else [a.path])]
         if settings.input.is_dir() else []
     )
     # An injected runner without an injected batch_runner disables batching:

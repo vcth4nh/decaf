@@ -6,6 +6,7 @@ import dataclasses
 import fnmatch
 import json
 import re
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -242,6 +243,11 @@ def render_ending(
     if newer and needs:
         found = report.settings.get("java_major")
         console.print(f"[dim]compile check: {newer} files need Java {needs}+ (found Java {found})[/]")
+    stopped = [f for r in report.artifacts for f in r.unchecked if f.get("reason") in ("javac crash", "timeout")]
+    if stopped:  # files that the check could not finish: the cause shows here (#108)
+        counts = ", ".join(f"{n} {reason}" for reason, n in sorted(Counter(f.get("reason") for f in stopped).items()))
+        why = next((f.get("first") for f in stopped if f.get("first")), None)
+        console.print(f"[dim]compile check: {len(stopped)} files not checked ({counts})" + (f": {safe(why)}" if why else "") + "[/]")
     if flagged:
         console.print(f'[dim]compile check: run "decaf report {safe(output)} --problems" for more information[/]')
     if out_of_heap:
