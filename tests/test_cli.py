@@ -102,6 +102,15 @@ def test_bad_config_exits_2(tmp_path: Path, make_jar):
     assert result.exit_code == 2
 
 
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "-inf"])
+def test_timeout_must_be_a_finite_number_above_zero(tmp_path: Path, make_jar, value):
+    """#113: such values fail every artifact, write invalid JSON, or leave the JVMs without a kill."""
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--timeout", value])
+    assert result.exit_code == 2
+    assert "--timeout: use a number of seconds above 0" in ANSI.sub("", result.output)
+
+
 def test_bad_repo_url_exits_2(tmp_path: Path, make_jar):
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     cfg = tmp_path / "decaf.toml"

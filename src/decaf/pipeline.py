@@ -14,7 +14,7 @@ import zipfile
 from collections import deque
 from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
 from heapq import heappush, heappop
@@ -402,6 +402,28 @@ class Ctx:
 
 def _tmp_dir(ctx: Ctx) -> Path:
     return Path(tempfile.mkdtemp(dir=ctx.tmp_root))
+
+
+def _jvm_input(artifact: Artifact, tmp_root: Path) -> Artifact:
+    """The input with a path that a JVM can open (#113).
+
+    Java decodes the bytes of a path as UTF-8, so a name with other bytes, for example a Latin-1
+    name, reaches an engine or javac as other characters. Such an input gets a link in the temp
+    root, and Python reads the same file through it. Where the link fails, the path stays.
+    """
+    if artifact.kind not in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE):
+        return artifact  # only Python reads the other kinds
+    try:
+        str(artifact.path).encode("utf-8")
+        return artifact
+    except UnicodeEncodeError:
+        pass
+    link = Path(tempfile.mkdtemp(dir=tmp_root)) / ("input" + artifact.path.suffix)
+    try:
+        os.symlink(artifact.path.absolute(), link, target_is_directory=artifact.kind is ArtifactKind.CLASS_TREE)
+    except OSError:
+        return artifact
+    return replace(artifact, path=link)
 
 
 def _class_stem(entry: str) -> str:
@@ -1564,11 +1586,6 @@ def run(
             cds_dir = engines.cache_root() / "engines"
     if not settings.check:
         checker = None
-    input_group = (
-        [p for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)
-         for p in (_tree_roots(a.path) if a.kind is ArtifactKind.CLASS_TREE else [a.path])]
-        if settings.input.is_dir() else []
-    )
     # An injected runner without an injected batch_runner disables batching:
     # custom runners are per-target and must see every artifact individually.
     net = maven.NetState(warn=on_warn)
@@ -1612,6 +1629,12 @@ def run(
         except OSError as exc:
             where = getattr(exc, "filename", None) or settings.output
             raise DecafError(f"cannot write to {where}: {exc.strerror or exc}") from exc
+        artifacts = [_jvm_input(a, tmp_root) for a in artifacts]
+        input_group = (
+            [p for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)
+             for p in (_tree_roots(a.path) if a.kind is ArtifactKind.CLASS_TREE else [a.path])]
+            if settings.input.is_dir() else []
+        )
         chain, engine_jars = _preflight_engines(
             settings, java_major, client, on_event, on_warn=on_warn
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import shutil
 import signal
 import sys
@@ -482,6 +483,8 @@ def main(
             raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
         if engine_args and not no_fallback:
             raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
+        if not (math.isfinite(timeout) and timeout > 0):  # other values fail each artifact, the report, or the kill (#113)
+            raise _fail("--timeout: use a number of seconds above 0")
         memory_mb: int | None = None  # None = auto: 80% of the RAM (#98)
         if memory_budget is not None:
             try:
