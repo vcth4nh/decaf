@@ -1072,10 +1072,13 @@ def _fetch_stage(
             resolution = None
             if ctx.settings.maven and ctx.client is not None:
                 state("resolving")
-                resolution = ctx.resolver(
-                    artifact.path, list(ctx.settings.repos), ctx.client, ctx.sources_cache,
-                    **({} if ctx.on_event is None else {"on_state": state, "subject": artifact.rel}),
-                )
+                try:
+                    resolution = ctx.resolver(
+                        artifact.path, list(ctx.settings.repos), ctx.client, ctx.sources_cache,
+                        **({} if ctx.on_event is None else {"on_state": state, "subject": artifact.rel}),
+                    )
+                except Exception as exc:  # e.g. a read-only or full sources cache: the engines decompile (#111)
+                    resolution = maven.Resolution(miss=f"sources lookup failed: {exc}")
             done = False
             if resolution is not None and resolution.sources_jar is not None:
                 state("extracting")
@@ -1091,6 +1094,7 @@ def _fetch_stage(
                     report.collisions = collisions
                     done = True
                 elif damaged:  # a part of the sources is no complete output: the engines decompile (#109)
+                    maven.drop_cached_sources(resolution.sources_jar)  # the next run downloads it again (#111)
                     resolution.miss = f"sources jar for {resolution.gav} has a damaged entry: {damaged[0]}"
                 else:
                     resolution.miss = f"sources jar for {resolution.gav} contained no .java/.kt files"

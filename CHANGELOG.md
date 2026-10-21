@@ -46,6 +46,13 @@ All notable changes to decaf are documented here.
   alone, a damaged class stays a missing class, and a damaged source entry
   is a missing file. A Maven sources jar with a damaged entry now goes to
   the engines.
+- An error of the Maven sources lookup failed the artifact, and no engine
+  ran (#111). Examples are a read-only or full sources cache, and a damaged
+  `pom.properties` entry. Now the error is the sources miss
+  (`sources lookup failed: ...`), and the engines decompile. A downloaded
+  sources jar now goes to the cache only when decaf can read each of its
+  entries. A cached sources jar with a damaged entry is deleted, so the
+  next run downloads it again.
 
 ### Security
 

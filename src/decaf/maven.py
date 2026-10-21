@@ -91,10 +91,14 @@ def gav_from_pom_properties(jar_path: Path) -> Gav | None:
         with zipfile.ZipFile(jar_path) as zf:
             for name in zf.namelist():
                 if name.startswith("META-INF/maven/") and name.endswith("/pom.properties"):
-                    gav = _parse_pom_properties(zf.read(name).decode(errors="replace"))
+                    try:
+                        text = zf.read(name).decode(errors="replace")
+                    except ZIP_ERRORS:
+                        continue  # a damaged entry is no pom.properties (#111)
+                    gav = _parse_pom_properties(text)
                     if gav:
                         gavs.append(gav)
-    except (zipfile.BadZipFile, OSError):
+    except ZIP_ERRORS:
         return None
     if len(gavs) == 1:
         return gavs[0]
@@ -120,7 +124,7 @@ def _parse_manifest(jar_path: Path) -> dict[str, str]:
     try:
         with zipfile.ZipFile(jar_path) as zf:
             text = zf.read("META-INF/MANIFEST.MF").decode(errors="replace")
-    except (KeyError, zipfile.BadZipFile, OSError):
+    except (KeyError, *ZIP_ERRORS):
         return {}
     attrs: dict[str, str] = {}
     key = None
@@ -611,7 +615,7 @@ def _download(
                 os.unlink(tmp_name)
         if ok:
             log.ok_hosts.add(host)
-            if not zipfile.is_zipfile(tmp_name):
+            if not _readable_zip(tmp_name):
                 os.unlink(tmp_name)
                 return None
             try:
@@ -626,6 +630,24 @@ def _download(
         if attempt < RETRY_ATTEMPTS and _wait_before_retry(net, attempt, retry_after):
             raise NetworkFailure(host, kind, f"{host}: {kind}")  # aborted: quiet give-up
     raise _exhausted(net, log, host, kind, "sources download")
+
+
+def _readable_zip(path: Path) -> bool:
+    """True when each entry of the zip can be read; is_zipfile reads only the end record (#111)."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return zf.testzip() is None
+    except ZIP_ERRORS:
+        return False
+
+
+def drop_cached_sources(sources_jar: Path) -> None:
+    """Delete a cached sources jar that cannot be read, and its marker: the next run downloads it again (#111)."""
+    for p in (sources_jar, sources_jar.with_suffix(".repo")):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def extract_sources(sources_jar: Path, dest: Path, damaged: list[str] | None = None) -> int:

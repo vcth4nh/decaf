@@ -322,9 +322,9 @@ def test_runner_exception_becomes_failed_report(make_jar, tmp_path: Path):
     assert nested == []
 
 
-def test_resolver_exception_becomes_failed_report_with_nested(make_jar, tmp_path: Path):
-    """A stage-1 (resolution) crash fails the artifact without running engines,
-    but nested archives discovered before the crash are still surfaced."""
+def test_resolver_exception_falls_back_to_the_engines_with_nested(make_jar, tmp_path: Path):
+    """A stage-1 (resolution) crash is a sources miss: the engines decompile (#111),
+    and nested archives discovered before the crash are still surfaced."""
     inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
     war = make_jar(
         "app.war",
@@ -340,9 +340,8 @@ def test_resolver_exception_becomes_failed_report_with_nested(make_jar, tmp_path
     runner = writing_runner({"vineflower": {"com/w/W.java": "class W {}"}})
     ctx = make_ctx(tmp_path, runner, resolver=exploding_resolver, maven=True)
     report, nested = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
-    assert report.outcome == "failed"
-    assert "index server melted" in (report.failure or "")
-    assert runner.calls == []  # engines never run after a resolution crash
+    assert (report.outcome, report.method) == ("ok", "vineflower")
+    assert report.sources_miss == "sources lookup failed: index server melted"
     assert [n.rel for n in nested] == ["app.war!/WEB-INF/lib/dep.jar"]
 
 
@@ -919,6 +918,40 @@ def test_damaged_maven_sources_jar_falls_back_to_the_engines(make_jar, make_dama
     report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert (report.outcome, report.method) == ("ok", "vineflower")
     assert report.sources_miss == "sources jar for com.example:lib:1.2 has a damaged entry: com/x/B.java"
+
+
+def test_resolver_error_falls_back_to_the_engines(make_jar, tmp_path: Path):
+    """#111: a read-only or full sources cache must not fail an artifact that the engines can decompile."""
+    import errno
+
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        raise OSError(errno.EROFS, "Read-only file system", str(cache_dir))
+
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}), resolver=resolver, maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method) == ("ok", "vineflower")
+    assert report.sources_miss.startswith("sources lookup failed: [Errno 30] Read-only file system")
+
+
+def test_damaged_cached_sources_jar_is_dropped(make_jar, make_damaged_jar, tmp_path: Path):
+    """#111: the next run downloads the sources jar again."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
+    cache = tmp_path / "cache"
+    sources = make_damaged_jar("com.example_lib_1.2-sources.jar", {"com/x/A.java": "class A {}" * 10},
+                               damaged=("com/x/A.java",), base=cache)
+    marker = sources.with_suffix(".repo")
+    marker.write_text("https://r.test/m2")
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties", cached=True)
+
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}), resolver=resolver, maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method) == ("ok", "vineflower")
+    assert not sources.exists() and not marker.exists()
 
 
 def test_maven_hit_mirror_carries_original_resources(make_jar, tmp_path: Path):
