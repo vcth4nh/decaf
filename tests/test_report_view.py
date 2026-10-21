@@ -58,6 +58,12 @@ def test_verdict_tiers():
     first1 = c1.file.getvalue().splitlines()[0]
     assert first1 == "Interrupted after 42s — 5/10 artifacts completed"
 
+    # an error stopped the run (#112)
+    c0 = _console()
+    render_ending(c0, report(interrupted=True, discovered=10, status="aborted"),
+                  output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert c0.file.getvalue().splitlines()[0] == "Aborted after 42s — 5/10 artifacts completed"
+
     # failed > 0
     c2 = _console()
     render_ending(c2, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)

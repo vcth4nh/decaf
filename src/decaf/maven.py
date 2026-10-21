@@ -267,6 +267,8 @@ def _wait_before_retry(net: NetState, attempt: int, retry_after: float | None) -
 
 
 def _check_alive(net: NetState, host: str) -> None:
+    if net.abort.is_set():  # the run ends: no new request, so no wait for its timeout (#112)
+        raise NetworkFailure(host, "interrupted", f"{host}: interrupted")
     if net.is_dead(host):
         raise NetworkFailure(host, "skipped", f"{host} skipped (unreachable this run)")
 

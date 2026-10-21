@@ -677,6 +677,65 @@ def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
     assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped
 
 
+def test_no_engine_output_goes_out_after_ctrl_c(make_jar, tmp_path: Path):
+    """#112: a killed engine can leave a cut-off file; after Ctrl-C no engine output reaches the writer."""
+    from decaf.engines import PROCESSES
+
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+
+    def killed_engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        (Path(dest) / "com/x").mkdir(parents=True)
+        (Path(dest) / "com/x/A.java").write_text("class A {")
+        PROCESSES.kill_all()  # Ctrl-C lands while the engine runs
+        return EngineResult(spec.name, -9, False, 1, "")
+
+    ctx = make_ctx(tmp_path, killed_engine)
+    try:
+        report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    finally:
+        PROCESSES.reset()
+    assert not (tmp_path / "out/src/com/x/A.java").exists()
+    assert (report.outcome, report.failure) == ("failed", "interrupted")
+    assert [a.engine for a in report.attempts] == ["vineflower"]
+
+
+def test_decompile_batch_writes_nothing_after_ctrl_c(make_jar, tmp_path):
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import _decompile_batch
+
+    def killed_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout)
+        PROCESSES.kill_all()  # Ctrl-C lands while the batch runs
+        return res
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, killed_batch)
+    try:
+        done, requeue = _decompile_batch([m1, m2], ctx)
+    finally:
+        PROCESSES.reset()
+    assert done == [] and [a.rel for a, _, _ in requeue] == ["a.jar", "b.jar"]
+    assert not list((tmp_path / "out").rglob("*.java"))
+
+
+def test_decompile_batch_contains_a_full_disk(make_jar, tmp_path, monkeypatch):
+    """#112: an OSError from the batch folder requeues the members; it does not end the run."""
+    import errno
+
+    from decaf import pipeline
+
+    def no_space(ctx):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, merged_batch_engine)
+    monkeypatch.setattr(pipeline, "_tmp_dir", no_space)
+    done, requeue = pipeline._decompile_batch([m1, m2], ctx)
+    assert done == [] and [a.rel for a, _, _ in requeue] == ["a.jar", "b.jar"]
+
+
 def test_stems_and_claims_split_metadata_from_classes(make_jar, tmp_path):
     from decaf.pipeline import _stems_and_claims, expected_class_stems
 

@@ -443,6 +443,43 @@ def test_second_interrupt_during_teardown_still_writes_report(fake_env, make_jar
     assert on_disk["interrupted"] is True
 
 
+def test_error_in_a_callback_aborts_the_run_with_a_report(fake_env, make_jar, tmp_path: Path):
+    """#112: the JVMs get a kill, the report says aborted, and the error goes on to the caller."""
+    input_dir = tmp_path / "in"
+    for i in range(3):
+        make_jar(f"a{i}.jar", {f"com/x{i}/A.class": b"x"}, base=input_dir)
+
+    def broken_pipe(report):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    out = tmp_path / "out"
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine, on_done=broken_pipe)
+        assert engines.PROCESSES.closed
+    finally:
+        engines.PROCESSES.reset()
+    on_disk = json.loads((out / "decaf-report.json").read_text())
+    assert (on_disk["status"], on_disk["interrupted"]) == ("aborted", True)
+
+
+def test_scheduler_wait_has_a_timeout(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """#112: on Windows, a wait without a timeout sees Ctrl-C only when a future completes."""
+    import decaf.pipeline as pipeline
+
+    timeouts: list = []
+    real_wait = pipeline.wait
+
+    def wait(fs, timeout=None, return_when="ALL_COMPLETED"):
+        timeouts.append(timeout)
+        return real_wait(fs, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr(pipeline, "wait", wait)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=perfect_engine)
+    assert timeouts and None not in timeouts
+
+
 def test_run_resets_closed_registry(fake_env, make_jar, tmp_path: Path):
     import decaf.engines as _e
 
@@ -2253,6 +2290,30 @@ def test_run_interrupt_during_a_retry_still_writes_the_held_file(fake_env, make_
     assert [a.engine for a in r.attempts] == ["vineflower", "cfr"]  # the chain stopped
     assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == STUB_TEXT["vineflower"]
     assert [s["engine"] for s in r.stubs] == ["vineflower"]
+
+
+def test_run_interrupt_during_a_retry_writes_no_retry_file(fake_env, make_jar, tmp_path):
+    """A retry that Ctrl-C stops can leave a cut-off file of a missing class: it does not go out (#112)."""
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=input_dir)
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        name = "A" if spec.name == "vineflower" else "B"
+        (Path(dest) / "com/x").mkdir(parents=True, exist_ok=True)
+        (Path(dest) / f"com/x/{name}.java").write_text(f"class {name} {{" + ("}" if name == "A" else ""))
+        if spec.name == "cfr":
+            engines.PROCESSES.kill_all()  # Ctrl-C lands while the retry runs
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    try:
+        report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    finally:
+        engines.PROCESSES.reset()
+    r = report.artifacts[0]
+    assert [a.engine for a in r.attempts] == ["vineflower", "cfr"]
+    assert (tmp_path / "out/a.jar/com/x/A.java").is_file()
+    assert not (tmp_path / "out/a.jar/com/x/B.java").exists()
+    assert r.missing_classes == 1
 
 
 def test_run_interrupt_keeps_the_held_file_over_an_unchecked_retry_file(fake_env, make_jar, tmp_path):

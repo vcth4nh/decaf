@@ -136,8 +136,9 @@ def render_ending(
     dur = _fmt_duration(report.duration_seconds)
     if report.interrupted:
         denom = report.discovered or t["artifacts"]
+        stopped = "Aborted" if report.status == "aborted" else "Interrupted"  # an error stopped the run (#112)
         console.print(
-            f"[bold yellow]Interrupted after {dur} — {t['artifacts']}/{denom} artifacts completed[/]"
+            f"[bold yellow]{stopped} after {dur} — {t['artifacts']}/{denom} artifacts completed[/]"
         )
     elif t["failed"] > 0:
         console.print(f"[bold red]Completed with failures in {dur}[/]")

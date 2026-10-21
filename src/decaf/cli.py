@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import shutil
+import signal
 import threading
 from enum import Enum
 from pathlib import Path
@@ -208,6 +209,24 @@ class Format(str, Enum):
 def _fail(message: str) -> typer.Exit:
     console.print(f"[red]error:[/] {message}")
     return typer.Exit(code=2)
+
+
+def _end_like_ctrl_c() -> dict:
+    """SIGTERM and SIGHUP end the run like Ctrl-C, so the report is written and the temp files go (#112).
+
+    Returns the old handlers. Python sets handlers only in the main thread.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    return {
+        sig: signal.signal(sig, interrupt)
+        for sig in (getattr(signal, name, None) for name in ("SIGTERM", "SIGHUP"))
+        if sig is not None
+    }
 
 
 _STAGE_RANK = {"header": 0, "engines": 1, "fetch": 2, "decompile": 3}
@@ -533,6 +552,7 @@ def main(
             thread = threading.Thread(target=heartbeat, daemon=True)
             thread.start()
 
+        prior_handlers = _end_like_ctrl_c()
         try:
             with progress:
                 report = run(settings, on_done=on_done, on_found=on_found,
@@ -542,6 +562,8 @@ def main(
         except (DecafError, ScanError) as exc:
             raise _fail(str(exc))
         finally:
+            for sig, handler in prior_handlers.items():
+                signal.signal(sig, signal.SIG_DFL if handler is None else handler)
             stop.set()
             if thread is not None:
                 thread.join(timeout=2.0)

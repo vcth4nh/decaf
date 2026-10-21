@@ -13,6 +13,15 @@ All notable changes to decaf are documented here.
   class exists. Thus decaf now counts and retries classes such as
   `$Gson$Types` and inner classes without their outer class. CFR and Procyon
   now also decompile these classes in class folders.
+- An error such as a broken pipe stopped a run, but the report said
+  `completed` and the engine JVMs continued (#112). Now decaf kills the
+  JVMs and writes the report with the new status `aborted` before it stops.
+  A full disk at the start of a batch now fails only the jars of that
+  batch. SIGTERM and SIGHUP now end a run like Ctrl-C: decaf writes the
+  report with the status `interrupted` and deletes its temp folder. After
+  Ctrl-C, decaf starts no new network request, and no file of a killed
+  engine goes to the output. The scheduler now waits with a timeout, so
+  Ctrl-C on Windows does not wait for the next engine to finish.
 
 ### Security
 
