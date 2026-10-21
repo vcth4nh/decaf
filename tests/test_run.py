@@ -665,6 +665,8 @@ def test_run_default_cpu_budget_leaves_one_core_free(fake_env, make_jar, tmp_pat
     import os
 
     monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(16)), raising=False)
+    monkeypatch.setattr(os, "sched_setaffinity", lambda pid, mask: None, raising=False)
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
     report = run(
@@ -674,6 +676,97 @@ def test_run_default_cpu_budget_leaves_one_core_free(fake_env, make_jar, tmp_pat
     assert report.settings["cpus"] == 15  # auto budget = cores - 1
     assert report.settings["jobs"] == 4
     assert report.settings["cpu_budget"] == 3
+
+
+def test_run_default_cpu_budget_counts_the_cpus_of_the_affinity(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """#114: under taskset or a container cpuset, the default budget counted all the cores of the host."""
+    calls: list[set] = []
+    monkeypatch.setattr(os, "cpu_count", lambda: 64)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1, 2, 3}, raising=False)
+    monkeypatch.setattr(os, "sched_setaffinity", lambda pid, mask: calls.append(set(mask)), raising=False)
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine)
+    assert (report.settings["cpus"], report.settings["jobs"], report.settings["cpu_budget"]) == (3, 3, 1)
+    assert calls[0] == {0, 1, 2}
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1}, raising=False)
+    report = run(Settings(input=input_dir, output=tmp_path / "out2", maven=False, cpus=8), runner=perfect_engine)
+    assert report.settings["jobs"] == 2  # the default jobs come from the CPUs of the affinity too
+
+
+def test_a_waiting_whale_gets_the_next_freed_slots(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """#114: while a whale waited for two free slots, each freed slot went to a small jar.
+
+    The whale is in a war, so it is ready only after the small jars hold both slots (jobs=2).
+    Each small jar is its own task (one jar per batch). When s0 ends, one slot is free: the
+    whale needs two, and no small jar may take the slot. When s1 ends, the whale starts.
+    """
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_BATCH_MAX_JARS", 1)
+    whale = make_jar("whale.jar", {f"com/w/C{i}.class": b"x" for i in range(3000)})
+    input_dir = tmp_path / "in"
+    make_jar("app.war", {"WEB-INF/lib/whale.jar": whale.read_bytes()}, base=input_dir)
+    for i in range(4):
+        make_jar(f"s{i}.jar", {f"com/s{i}/A.class": b"x"}, base=input_dir)
+    started: list[str] = []
+    finished: list[str] = []
+    lock = threading.Lock()
+    gates = {f"s{i}.jar": threading.Event() for i in range(4)}
+    whale_queued = threading.Event()
+
+    def on_event(kind, subject, detail):
+        if kind == "queued" and subject.endswith("whale.jar"):
+            whale_queued.set()
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        name = Path(target).name
+        with lock:
+            started.append(name)
+        if name in gates:
+            gates[name].wait(timeout=30)
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        with lock:
+            finished.append(name)
+        return res
+
+    def wait_for(test) -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with lock:
+                if test():
+                    return
+            time.sleep(0.01)
+        raise AssertionError(f"timed out: started={started} finished={finished}")
+
+    result: dict = {}
+
+    def drive():
+        result["report"] = run(
+            Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=2, cpus=2),
+            runner=engine, batch_runner=merged_batch_engine, on_event=on_event,
+        )
+
+    t = threading.Thread(target=drive)
+    t.start()
+    try:
+        wait_for(lambda: len(started) == 2)  # two small jars hold both slots
+        assert whale_queued.wait(timeout=30)
+        first = started[0]
+        gates[first].set()
+        wait_for(lambda: first in finished)
+        time.sleep(1.5)  # three ticks of the scheduler: no small jar may take the freed slot
+        with lock:
+            assert len(started) == 2, started
+        gates[started[1]].set()
+        wait_for(lambda: "whale.jar" in started)
+        with lock:
+            assert started[2] == "whale.jar", started
+    finally:
+        for gate in gates.values():
+            gate.set()
+        t.join(timeout=60)
+    assert result["report"].totals["ok"] == 5  # the whale and the four small jars; the war has no files of its own
 
 
 def test_run_cpu_budget_and_jobs_clamp(fake_env, make_jar, tmp_path: Path):
@@ -3030,7 +3123,7 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
     reads: list[Path] = []
-    monkeypatch.setattr(pipeline, "_class_bytes", lambda target: reads.append(target) or 0)
+    monkeypatch.setattr(pipeline, "_class_bytes", lambda target, largest=False: reads.append(target) or 0)
     for out, engine in (("out", "jd"), ("out2", "vineflower")):
         run(
             Settings(input=input_dir, output=tmp_path / out, maven=False, jobs=1, cpus=1, memory_mb=1400,
@@ -3041,7 +3134,8 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
         assert len(reads) == (engine == "vineflower")  # jd has no size model: decaf does not read the jar
 
 
-def test_run_gives_batch_eligible_jars_no_estimate(fake_env, tmp_path):
+def test_run_warns_for_a_batch_eligible_jar_too(fake_env, tmp_path):
+    """#114: a jar under 3000 classes got no estimate, but a batch JVM has one share too."""
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
 
@@ -3055,7 +3149,100 @@ def test_run_gives_batch_eligible_jars_no_estimate(fake_env, tmp_path):
         batch_runner=batch,
         on_warn=warnings.append,
     )
-    assert not any("may need about" in w for w in warnings)  # under 3000 classes: batch-eligible
+    assert "big.jar: vineflower may need about 1.2 GB of heap; its share is 1.0 GB (raise --memory)" in warnings
+
+
+def test_run_estimates_one_class_for_an_engine_that_runs_each_class_alone(fake_env, tmp_path):
+    """#114: CFR runs one JVM for each class of a class folder, so the sum of the folder gave a false warning."""
+    input_dir = tmp_path / "in"
+    for i in range(40):
+        (input_dir / "p").mkdir(parents=True, exist_ok=True)
+        (input_dir / f"p/C{i}.class").write_bytes(b"\0" * 2**20)  # 85 + 22 x 40 = 965 MB for the folder
+    warnings: list[str] = []
+    for out, engine in (("out", "cfr"), ("out2", "vineflower")):
+        run(
+            Settings(input=input_dir, output=tmp_path / out, maven=False, jobs=1, cpus=1, memory_mb=1100,
+                     engine=engine),
+            runner=capped_engine,
+            on_warn=warnings.append,
+        )
+    estimates = [w for w in warnings if "may need about" in w]
+    assert len(estimates) == 1 and "vineflower" in estimates[0]  # Vineflower takes the folder in one JVM
+
+
+def test_run_counts_one_out_of_heap_batch_jvm_once(fake_env, make_jar, tmp_path: Path):
+    """#114: one batch JVM that ran out of heap counted as one attempt for each of its jars."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {**{f"com/big/C{i}.class": b"x" for i in range(900)}, "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()},
+        base=input_dir,
+    )
+    all_queued = threading.Event()
+    queued = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        res.out_of_memory = True  # out of heap in stderr, output complete
+        return res
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+        runner=gated_solo, batch_runner=batch, on_event=on_event,
+    )
+    members = [r for r in report.artifacts if r.rel.startswith("big.jar!/")]
+    assert [a.out_of_memory for r in members for a in r.attempts] == [True, True]
+    assert report.totals["out_of_memory_attempts"] == 1
+
+
+def test_run_counts_two_out_of_heap_batch_jvms_twice(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_BATCH_MAX_JARS", 2)
+    smalls = {f"lib/s{i}.jar": make_jar(f"s{i}.jar", {f"com/s{i}/A.class": b"x"}).read_bytes() for i in range(4)}
+    input_dir = tmp_path / "in"
+    make_jar("big.jar", {**{f"com/big/C{i}.class": b"x" for i in range(900)}, **smalls}, base=input_dir)
+    queued = [0]
+    first_two, all_four = threading.Event(), threading.Event()  # with jobs=1, the gate holds two small jars
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                first_two.set()
+            if queued[0] == 5:
+                all_four.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            first_two.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        all_four.wait(timeout=30)  # the other two small jars wait for the second batch
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        res.out_of_memory = True
+        return res
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+        runner=gated_solo, batch_runner=batch, on_event=on_event,
+    )
+    levels = [a.level for r in report.artifacts if r.rel.startswith("big.jar!/") for a in r.attempts]
+    assert levels == ["batch"] * 4 and report.totals["out_of_memory_attempts"] == 2
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="macOS and Windows file names are Unicode")

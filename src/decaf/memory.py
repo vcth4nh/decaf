@@ -48,7 +48,10 @@ def parse_size(text: str) -> int:
     unit = m.group(2)
     if unit is None:
         raise ValueError(f"a size needs a unit (k, m, g, t): {text!r}")
-    mb = int(number * _UNIT_MB[unit.lower()])
+    size = number * _UNIT_MB[unit.lower()]
+    if not math.isfinite(size):  # a number with hundreds of digits (#114)
+        raise ValueError(f"a size too large: {text!r}")
+    mb = int(size)
     if mb == 0:
         raise ValueError(f"a size below 1 MB: {text!r}")
     return mb
