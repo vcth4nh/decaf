@@ -217,6 +217,30 @@ def test_gav_from_pom_properties_needs_maven_coordinates(make_jar):
         assert gav_from_pom_properties(jar) is None
 
 
+def test_damaged_pom_properties_entry_is_skipped(make_damaged_jar):
+    """#111: one damaged entry of the jar must not stop the lookup."""
+    jar = make_damaged_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM * 3,
+                                           "META-INF/maven/org.other/dep/pom.properties": POM2 * 3},
+                           damaged=("META-INF/maven/org.other/dep/pom.properties",))
+    assert gav_from_pom_properties(jar) == Gav("com.example", "lib", "1.2")
+
+
+def test_damaged_manifest_gives_no_hints(make_damaged_jar):
+    jar = make_damaged_jar("mystery.jar", {"META-INF/MANIFEST.MF": "Implementation-Title: lib\n" * 5},
+                           damaged=("META-INF/MANIFEST.MF",))
+    assert candidate_coords(jar) == []
+
+
+def test_download_rejects_a_sources_jar_with_a_damaged_entry(make_damaged_jar, tmp_path: Path):
+    """#111: is_zipfile reads only the end record; a damaged jar in the cache would fail each later run."""
+    payload = make_damaged_jar("p.jar", {"com/e/A.java": "class A {}" * 10, "com/e/B.java": "class B {}" * 10},
+                               damaged=("com/e/B.java",)).read_bytes()
+    cache = tmp_path / "cache"
+    with make_client(lambda r: httpx.Response(200, content=payload)) as c:
+        assert fetch_sources(Gav("com.e", "lib", "1"), ["https://r.test/m2"], c, cache) is None
+    assert not list(cache.glob("*.jar"))
+
+
 def test_gav_missing_or_corrupt(make_jar, tmp_path: Path):
     plain = make_jar("plain.jar", {"A.class": b"x"})
     assert gav_from_pom_properties(plain) is None
