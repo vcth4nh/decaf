@@ -76,7 +76,9 @@ def test_redact_url_strips_userinfo_of_a_bad_url():
     assert redact_url("deploy:s3cr3t@nexus.example/m2") == "nexus.example/m2"
     assert redact_url("ftp://deploy:s3cr3t@nexus.example/m2") == "ftp://nexus.example/m2"
     assert redact_url("https://deploy:s3cr3t@[::1/m2") == "https://[::1/m2"
-    assert redact_url("https://nexus.example/m2/a@b") == "https://nexus.example/m2/a@b"
+    # Review M1: all text up to the last @ goes; the config refuses a URL with an @ after its host.
+    assert redact_url("https://deploy:pa/s3cr3t@nexus.example/m2") == "https://nexus.example/m2"
+    assert redact_url("https://nexus.example/m2/a@b") == "https://b"
 
 
 def test_redact_url_passthrough():
@@ -259,6 +261,28 @@ def test_download_rejects_a_sources_jar_with_a_damaged_entry(make_damaged_jar, t
     with make_client(lambda r: httpx.Response(200, content=payload)) as c:
         assert fetch_sources(Gav("com.e", "lib", "1"), ["https://r.test/m2"], c, cache) is None
     assert not list(cache.glob("*.jar"))
+
+
+def test_a_damaged_sources_jar_is_no_clean_miss(make_jar, make_damaged_jar, tmp_path: Path):
+    """Review M6: a damaged download gave the miss "no -sources.jar in any repo" and a 7-day verdict."""
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+    damaged = make_damaged_jar("p.jar", {"com/e/A.java": "class A {}" * 10, "com/e/B.java": "class B {}" * 10},
+                               damaged=("com/e/B.java",)).read_bytes()
+    repos = ["https://deploy:s3cr3t@r.test/m2"]
+    cases = ((damaged, "has a damaged entry: com/e/B.java"), (b"<html>error page</html>", "is not a zip"))
+    for i, (payload, why) in enumerate(cases):
+        verdicts = VerdictCache(tmp_path / f"verdicts{i}")
+        handler = _with_sidecar(jar, lambda request, payload=payload: httpx.Response(200, content=payload))
+        with make_client(handler) as c:
+            res = resolve_sources(jar, repos, c, tmp_path / "cache", verdicts=verdicts)
+        assert res.miss == f"found com.example:lib:1.2 in pom.properties but the -sources.jar in https://r.test/m2 {why}"
+        assert not verdicts.has_no_sources(("com.example", "lib", "1.2"), maven._redacted(repos))
+    two = [*repos, "https://s.test/m2"]  # both damaged: the miss names the first repository
+    with make_client(_with_sidecar(jar, lambda request: httpx.Response(200, content=damaged))) as c:
+        res = resolve_sources(jar, two, c, tmp_path / "cache", verdicts=VerdictCache(tmp_path / "verdicts2"))
+    assert "the -sources.jar in https://r.test/m2 has a damaged entry" in res.miss
 
 
 def test_gav_missing_or_corrupt(make_jar, tmp_path: Path):

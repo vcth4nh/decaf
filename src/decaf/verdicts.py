@@ -11,6 +11,7 @@ read as absent: cache damage must never fail a run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -34,6 +35,8 @@ class ShaVerdict:
 class VerdictCache:
     """Verdict files under root/sha1/ and root/gav/.
 
+    A sha1 hit is sha1/{sha1}.json; a sha1 miss counts only for its hints, so each
+    hint set has its own sha1/{sha1}-{key}.json: one jar under two names keeps two misses.
     fresh=True disables lookups (records still write): re-derive and overwrite.
     """
 
@@ -43,6 +46,10 @@ class VerdictCache:
 
     def _sha1_path(self, sha1: str) -> Path:
         return self.root / "sha1" / f"{sha1}.json"
+
+    def _miss_path(self, sha1: str, hints: Sequence[tuple[str, str]]) -> Path:
+        key = hashlib.sha1(json.dumps([list(h) for h in hints]).encode()).hexdigest()
+        return self.root / "sha1" / f"{sha1}-{key}.json"
 
     def _gav_path(self, gav: tuple[str, str, str]) -> Path:
         return self.root / "gav" / ("_".join(gav) + ".json")
@@ -97,11 +104,8 @@ class VerdictCache:
         """A negative verdict counts only for the same (artifact, version) hints: a renamed jar looks again (#110)."""
         if self.fresh:
             return None
-        path = self._sha1_path(sha1)
-        data = self._read(path)
-        if data is None:
-            return None
-        gav = data.get("gav")
+        data = self._read(self._sha1_path(sha1))
+        gav = None if data is None else data.get("gav")
         if gav is not None:
             if (
                 isinstance(gav, list)
@@ -113,9 +117,9 @@ class VerdictCache:
                     gav=(gav[0], gav[1], gav[2]), resolved_by=data["resolved_by"]
                 )
             return None
-        if not isinstance(data.get("miss"), str) or not self._fresh_negative(path, data, repos):
-            return None
-        if data.get("hints", []) != [list(h) for h in hints]:
+        path = self._miss_path(sha1, hints)
+        data = self._read(path)
+        if data is None or not isinstance(data.get("miss"), str) or not self._fresh_negative(path, data, repos):
             return None
         return ShaVerdict(gav=None, miss=data["miss"])
 
@@ -129,9 +133,13 @@ class VerdictCache:
         self, sha1: str, miss: str, repos: Sequence[str], hints: Sequence[tuple[str, str]] = ()
     ) -> None:
         self._write(
-            self._sha1_path(sha1),
+            self._miss_path(sha1, hints),
             {"gav": None, "miss": miss, "repos": list(repos), "hints": [list(h) for h in hints], "ts": time.time()},
         )
+        try:  # a miss replaces a hit, as before: --fresh-maven drops an older wrong hit
+            self._sha1_path(sha1).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def has_no_sources(self, gav: tuple[str, str, str], repos: Sequence[str]) -> bool:
         if self.fresh:

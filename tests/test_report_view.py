@@ -67,6 +67,15 @@ def test_names_with_control_characters_print_as_text():
     assert "a\\x1b]0;x\\x07\\x9b2Jb.jar (boom\\x1b[2J)" in out
 
 
+def test_plain_lines_drop_the_cr_of_a_crlf():
+    """Review M4: a Windows JVM ends its stderr lines with CRLF, and each such line showed \\x0d."""
+    from decaf.report_view import plain
+
+    assert plain("at a.B.c(B.java:1)\r\nnext\r\n", lines=True) == "at a.B.c(B.java:1)\nnext\n"
+    assert plain("a\rb", lines=True) == "a\\x0db"  # a lone CR still prints as text
+    assert plain("a\r\nb") == "a\\x0d\\x0ab"  # without lines=True, each control character is text
+
+
 def test_render_network_fallbacks_escapes_names():
     r = ArtifactReport(rel="x[/b].jar", kind="archive", outcome="ok", method="cfr", sources_miss="network: t")
     c = _plain_console()
@@ -87,7 +96,8 @@ def test_marks_fall_back_to_ascii():
 
 
 def test_load_report_rejects_text_that_is_no_report(tmp_path: Path):
-    for name, data in (("list.json", b"[]"), ("latin1.json", b'{"status": "\xff"}')):
+    deep = b"[" * 100_000  # the JSON parser stops with RecursionError (review M5)
+    for name, data in (("list.json", b"[]"), ("latin1.json", b'{"status": "\xff"}'), ("deep.json", deep)):
         (tmp_path / name).write_bytes(data)
         with pytest.raises(ReportError):
             load_report(tmp_path / name)
@@ -445,6 +455,32 @@ def test_render_artifact_check_lines():
     assert "java_files=3 stubbed=0 flagged=1" in plain
 
 
+def test_load_report_gives_a_value_of_a_wrong_type_its_default(tmp_path: Path):
+    """Review M5: a value of a wrong type gets the default of its field, and a missing attempt key an empty value."""
+    data = json.loads(report().to_json())
+    data.update(
+        schema_version="1", discovered=True, duration_seconds=float("nan"),
+        settings={"output": 5, "memory_budget_mb": "8", "java_major": 21, "chain": ["cfr"]},
+        totals={**data["totals"], "failed": "2", "ok": 10**400},
+    )
+    data["artifacts"][1].update(
+        rel=5, classes="2", missing_classes=1.5, stubs="x", check=[1],
+        flagged=[{"path": "p/A.java", "errors": "3", "kinds": ["syntax", 1], "messages": 2}, "x"],
+        attempts=[{"engine": "cfr", "batch": [1], "peak_rss_mb": float("inf")}],
+    )
+    path = tmp_path / "decaf-report.json"
+    path.write_text(json.dumps(data))
+
+    loaded, _ = load_report(path)
+    assert (loaded.schema_version, loaded.discovered, loaded.duration_seconds) == (0, 0, 0.0)
+    assert loaded.settings == {"java_major": 21}
+    assert loaded.totals == {k: v for k, v in data["totals"].items() if k not in ("failed", "ok")}
+    r = loaded.artifacts[1]
+    assert (r.rel, r.classes, r.missing_classes, r.stubs, r.check) == ("", 0, 0, [], None)
+    assert r.flagged == [{"path": "p/A.java", "kinds": ["syntax"]}]
+    assert r.attempts == [EngineAttempt("cfr", "", 0, False, 0, "")]
+
+
 def test_old_report_without_check_keys_loads(tmp_path: Path):
     data = json.loads(report().to_json())
     for a in data["artifacts"]:
@@ -612,6 +648,22 @@ def test_render_memory_lists_the_ten_largest_peaks():
     assert lines[0] == "  9.8 GB  heap 6.1 GB   vineflower archive  b.jar  out of heap"
     assert lines[1].endswith("a.jar")
     assert lines[2].endswith("c11.jar") and lines[9].endswith("c04.jar")
+
+
+def test_render_memory_shows_a_batch_jvm_once():
+    """Review M3: the jars of one batch share one JVM, and its peak filled all ten rows."""
+    from dataclasses import replace
+
+    from decaf.report_view import render_memory
+
+    arts = [_mem_art(f"a{i:02d}.jar", replace(_att(1843, level="batch"), batch=0)) for i in range(12)]
+    arts += [_mem_art("s1.jar", _att(1536)), _mem_art("s2.jar", _att(1229)), _mem_art("s3.jar", _att(922))]
+    arts += [_mem_art("b1.jar", replace(_att(615, level="batch"), batch=1))]  # one jar: an edited report
+    console = _console()
+    render_memory(console, _mem_report(*arts))
+    lines = console.file.getvalue().splitlines()
+    assert [line.split("  ")[-1] for line in lines] == ["a00.jar and 11 more", "s1.jar", "s2.jar", "s3.jar", "b1.jar"]
+    assert lines[0] == "  1.8 GB  heap 6.1 GB   vineflower batch  a00.jar and 11 more"
 
 
 def test_render_memory_without_data():

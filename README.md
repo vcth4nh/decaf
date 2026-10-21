@@ -139,7 +139,7 @@ probably needs more heap than its share. The report records the peak memory
 and the heap of each engine attempt, the ending shows the largest peak and
 counts the attempts that ran out of heap (the jars of one batch share one
 JVM, which counts once), and `decaf report out --memory`
-lists the ten largest peaks. A heap flag in `JAVA_TOOL_OPTIONS` or
+lists the ten JVMs with the largest peaks (one row for a batch). A heap flag in `JAVA_TOOL_OPTIONS` or
 `JDK_JAVA_OPTIONS` loses to decaf's `-Xmx`; one in `_JAVA_OPTIONS` overrides
 it, and decaf warns that the budget is then not enforced. The same applies to
 an initial heap (`-Xms`) above a JVM's heap: decaf lowers it to the heap, or,
@@ -153,7 +153,7 @@ decaf report                          # ./decaf-out/decaf-report.json, outcome-l
 decaf report out --problems           # failed + partial artifacts, grouped by cause
 decaf report out --artifact '*.jar'   # full detail for artifacts matching a glob (repeatable)
 decaf report out --network-fallbacks  # artifacts that lost sources to network failures
-decaf report out --memory             # the ten engine attempts with the largest peak memory
+decaf report out --memory             # the ten engine JVMs with the largest peak memory
 ```
 
 `decaf report` re-renders a `decaf-report.json` offline, without re-running anything —
@@ -235,13 +235,15 @@ It is TOML, so it must be UTF-8. When `XDG_CONFIG_HOME` is set, the file is
 ```toml
 # Maven repositories, tried in order.
 # Maven Central is appended automatically unless listed explicitly
-# (as repo1.maven.org or repo.maven.apache.org).
+# (as https://repo1.maven.org/maven2 or https://repo.maven.apache.org/maven2).
 repositories = [
   "https://nexus.mycorp.com/repository/maven-public",
   "https://user:pass@private.repo/maven2",   # basic auth via URL userinfo
 ]
 ```
 
+In a user name or a password, write `/`, `?`, `#`, and `@` as `%2F`, `%3F`,
+`%23`, and `%40`: decaf refuses a repository URL with an `@` after its host.
 `--repo URL` (repeatable) prepends ad-hoc repositories. SHA-1 lookup is
 Central-only; jars built by Maven almost always embed `pom.properties`, which
 works against any repository that publishes `.jar.sha1` files. A jar whose

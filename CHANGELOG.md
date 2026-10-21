@@ -44,8 +44,11 @@ All notable changes to decaf are documented here.
   lines of two threads cannot mix.
 - Without a terminal, long lines were wrapped at 80 columns, so a log file
   split long paths. Now each line stays whole.
-- `decaf report` showed a traceback for a file that is not a JSON object or
-  not UTF-8. Now it shows an error and exits with code 2.
+- `decaf report` showed a traceback for a file that is not a JSON object,
+  not UTF-8, or nested too deep. Now it shows an error and exits with code 2.
+  A value of a wrong type, for example a text in a number field, and an
+  engine attempt with a missing key also gave a traceback. Now such a value
+  gets its default.
 - One damaged entry stopped more than that entry (#109). An entry name that
   is not UTF-8 stopped the whole scan; now its archive fails as
   `unreadable archive`. A damaged resource or class entry failed its
@@ -59,8 +62,11 @@ All notable changes to decaf are documented here.
   `pom.properties` entry. Now the error is the sources miss
   (`sources lookup failed: ...`), and the engines decompile. A downloaded
   sources jar now goes to the cache only when decaf can read each of its
-  entries. A cached sources jar with a damaged entry is deleted, so the
-  next run downloads it again.
+  entries. Such a download, and a download that is not a zip (for example
+  an HTML page with HTTP 200), gave the miss `no -sources.jar in any repo`
+  and a verdict for a week. Now the miss names the repository and the
+  damaged entry, and decaf keeps no verdict. A cached sources jar with a
+  damaged entry is deleted, so the next run downloads it again.
 - One weak signal could pick the wrong source for an archive (#110). A jar
   with one `pom.properties` got the sources of that artifact with no check,
   so a fat, shaded, or patched jar could get the wrong sources and the
@@ -71,7 +77,8 @@ All notable changes to decaf are documented here.
   them too. HTTP 408 is now retried, and an answer other than 200, 404, or
   410 (for example 400 or 407) no longer counts as missing sources. A
   cached "no sources" verdict now counts only for the same file-name hints,
-  so a renamed jar is looked up again.
+  so a renamed jar is looked up again. Each set of hints keeps its own
+  verdict, so one jar under two names is not looked up again in each run.
 - The compile check lost results and hid its failures (#108). The checker
   wrote the results of a job only at its end, so a kill at the timeout
   made all its files `unchecked: timeout`, also the files with flags. Now
@@ -200,7 +207,9 @@ All notable changes to decaf are documented here.
   folder, so it gave a false warning. Now each jar gets the estimate, and
   for one JVM for each class, the estimate uses the largest class. One batch
   JVM that ran out of heap counted as one attempt for each of its jars; now
-  it counts once. A very large `--memory` value gave a traceback; now it
+  it counts once. `decaf report --memory` also listed a batch JVM one time
+  for each of its jars. Now it lists the JVM once, with its first jar and
+  the number of its other jars. A very large `--memory` value gave a traceback; now it
   gives an error.
 - A usage error of a command line without a command name, such as
   `decaf -o out`, named the first token as the command:
@@ -236,7 +245,10 @@ All notable changes to decaf are documented here.
   system, and javac reads no manifest of an input jar.
 - Archive names and engine output could put terminal control codes on the
   screen, because decaf escaped only the rich markup. Now each control
-  character (C0, DEL, and C1) prints as `\xNN`.
+  character (C0, DEL, and C1) prints as `\xNN`. Engine output keeps its
+  tabs and line ends, also the CRLF of a Windows JVM. `decaf report` printed
+  the number fields of a report file with no check. Now each value of the
+  report file must have the type of its field.
 - Maven coordinates are now checked before decaf uses them in a cache file
   name or a URL. Many coordinates come from the input archive
   (`pom.properties`, the manifest, the file name). Before, such text could
@@ -248,7 +260,10 @@ All notable changes to decaf are documented here.
   one text: the miss of an artifact that a repository verified but that has
   no sources jar (#115). This text goes into the report, the `-v` output, and
   the ndjson events. The error for a bad repository URL showed them too. Now
-  decaf removes the credentials from these texts. A pin write of
+  decaf removes the credentials from these texts. decaf now also refuses a
+  repository URL in which the user part is not clear: a URL that httpx
+  cannot read, a URL with no host, or a URL with an `@` after its host. The
+  error shows no text up to the last `@`. A pin write of
   `decaf engines update` gave the config file the mode of the umask, so a
   config with credentials could become readable to other users. The write
   also replaced a symlink with a file. Now the config file keeps its mode,
