@@ -13,7 +13,6 @@ import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -23,15 +22,18 @@ from .verdicts import VerdictCache
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
 
 
+_AUTHORITY = re.compile(r"([^:/?#]*://)?([^/?#]*)(.*)", re.DOTALL)
+
+
 def redact_url(url: str) -> str:
-    """Strip user[:pass]@ userinfo for display/persistence; never raises."""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
+    """Strip user[:pass]@ userinfo for display/persistence; never raises.
+
+    Also for a bad URL in an error message, for example one with no scheme (#115).
+    """
+    scheme, authority, rest = _AUTHORITY.match(url).groups()
+    if "@" not in authority:
         return url
-    if "@" not in parts.netloc:
-        return url
-    return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+    return (scheme or "") + authority.rpartition("@")[2] + rest
 
 
 def _redacted(repos: Sequence[str]) -> list[str]:
@@ -810,7 +812,7 @@ def resolve_sources(
             ordered = [repo, *[r for r in repos if r != repo]]
             fetched = fetch_sources(candidate, ordered, client, cache_dir, net, log, verdicts, on_state)
             msg = _no_sources(
-                f"verified {candidate} via {repo}", "no -sources.jar published", log
+                f"verified {candidate} via {redact_url(repo)}", "no -sources.jar published", log
             )
             return _finish(_fetched(candidate, fetched, "verified-guess", msg), log, net)
     if tried:

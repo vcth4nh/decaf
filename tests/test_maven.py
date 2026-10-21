@@ -71,6 +71,14 @@ def test_redact_url_strips_userinfo():
     assert redact_url("https://user@host/m2") == "https://host/m2"
 
 
+def test_redact_url_strips_userinfo_of_a_bad_url():
+    """#115: an error message shows a repository URL that has no http(s) scheme."""
+    assert redact_url("deploy:s3cr3t@nexus.example/m2") == "nexus.example/m2"
+    assert redact_url("ftp://deploy:s3cr3t@nexus.example/m2") == "ftp://nexus.example/m2"
+    assert redact_url("https://deploy:s3cr3t@[::1/m2") == "https://[::1/m2"
+    assert redact_url("https://nexus.example/m2/a@b") == "https://nexus.example/m2/a@b"
+
+
 def test_redact_url_passthrough():
     assert redact_url("https://repo1.maven.org/maven2") == "https://repo1.maven.org/maven2"
     assert redact_url("not a url") == "not a url"
@@ -877,6 +885,25 @@ def test_resolve_sources_verified_but_no_sources(make_jar, tmp_path: Path):
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
     assert res.sources_jar is None
     assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
+    assert res.miss == (
+        "verified org.springframework:spring-jdbc:6.2.17 via https://r.test/m2 "
+        "but no -sources.jar published"
+    )
+
+
+def test_resolve_sources_verified_but_no_sources_hides_the_credentials(make_jar, tmp_path: Path):
+    """#115: the miss goes into the report, the -v output, and the ndjson events."""
+    jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/core/A.class": b"x"})
+    hit = "/m2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.jar.sha1"
+    inner = _post_freeze_handler(b"", {hit}, sha1_of(jar))
+
+    def handler(request):
+        if request.url.path.endswith("-sources.jar"):
+            return httpx.Response(404)
+        return inner(request)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://deploy:s3cr3t@r.test/m2"], c, tmp_path / "cache")
     assert res.miss == (
         "verified org.springframework:spring-jdbc:6.2.17 via https://r.test/m2 "
         "but no -sources.jar published"

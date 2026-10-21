@@ -96,6 +96,12 @@ All notable changes to decaf are documented here.
   bytecode too, for example a Lombok class with `@SneakyThrows` or a class
   that a tool generated. Their retries now stop when two engines in a row
   give the same first error of these two kinds.
+- decaf read and wrote the config file with the codec of the locale, for
+  example cp1252 on Windows. Now it uses UTF-8, as TOML specifies, and a
+  config that is not UTF-8 gives an error, not a traceback. Maven Central
+  under its second name (`repo.maven.apache.org`) counted as one more
+  repository, so decaf asked Central two times for each artifact. The README
+  now also gives the config path for macOS and Windows (#115).
 
 ### Security
 
@@ -113,6 +119,15 @@ All notable changes to decaf are documented here.
   version with a character that Maven coordinates do not use (for example a
   path separator or a control character) is not used, and the lookup goes on
   as for an archive without these coordinates.
+- Repository credentials (`user:pass@` in a repository URL) still showed in
+  one text: the miss of an artifact that a repository verified but that has
+  no sources jar (#115). This text goes into the report, the `-v` output, and
+  the ndjson events. The error for a bad repository URL showed them too. Now
+  decaf removes the credentials from these texts. A pin write of
+  `decaf engines update` gave the config file the mode of the umask, so a
+  config with credentials could become readable to other users. The write
+  also replaced a symlink with a file. Now the config file keeps its mode,
+  and decaf writes through a symlink.
 
 ## [1.11.0] - 2026-10-21
 
