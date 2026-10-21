@@ -38,11 +38,24 @@ def _redacted(repos: Sequence[str]) -> list[str]:
     return [redact_url(r) for r in repos]
 
 
+_COORD_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*")
+
+
+def _coordinates_ok(*parts: object) -> bool:
+    """Maven coordinates name cache files and URL paths: no separator, "..", or control character."""
+    return all(isinstance(p, str) and _COORD_RE.fullmatch(p) for p in parts)
+
+
 @dataclass(frozen=True)
 class Gav:
     group: str
     artifact: str
     version: str
+
+    def __post_init__(self) -> None:
+        # Many coordinates come from the input archive; none may name another path.
+        if not _coordinates_ok(self.group, self.artifact, self.version):
+            raise ValueError(f"not Maven coordinates: {self.group!r}:{self.artifact!r}:{self.version!r}")
 
     def __str__(self) -> str:
         return f"{self.group}:{self.artifact}:{self.version}"
@@ -68,9 +81,8 @@ def _parse_pom_properties(text: str) -> Gav | None:
             continue
         key, _, value = line.partition("=")
         props[key.strip()] = value.strip()
-    if all(k in props for k in ("groupId", "artifactId", "version")):
-        return Gav(props["groupId"], props["artifactId"], props["version"])
-    return None
+    coords = (props.get("groupId"), props.get("artifactId"), props.get("version"))
+    return Gav(*coords) if _coordinates_ok(*coords) else None
 
 
 def gav_from_pom_properties(jar_path: Path) -> Gav | None:
@@ -686,6 +698,8 @@ def resolve_sources(
     sha1 = sha1_of(jar_path)
     if verdicts is not None:
         known = verdicts.lookup_sha1(sha1, _redacted(repos))
+        if known is not None and known.gav is not None and not _coordinates_ok(*known.gav):
+            known = None  # a verdict of an older decaf with coordinates that no Gav accepts
         if known is not None:
             if known.gav is not None:
                 gav = Gav(*known.gav)
@@ -734,6 +748,8 @@ def resolve_sources(
         for group in candidate_groups(artifact, jar_path, client, net, log):
             if budget <= 0:
                 break
+            if not _coordinates_ok(group, artifact, version):
+                continue
             candidate = Gav(group, artifact, version)
             if candidate in tried:
                 continue
