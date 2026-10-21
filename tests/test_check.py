@@ -352,6 +352,31 @@ def test_parse_error_flags_also_next_to_an_absent_class():
     assert (r.status, r.kinds, r.first) == ("flagged", ("other", "parse"), "9: illegal start of expression")
 
 
+
+def test_a_parse_error_next_to_an_absent_class_is_the_first_error():
+    """Review C6: a parse error empties the absent classes, but an absent class is no engine error.
+
+    junit-platform-commons with JD: the flag came from line 176, but the first error was line 24.
+    """
+    r = classify(raw(
+        "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t24\tcannot find symbol   symbol:   class API"
+        "   location: class p.A",
+        "0\t0\tE\tA\tcompiler.err.unreported.exception.need.to.catch.or.throw\t30\tunreported exception"
+        " java.io.IOException; must be caught or declared to be thrown",
+        "0\t0\tE\tP\tcompiler.err.expected\t176\t-> expected",
+        "0\t0\tT\t5",
+    ), False, scope=check.Scope(this="p.A", imports=frozenset({"API"})))
+    assert (r.first, r.bytecode_only) == (
+        "30: unreported exception java.io.IOException; must be caught or declared to be thrown", True)
+    r = classify(raw(
+        "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t24\tcannot find symbol   symbol:   class API"
+        "   location: class p.A",
+        "0\t0\tE\tP\tcompiler.err.expected\t176\t-> expected",
+        "0\t0\tT\t5",
+    ), False, scope=check.Scope(this="p.A", imports=frozenset({"API"})))
+    assert (r.status, r.first, r.bytecode_only) == ("flagged", "176: -> expected", False)
+
+
 @pytest.mark.parametrize("message, scope, absent", [
     # an unqualified name: absent only when an import can supply it
     ("symbol:   class Bar   location: class p.E", check.Scope(this="p.E"), False),
@@ -380,7 +405,7 @@ def test_scope_of_reads_the_package_the_imports_and_the_supertypes():
             "class A extends x.Base<Map<String, B>> implements Run, java.io.Serializable {}\n")
     got = check.scope_of(text, "A")
     assert (got.this, got.imports, got.on_demand) == ("p.q.A", frozenset({"B", "e"}), True)
-    assert got.supertypes == frozenset({"Base", "Run", "Serializable"})
+    assert got.supertypes == frozenset({"x.Base", "Run", "java.io.Serializable"})
     assert check.scope_of("class A {}", "A") == check.Scope(this="A")
 
 
@@ -395,6 +420,146 @@ def test_an_absent_supertype_supplies_unqualified_names():
         "0\t0\tT\t5",
     ), False, scope=scope)
     assert r.reason == "absent classes"
+
+
+def _e(code: str, line: int, message: str) -> str:
+    return f"0\t0\tE\tA\t{code}\t{line}\t{message}"
+
+
+_NOT_FOUND = "cannot find symbol   symbol:   "
+# Each case: a source file whose supertype is absent, and the errors of javac for it (review C1).
+_ABSENT_SUPERTYPES = {
+    "qualified in a present package": ("package p;\nclass Q extends java.util.AbsentBase {\n  void f() { inherited(); }\n}\n", [
+        _e("compiler.err.cant.resolve.location", 2, _NOT_FOUND + "class AbsentBase   location: package java.util"),
+        _e("compiler.err.cant.resolve.location.args", 3, _NOT_FOUND + "method inherited()   location: class p.Q"),
+    ]),
+    "qualified": ("package p;\nclass Base extends org.absent.Base {\n  void f() { inherited(); }\n}\n", [
+        _e("compiler.err.doesnt.exist", 2, "package org.absent does not exist"),
+        _e("compiler.err.cant.resolve.location.args", 3, _NOT_FOUND + "method inherited()   location: class p.Base"),
+    ]),
+    "nested": ("package p;\nimport org.absent.Outer;\nclass C extends Outer.Inner {\n  void f() { inherited(); }\n}\n", [
+        _e("compiler.err.doesnt.exist", 2, "package org.absent does not exist"),
+        _e("compiler.err.doesnt.exist", 3, "package Outer does not exist"),
+        _e("compiler.err.cant.resolve.location.args", 4, _NOT_FOUND + "method inherited()   location: class p.C"),
+    ]),
+    "anonymous": ("package p;\nimport com.google.inject.AbstractModule;\nclass G {\n  Object m() {\n"
+                  "    return new AbstractModule() {\n      protected void configure() { bind(String.class); }\n"
+                  "    };\n  }\n}\n", [
+        _e("compiler.err.doesnt.exist", 2, "package com.google.inject does not exist"),
+        _e("compiler.err.cant.resolve.location", 5, _NOT_FOUND + "class AbstractModule   location: class p.G"),
+        _e("compiler.err.cant.resolve.args", 6, _NOT_FOUND + "method bind(java.lang.Class<java.lang.String>)"),
+    ]),
+    "anonymous with arguments": (
+        "package p;\nimport org.absent.CountingOutputStream;\nclass G2 {\n  Object m(java.io.OutputStream out) {\n"
+        "    return new CountingOutputStream(wrap(out, \"(\" + 1 + \")\")) {\n"
+        "      public void write(int b) { super.write(b); }\n    };\n  }\n}\n", [
+            _e("compiler.err.doesnt.exist", 2, "package org.absent does not exist"),
+            _e("compiler.err.cant.resolve.location", 5, _NOT_FOUND + "class CountingOutputStream   location: class p.G2"),
+            _e("compiler.err.cant.resolve.args", 6, _NOT_FOUND + "method write(int)"),
+        ]),
+    "anonymous generic": (
+        "package p;\nimport org.absent.TypeToken;\nclass G3 {\n  Object m() {\n"
+        "    return new TypeToken<java.util.List<String>>() {\n      void f() { getType(); }\n    };\n  }\n}\n", [
+            _e("compiler.err.doesnt.exist", 2, "package org.absent does not exist"),
+            _e("compiler.err.cant.resolve.location", 5, _NOT_FOUND + "class TypeToken   location: class p.G3"),
+            _e("compiler.err.cant.resolve.args", 6, _NOT_FOUND + "method getType()"),
+        ]),
+    "anonymous qualified": (
+        "package p;\nclass G4 {\n  Object m() {\n    return new org.absent.Module() {\n      void f() { bind(); }\n"
+        "    };\n  }\n}\n", [
+            _e("compiler.err.doesnt.exist", 4, "package org.absent does not exist"),
+            _e("compiler.err.cant.resolve.args", 5, _NOT_FOUND + "method bind()"),
+        ]),
+    "anonymous nested": (
+        "package p;\nimport org.absent.Outer;\nclass G5 {\n  Object m() {\n    return new Outer.Inner() {\n"
+        "      void f() { bind(); }\n    };\n  }\n}\n", [
+            _e("compiler.err.doesnt.exist", 2, "package org.absent does not exist"),
+            _e("compiler.err.doesnt.exist", 5, "package Outer does not exist"),
+            _e("compiler.err.cant.resolve.args", 6, _NOT_FOUND + "method bind()"),
+        ]),
+}
+
+
+@pytest.mark.parametrize("case", _ABSENT_SUPERTYPES)
+def test_each_form_of_an_absent_supertype_supplies_unqualified_names(case):
+    """Review C1: an absent supertype in an anonymous class, with a qualified name, or as a nested type."""
+    text, lines = _ABSENT_SUPERTYPES[case]
+    stem = text.split("class ", 1)[1].split()[0]
+    r = classify(raw(*lines, "0\t0\tT\t5"), False, scope=check.scope_of(text, stem))
+    assert r.reason == "absent classes", r
+
+
+def test_an_absent_package_that_is_no_part_of_a_supertype_name_does_not_hide_an_engine_error():
+    text = "package p;\nimport java.uti.Thing;\nclass A extends java.util.AbstractList {\n  int f() { return var2; }\n}\n"
+    r = classify(raw(
+        _e("compiler.err.doesnt.exist", 2, "package java.uti does not exist"),
+        _e("compiler.err.cant.resolve.location", 4, _NOT_FOUND + "variable var2   location: class p.A"),
+        "0\t0\tT\t5",
+    ), False, scope=check.scope_of(text, "A"))
+    assert (r.status, r.first) == ("flagged", "4: cannot find symbol: variable var2")
+
+
+def test_scope_of_reads_the_types_of_anonymous_classes():
+    text = ("class A {\n  Object[] f() {\n    Runnable r = new Runnable() { public void run() {} };\n"
+            "    Object o = new Thread(\"(\" + g(1, h(2))) {\n    };\n    int[] a = new int[] {1};\n"
+            "    Object b = new Base(\"\\\"(\", ')') {};\n"
+            "    return new Object[] { new StringBuilder(), new java.util.ArrayList<java.util.Map<String, A>>() {} };\n"
+            "  }\n}\n")
+    assert check.scope_of(text, "A").supertypes == frozenset({"Runnable", "Thread", "Base", "java.util.ArrayList"})
+
+
+def test_an_engine_error_in_an_anonymous_class_of_a_present_type_flags_the_file():
+    text = "package p;\nclass J {\n  Runnable m() {\n    return new Runnable() {\n      public void run() { f(var2); }\n    };\n  }\n}\n"
+    r = classify(raw(_e("compiler.err.cant.resolve", 5, _NOT_FOUND + "variable var2"), "0\t0\tT\t5"), False,
+                 scope=check.scope_of(text, "J"))
+    assert (r.status, r.first) == ("flagged", "5: cannot find symbol: variable var2")
+
+
+def test_a_same_package_class_that_the_class_file_names_is_absent():
+    """Review C3: a split package or a -tests.jar: javac needs a class of the same package that the
+    classpath lacks. The class file names it, so the name is no engine error."""
+    line = _e("compiler.err.cant.resolve.location", 5, _NOT_FOUND + "class B   location: class p.A")
+    as_variable = _e("compiler.err.cant.resolve.location", 6, _NOT_FOUND + "variable B   location: class p.A")
+    for lines in ([line], [line, as_variable]):
+        r = classify(raw(*lines, "0\t0\tT\t9"), False, scope=check.Scope(this="p.A", same_package=frozenset({"B"})))
+        assert r.reason == "absent classes"
+    r = classify(raw(line, "0\t0\tT\t9"), False, scope=check.Scope(this="p.A", same_package=frozenset({"C"})))
+    assert r.status == "flagged"
+
+
+def test_package_refs_reads_the_classes_of_the_own_package_that_a_class_file_names():
+    data = _class_with("p/A", interfaces=("p/B", "q/C", "[Lp/D;"), utf8=(
+        "(Lp/E;Lp/q/F;)V", "Ljava/util/List<Lp/G$In;>;", "p/H", "Lp/$Util;", "Lxp/I;",
+    ))
+    assert check.package_refs(data) == frozenset({"A", "B", "D", "E", "G", "G$In", "$Util"})
+    assert check.package_refs(_class_with("A", interfaces=("B", "q/C"), utf8=("(LD;)V", "E"))) == frozenset({"A", "B", "D"})
+    assert check.package_refs(b"not a class") == frozenset()
+
+
+def test_run_check_reads_the_package_refs_only_for_a_file_with_an_absent_name(tmp_path: Path, monkeypatch):
+    lines = {"A.java": _e("compiler.err.cant.resolve.location", 1, _NOT_FOUND + "class B   location: class p.A"),
+             "C.java": _e("compiler.err.missing.ret.stmt", 1, "missing return statement")}
+
+    def fake_process(cmd, timeout, on_stderr_line=None):
+        Path(cmd[-2]).write_text("".join(
+            line.replace("0\t0\t", f"0\t{i}\t", 1) + f"\n0\t{i}\tT\t1\n" for i, line in enumerate(lines.values())))
+        return 0, False, "", None, False
+
+    asked: list = []
+
+    def refs(paths):
+        asked.append([p.name for p in paths])
+        return {p: frozenset({"B"}) for p in paths}
+
+    monkeypatch.setattr(check.engines, "run_process", fake_process)
+    files = []
+    for name in lines:
+        (tmp_path / name).write_text("package p;\nclass X {}\n")
+        files.append(tmp_path / name)
+    out = check.run_check([check.Job("0", (), tuple(files), refs=refs)], timeout=5, cpu_budget=1, java="java",
+                          install=tmp_path, tmp_root=tmp_path)
+    assert [r.reason or r.status for r in out[0]] == ["absent classes", "flagged"]
+    assert asked == [["A.java"]]
 
 
 def test_a_member_of_an_own_class_with_an_absent_superclass_is_absent():
@@ -503,6 +668,34 @@ def test_non_java_is_false_for_java_classes_that_use_these_types():
     assert not check.non_java(_class_with("p/J", utf8=("groovy/lang/GroovyObject", "()Lkotlin/Metadata;")))
     assert not check.non_java(b"not a class")
     assert not check.non_java(_class_with("p/G", interfaces=("groovy/lang/GroovyObject",))[:-12])
+
+
+
+def _class_with_members(name: str, source_file: str) -> bytes:
+    """A class file with one field and one method, each with an attribute, and a SourceFile attribute."""
+    names = (name, "f", "I", "ConstantValue", "m", "()V", "Code", "SourceFile", source_file)
+    pool = b"\x01" + len(name.encode()).to_bytes(2, "big") + name.encode() + b"\x07\x00\x01"
+    for n in names[1:]:
+        u = n.encode()
+        pool += b"\x01" + len(u).to_bytes(2, "big") + u
+    index = {n: i + 3 for i, n in enumerate(names[1:])}  # 1: the name, 2: its Class entry
+    count = len(names) + 2
+    u2 = lambda v: v.to_bytes(2, "big")  # noqa: E731
+    field_ = u2(0) + u2(index["f"]) + u2(index["I"]) + u2(1) + u2(index["ConstantValue"]) + (2).to_bytes(4, "big") + u2(1)
+    code = bytes(12)
+    method = u2(0) + u2(index["m"]) + u2(index["()V"]) + u2(1) + u2(index["Code"]) + len(code).to_bytes(4, "big") + code
+    source = u2(index["SourceFile"]) + (2).to_bytes(4, "big") + u2(index[source_file])
+    body = b"\x00\x21" + u2(2) + u2(0) + u2(0) + u2(1) + field_ + u2(1) + method + u2(1) + source
+    return b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + u2(count) + pool + body
+
+
+def test_non_java_reads_the_source_file_attribute():
+    """Review C8: a Groovy script or a Groovy subclass of a Groovy class has no GroovyObject in its own interfaces."""
+    assert check.non_java(_class_with_members("p/Script1", "Script1.groovy"))
+    assert check.non_java(_class_with_members("p/S", "S.scala"))
+    assert not check.non_java(_class_with_members("p/J", "J.java"))
+    assert not check.non_java(_class_with("p/J", utf8=("SourceFile", "J.groovy")))  # a constant, no attribute
+    assert not check.non_java(_class_with_members("p/Script1", "Script1.groovy")[:-4])
 
 
 def test_run_check_notes_bytecode_only_errors_of_the_non_java_files(tmp_path: Path, monkeypatch):

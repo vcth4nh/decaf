@@ -556,6 +556,74 @@ def _class_versions(source: Path) -> tuple[dict[str, int], set[str]]:
     return out, non_java
 
 
+_CLASS_FILE_MAX = 16 << 20  # bytes: decaf reads no larger entry as a class file
+
+
+def _family_entries(source: Path) -> dict[str, list[str]]:
+    """The class entries of a source by the _held_key of their top-level class: p/A has p/A and p/A$1."""
+    if source.is_dir():
+        names = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
+    else:
+        try:
+            with zipfile.ZipFile(source) as zf:
+                names = [n for n in zf.namelist() if n.endswith(".class")]
+        except ZIP_ERRORS:
+            return {}
+    keys = {_held_key(n) for n in names}
+    out: dict[str, list[str]] = {}
+    for name in names:
+        key = _held_key(name)
+        out.setdefault(outer_stem(key, keys) or key, []).append(name)
+    return out
+
+
+def _read_classes(source: Path, names: Collection[str]) -> Iterator[tuple[str, bytes]]:
+    """(name, bytes) of some class entries of a source, with one open of an archive.
+
+    A damaged entry, or one above _CLASS_FILE_MAX, is skipped.
+    """
+    if source.is_dir():
+        for name in names:
+            try:
+                if (source / name).stat().st_size <= _CLASS_FILE_MAX:
+                    yield name, (source / name).read_bytes()
+            except OSError:
+                continue
+        return
+    try:
+        with zipfile.ZipFile(source) as zf:
+            for name in names:
+                try:
+                    if zf.getinfo(name).file_size <= _CLASS_FILE_MAX:
+                        yield name, zf.read(name)
+                except (KeyError, *ZIP_ERRORS):
+                    continue
+    except ZIP_ERRORS:
+        return
+
+
+def _package_refs(source: Path, tree: Path) -> Callable[[list[Path]], dict[Path, frozenset[str]]]:
+    """For some files of tree: the classes of its package that the class files of each file's class name.
+
+    The check asks only for the files with an absent name (check.Scope).
+    """
+    families: dict[str, list[str]] | None = None
+
+    def refs(paths: list[Path]) -> dict[Path, frozenset[str]]:
+        nonlocal families
+        if families is None:
+            families = _family_entries(source)
+        wanted: dict[Path, list[str]] = {}
+        for path in paths:
+            key = _held_key(path.relative_to(tree).as_posix())
+            wanted[path] = families.get(outer_stem(key, families) or key, [])
+        by_name = {name: check.package_refs(data)
+                   for name, data in _read_classes(source, {n for names in wanted.values() for n in names})}
+        return {path: frozenset().union(*(by_name.get(n, frozenset()) for n in names)) for path, names in wanted.items()}
+
+    return refs
+
+
 def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
     """WEB-INF/classes or BOOT-INF/classes of an archive, extracted once (#99)."""
     with ctx.family_lock:
@@ -703,11 +771,12 @@ def _check_trees(
         classpath = _family_classpath(artifact, source, ctx, held.roots)
         own = [e for e in classpath if _own_entry(e, artifact, source, held, ctx)]
         twice = _twice(own, [e for e in classpath if e not in own], ctx)
+        refs = _package_refs(source, tree)
         for release, paths in by_release.items():
             sent.append((by_path, paths))
             jobs.append(check.Job(
                 str(len(jobs)), tuple(classpath), tuple(tree / r for r in paths), release, twice,
-                frozenset(tree / r for r in paths if r in non_java),
+                frozenset(tree / r for r in paths if r in non_java), refs,
             ))
     if jobs:
         answers = ctx.checker(
@@ -814,7 +883,7 @@ def _apply_hold(
             else:
                 if is_flagged:  # two engines in a row with the same error that bytecode can cause legally (#108)
                     first = _first_error(result)
-                    if result.bytecode_only and held.firsts.get(key) == first:
+                    if result.bytecode_only and held.firsts.get(key) == first and not first.startswith(_CAST_DROPPED):
                         held.settled.add(key)
                     held.firsts[key] = first
                 p.unlink()  # the earlier engine's held file stays
@@ -836,6 +905,13 @@ def _apply_hold(
             if result is not None:
                 held.checks[key] = _HeldFile(engine, rel, None, result)
     return flagged
+
+
+# `throw (T) t` in a generic method: Vineflower and CFR drop the cast and give one of these errors, but JD
+# keeps the cast. So two engines in a row with such an error do not show that the bytecode throws it.
+_CAST_DROPPED = tuple(
+    f"unreported exception {t}" for t in ("java.lang.Throwable;", "java.lang.Exception;", "capture#")
+)
 
 
 def _first_error(result: check.FileResult) -> str:
