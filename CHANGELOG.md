@@ -84,24 +84,32 @@ All notable changes to decaf are documented here.
   the run.
 - The compile check hid some engine errors and flagged some correct files
   (#108). A parse error (for example CFR's `** GOTO`) now flags the file
-  also next to an absent class. An unqualified name now counts as absent
-  only when an import or an absent supertype can supply it. A missing
-  member of another class counts as absent only when that class has two
-  versions in the classpath. A file with errors gets a second try with
-  javac `--release` from its class-file version (at least 8). Thus old code
-  may use JDK APIs that newer Java removed, such as `javax.xml.bind`, and
-  names that newer Java restricts. Four more javac flow errors of engines
-  now get a retry.
+  also next to an absent class, and the first error of such a file is an
+  engine error, not the absent class. An unqualified name now counts as
+  absent only when an import, an absent supertype, or an absent class of the
+  same package can supply it. The absent supertype can also be the type of
+  an anonymous class, a qualified name such as `org.absent.Base`, or a
+  nested type such as `Outer.Inner`. A class of the same package counts only
+  when the class file names it, for example in a split package or in a
+  `-tests.jar` without its main jar. A missing member of another class
+  counts as absent only when that class has two versions in the classpath. A
+  file with errors gets a second try with javac `--release` from its
+  class-file version (at least 8). Thus old code may use JDK APIs that newer
+  Java removed, such as `javax.xml.bind`, and names that newer Java
+  restricts. Four more javac flow errors of engines now get a retry.
 - The compile check flagged correct Kotlin, Groovy, and Scala code, and each
   flagged class went through all the engines of the chain (#108). The
   bytecode of these languages can throw undeclared checked exceptions and
   can have two methods that differ only in their return type, but javac
   rejects both in a source file. For a class with the Kotlin or Scala
-  annotation or the Groovy interface `GroovyObject`, the check now notes
-  these two errors and does not flag them. Other classes can have such
-  bytecode too, for example a Lombok class with `@SneakyThrows` or a class
-  that a tool generated. Their retries now stop when two engines in a row
-  give the same first error of these two kinds.
+  annotation, the Groovy interface `GroovyObject`, or the source file name
+  of such a language in the class file (for example a Groovy script), the
+  check now notes these two errors and does not flag them. Other classes can
+  have such bytecode too, for example a Lombok class with `@SneakyThrows` or
+  a class that a tool generated. Their retries now stop when two engines in
+  a row give the same first error of these two kinds. An undeclared
+  `Throwable` or `Exception` does not stop the retries, because Vineflower
+  and CFR drop the cast of `throw (T) t`, but JD keeps it.
 - decaf read and wrote the config file with the codec of the locale, for
   example cp1252 on Windows. Now it uses UTF-8, as TOML specifies, and a
   config that is not UTF-8 gives an error, not a traceback. Maven Central

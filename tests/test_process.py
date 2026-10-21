@@ -1522,6 +1522,84 @@ def test_check_jobs_name_the_files_of_kotlin_groovy_and_scala_classes(make_jar, 
     assert sorted(f.name for f in job.non_java) == ["G$_run_closure1.java", "G.java", "K.java"]
 
 
+
+def _classes(make_jar, tmp_path: Path, entries: dict[str, bytes], as_folder: bool) -> tuple[Path, Artifact]:
+    """The entries as a jar, or as a class folder."""
+    if not as_folder:
+        jar = make_jar("app.jar", entries)
+        return jar, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE)
+    folder = tmp_path / "classes"
+    for name, data in entries.items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(data)
+    return folder, Artifact(folder, "classes", ArtifactKind.CLASS_TREE)
+
+
+@pytest.mark.parametrize("as_folder", [False, True])
+def test_check_jobs_read_the_package_refs_of_the_class_files_of_a_file(make_jar, tmp_path: Path, as_folder):
+    """Review C3: a same-package class that the class files name is an absent class, not an engine error."""
+    from decaf.pipeline import _check_trees, _Held
+    from test_check import _class_with
+
+    source, artifact = _classes(make_jar, tmp_path, {
+        "p/A.class": _class_with("p/A", interfaces=("p/B",)),
+        "p/A$1.class": _class_with("p/A$1", interfaces=("p/C",)),
+        "p/AB.class": _class_with("p/AB", interfaces=("p/D",)),
+        "p/E.class": _class_with("p/E", interfaces=("p/F",)),
+    }, as_folder)
+    tree = tmp_path / "out-tree"
+    (tree / "p").mkdir(parents=True)
+    for name in ("A", "A$1", "E"):
+        (tree / f"p/{name}.java").write_text("package p; class X {}")
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
+    _check_trees([(tree, artifact, source, _Held())], ctx, None)
+    (job,) = calls[0]
+    files = [tree / "p/A.java", tree / "p/A$1.java", tree / "p/E.java"]
+    assert job.refs(files) == {
+        files[0]: frozenset({"A", "A$1", "B", "C"}),  # not D of p/AB
+        files[1]: frozenset({"A", "A$1", "B", "C"}),  # an engine can write p/A$1 to a file of its own
+        files[2]: frozenset({"E", "F"}),
+    }
+
+
+@pytest.mark.parametrize("as_folder", [False, True])
+def test_package_refs_skip_a_class_entry_above_the_size_limit(make_jar, tmp_path: Path, monkeypatch, as_folder):
+    import decaf.pipeline as pipeline
+    from test_check import _class_with
+
+    small, big = _class_with("p/A", interfaces=("p/B",)), _class_with("p/A$1", interfaces=("p/C",), utf8=("x" * 200,))
+    source, _ = _classes(make_jar, tmp_path, {"p/A.class": small, "p/A$1.class": big}, as_folder)
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(small))
+    tree = tmp_path / "tree"
+    assert pipeline._package_refs(source, tree)([tree / "p/A.java"]) == {tree / "p/A.java": frozenset({"A", "B"})}
+
+
+def test_package_refs_open_the_archive_once_for_all_files_of_a_job(make_jar, tmp_path: Path, monkeypatch):
+    """A big jar takes some milliseconds to open, and a jar without its dependencies has many absent names."""
+    import zipfile
+
+    import decaf.pipeline as pipeline
+    from test_check import _class_with
+
+    jar = make_jar("app.jar", {f"p/C{i}.class": _class_with(f"p/C{i}", interfaces=("p/B",)) for i in range(5)})
+    opened: list = []
+    real = zipfile.ZipFile
+
+    def counting(*a, **kw):
+        opened.append(a[0])
+        return real(*a, **kw)
+
+    monkeypatch.setattr(pipeline.zipfile, "ZipFile", counting)
+    tree = tmp_path / "tree"
+    refs = pipeline._package_refs(jar, tree)
+    files = [tree / f"p/C{i}.java" for i in range(5)]
+    assert refs(files) == {f: frozenset({f.stem, "B"}) for f in files}
+    assert len(opened) == 2  # the entry names, then the class files
+    refs(files[:2])
+    assert len(opened) == 3
+
+
 def test_twice_finds_two_versions_of_one_library(make_jar, tmp_path: Path):
     """#108: a member that one version of a class lacks is no engine error."""
     from decaf.pipeline import _twice
@@ -1547,7 +1625,8 @@ def marker_checker(calls=None):
     """Fake check: FLAG = flagged (name), NOTE = noted (type), ENV = unchecked, else clean.
 
     SNEAKY:name@line = flagged (flow) with the first error "line: unreported exception name; ...",
-    an error that bytecode can cause legally (line 1 when not given) (#108).
+    an error that bytecode can cause legally (line 1 when not given) (#108). SNEAKY:[a type] takes a
+    type with dots or spaces, e.g. SNEAKY:[java.lang.Throwable].
     """
 
     def _check(jobs, *, timeout, cpu_budget):
@@ -1558,9 +1637,9 @@ def marker_checker(calls=None):
             results = []
             for f in job.files:
                 text = Path(f).read_text()
-                sneaky = re.search(r"SNEAKY:(\w+)(?:@(\d+))?", text)
+                sneaky = re.search(r"SNEAKY:(\[[^]]*\]|\w+)(?:@(\d+))?", text)
                 if sneaky:
-                    first = (f"{sneaky.group(2) or 1}: unreported exception {sneaky.group(1)};"
+                    first = (f"{sneaky.group(2) or 1}: unreported exception {sneaky.group(1).strip('[]')};"
                              " must be caught or declared to be thrown")
                     results.append(check.FileResult(
                         "flagged", kinds=("flow",), errors=1, first=first, messages=(first,), bytecode_only=True,
@@ -1652,6 +1731,22 @@ def test_retries_stop_at_the_same_first_error_as_the_engine_before(make_jar, tmp
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon"]
     assert report.flagged[0]["first"].startswith("1: unreported exception A;")
+
+
+
+@pytest.mark.parametrize("exception", [
+    "java.lang.Throwable", "java.lang.Exception", "capture#1 of ? extends java.lang.Exception",
+])
+def test_retries_go_on_after_the_same_error_for_a_cast_that_an_engine_can_drop(make_jar, tmp_path: Path, exception):
+    """Review C2: for `throw (T) t`, Vineflower and CFR drop the cast and give the same error, but JD keeps it."""
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    files = {name: f"// SNEAKY:[{exception}] {name}" for name in list(ENGINES)[:-1]} | {"jd": "// jd keeps the cast"}
+    runner = writing_runner({name: {"com/x/A.java": text} for name, text in files.items()})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == list(ENGINES)
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// jd keeps the cast"
+    assert not report.partial
 
 
 def test_retries_stop_only_for_the_class_with_the_same_first_error(make_jar, tmp_path: Path):

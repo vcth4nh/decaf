@@ -191,3 +191,63 @@ def test_non_java_reads_class_files_of_javac(checker, tmp_path: Path):
         "p/J.java": "package p; class J { groovy.lang.GroovyObject g; kotlin.Metadata m() { return null; } }",
     })
     assert {n: check.non_java((out / f"p/{n}.class").read_bytes()) for n in "KGJ"} == {"K": True, "G": True, "J": False}
+
+
+def test_each_form_of_an_absent_supertype_is_no_flag(checker, tmp_path: Path):
+    """Review C1: an anonymous class of an absent type, a qualified absent supertype, and a nested type of an
+    absent class. javac reports their inherited names as absent too. An engine error stays a flag."""
+    java, _, install = checker
+    sources = {
+        "Q.java": "class Q extends org.absent.Base {\n  void f() { inherited(); }\n}\n",
+        "N.java": "import org.absent.Outer;\nclass N extends Outer.Inner {\n  void f() { inherited(); int v = field; }\n}\n",
+        "G.java": ("import java.io.OutputStream;\nimport org.absent.CountingOutputStream;\nclass G {\n"
+                   "  OutputStream m(OutputStream out) {\n    return new CountingOutputStream(wrap(out, 1)) {\n"
+                   "      public void write(int b) throws java.io.IOException { super.write(b); count(1); }\n"
+                   "    };\n  }\n  OutputStream wrap(OutputStream o, int n) { return o; }\n}\n"),
+        "J.java": "class J {\n  Runnable m() {\n    return new Runnable() { public void run() { int var1 = 1; f(var2); } };\n  }\n}\n",
+    }
+    files = []
+    for name, text in sources.items():
+        (tmp_path / name).write_text(text)
+        files.append(tmp_path / name)
+    out = check.run_check([check.Job("0", (), tuple(files))], timeout=120, cpu_budget=1, java=java,
+                          install=install, tmp_root=tmp_path)[0]
+    assert [r.reason or r.status for r in out] == ["absent classes"] * 3 + ["flagged"]
+
+
+def test_a_same_package_class_of_another_jar_is_no_flag(checker, tmp_path: Path):
+    """Review C3: a -tests.jar without its main jar. The class files name p.B and p.C, so these names are
+    absent classes; a name that no class file names stays an engine error."""
+    import zipfile
+
+    java, javac, install = checker
+    text = ("package p;\npublic class A {\n  Object f() { return new B(); }\n"
+            "  Runnable g() { return new Runnable() { public void run() { C.go(); } }; }\n}\n")
+    classes = _compile(javac, tmp_path / "classes", {
+        "p/A.java": text, "p/B.java": "package p; class B {}", "p/C.java": "package p; class C { static void go() {} }",
+    })
+    jar = tmp_path / "a-tests.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        for name in ("A", "A$1"):
+            zf.write(classes / f"p/{name}.class", f"p/{name}.class")
+    refs = check.package_refs((classes / "p/A.class").read_bytes()) | check.package_refs(
+        (classes / "p/A$1.class").read_bytes())
+    tree = tmp_path / "tree/p"
+    tree.mkdir(parents=True)
+    (tree / "A.java").write_text(text)
+    (tree / "Wrong.java").write_text("package p;\nclass Wrong {\n  Object f() { return new Name(); }\n}\n")
+    out = check.run_check([check.Job("0", (jar,), (tree / "A.java", tree / "Wrong.java"), refs=lambda paths: dict.fromkeys(paths, refs))],
+                          timeout=120, cpu_budget=1, java=java, install=install, tmp_root=tmp_path)[0]
+    assert [r.reason or r.status for r in out] == ["absent classes", "flagged"]
+
+
+def test_non_java_reads_the_source_file_of_a_class_file_of_javac(checker, tmp_path: Path):
+    """Review C8: the SourceFile attribute of a real class file, with fields and methods before it."""
+    _, javac, _ = checker
+    out = _compile(javac, tmp_path / "classes", {
+        "p/G.java": "package p; class G { int f = 1; static final String S = \"G.groovy\"; void m() {} }",
+    })
+    data = (out / "p/G.class").read_bytes()
+    assert not check.non_java(data)  # the constant "G.groovy" is no SourceFile
+    assert data.count(b"\x01\x00\x06G.java") == 1
+    assert check.non_java(data.replace(b"\x01\x00\x06G.java", b"\x01\x00\x08G.groovy"))

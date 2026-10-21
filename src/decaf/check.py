@@ -69,6 +69,9 @@ _IMPORT = re.compile(r"^[ \t]*import\s+(static\s+)?([\w.$]+?)(\.\*)?\s*;", re.MU
 _PACKAGE = re.compile(r"^[ \t]*package\s+([\w.$]+)\s*;", re.MULTILINE)
 _SUPERTYPES = re.compile(r"\b(?:extends|implements)\s+([^{;()]+)")
 _GENERIC = re.compile(r"<[^<>]*>")
+_NEW = re.compile(r"\bnew\s+([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)")
+_SPACES = re.compile(r"\s*")
+_ABSENT_PACKAGE = re.compile(r"package\s+([\w.$]+)\s+does not exist")
 
 
 @dataclass(frozen=True)
@@ -76,9 +79,11 @@ class Scope:
     """What can supply a name that a file does not define (#108).
 
     this: the dotted name of the file's own class; imports: the simple names of its
-    single imports; on_demand: an import with *; supertypes: the simple names after
-    extends and implements (an absent supertype can supply any name); twice: is a
-    dotted class name in two or more classpath entries (two versions of one library)?
+    single imports; on_demand: an import with *; supertypes: the names after extends and
+    implements and of the anonymous classes, as written, e.g. org.absent.Base (an absent
+    supertype can supply any name); twice: is a dotted class name in two or more classpath
+    entries (two versions of one library)? same_package: the classes of the file's package
+    that its class files name; the classpath can lack them, e.g. in a split package.
     """
 
     this: str = ""
@@ -86,9 +91,12 @@ class Scope:
     on_demand: bool = False
     supertypes: frozenset[str] = frozenset()
     twice: Callable[[str], bool] = field(default=lambda name: False, compare=False)
+    same_package: frozenset[str] = frozenset()
 
 
-def scope_of(text: str, stem: str, twice: Callable[[str], bool] | None = None) -> Scope:
+def scope_of(
+    text: str, stem: str, twice: Callable[[str], bool] | None = None, same_package: frozenset[str] = frozenset()
+) -> Scope:
     """The Scope of a source file from its package and import declarations."""
     package = _PACKAGE.search(text)
     names: set[str] = set()
@@ -104,8 +112,45 @@ def scope_of(text: str, stem: str, twice: Callable[[str], bool] | None = None) -
         types = m.group(1)
         while _GENERIC.search(types):
             types = _GENERIC.sub("", types)
-        supers |= {t.strip().rsplit(".", 1)[-1] for t in re.split(r",|\bimplements\b|\bextends\b", types) if t.strip()}
-    return Scope(this, frozenset(names), on_demand, frozenset(supers), twice or Scope.twice)
+        supers |= {"".join(t.split()) for t in re.split(r",|\bimplements\b|\bextends\b", types) if t.strip()}
+    supers |= _anonymous_types(text)
+    return Scope(this, frozenset(names), on_demand, frozenset(supers), twice or Scope.twice, same_package)
+
+
+def _anonymous_types(text: str) -> set[str]:
+    """The types of the anonymous classes, `new T(...) {`: javac reports their inherited names as absent too."""
+    out: set[str] = set()
+    for m in _NEW.finditer(text):
+        pos = _group_end(text, m.end(), "<", ">")  # type arguments
+        end = _group_end(text, pos, "(", ")")
+        if text.startswith("{", _SPACES.match(text, end).end()):
+            out.add("".join(m.group(1).split()))
+    return out
+
+
+def _group_end(text: str, pos: int, open_: str, close: str, limit: int = 10_000) -> int:
+    """The index after the bracket group that starts at pos (after spaces), or pos when no group starts there.
+
+    A bracket in a string or a char literal does not count.
+    """
+    i = _SPACES.match(text, pos).end()
+    if not text.startswith(open_, i):
+        return pos
+    depth, j, end = 0, i, min(len(text), i + limit)
+    while j < end:
+        c = text[j]
+        if c in "\"'":
+            j += 1
+            while j < end and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+        elif c == open_:
+            depth += 1
+        elif c == close:
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return pos
 
 
 @dataclass(frozen=True)
@@ -118,6 +163,8 @@ class Job:
     release: int | None = None  # a file with errors gets a second try with javac --release <release> (#108)
     twice: Callable[[str], bool] | None = field(default=None, compare=False)  # see Scope
     non_java: frozenset[Path] = frozenset()  # the files of Kotlin, Groovy, and Scala classes (#108)
+    # For the files with an absent name: the Scope.same_package of each file.
+    refs: Callable[[list[Path]], dict[Path, frozenset[str]]] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -199,7 +246,9 @@ def _is_env(code: str, message: str, scope: Scope, inherits_absent: bool = False
         return True
     if kind == "method":
         return name in scope.imports  # only a static import supplies a method
-    return (kind in _TYPE_SYMBOLS or kind == "variable") and (name in scope.imports or scope.on_demand)
+    return (kind in _TYPE_SYMBOLS or kind == "variable") and (
+        name in scope.imports or scope.on_demand or name in scope.same_package
+    )
 
 
 def _bytecode_only(code: str, message: str) -> bool:
@@ -248,13 +297,15 @@ def classify(
     old = [e for e in errors if e[0] == "P" and e[1] in _OLD_SOURCE]
     if old:
         return unchecked("old source", first=_line(old[0]))
+    parts = {part for name in scope.supertypes for part in name.split(".")}
     inherits_absent = any(  # an absent supertype, or a class file that javac cannot find for a supertype
-        code == "compiler.err.cant.access" or (code.startswith(_RESOLVE) and _symbol(message)[1] in scope.supertypes)
+        code == "compiler.err.cant.access"
+        or (code.startswith(_RESOLVE) and _symbol(message)[1] in parts)
+        or (code == "compiler.err.doesnt.exist" and _starts_a_supertype(message, scope))
         for _, code, _, message in errors
     )
-    env = [] if any(e[0] == "P" for e in errors) else [
-        e for e in errors if _is_env(e[1], e[3], scope, inherits_absent)
-    ]
+    absent = [e for e in errors if _is_env(e[1], e[3], scope, inherits_absent)]
+    env = [] if any(e[0] == "P" for e in errors) else absent
     retry = [e for e in errors if e not in env and _kind(e[0], e[1]) in RETRY_KINDS
              and not (non_java and _bytecode_only(e[1], e[3]))]
     # An unqualified name that no import and no absent supertype can supply is an engine error,
@@ -267,9 +318,18 @@ def classify(
     kinds = tuple(sorted({_kind(phase, code) for phase, code, _, _ in errors}))
     messages = tuple(_line(e) for e in errors[:MESSAGES_PER_FILE])
     if retry:
-        return FileResult("flagged", kinds=kinds, errors=len(errors), first=_line(retry[0]), messages=messages,
-                          bytecode_only=_bytecode_only(retry[0][1], retry[0][3]))
+        # After a parse error, env is empty, but an absent class is still no engine error.
+        lead = next((e for e in retry if e not in absent), retry[0])
+        return FileResult("flagged", kinds=kinds, errors=len(errors), first=_line(lead), messages=messages,
+                          bytecode_only=_bytecode_only(lead[1], lead[3]))
     return FileResult("noted", kinds=kinds, errors=len(errors), first=messages[0], messages=messages)
+
+
+def _starts_a_supertype(message: str, scope: Scope) -> bool:
+    """Is the package of `package P does not exist` the start of a supertype name, as for org.absent.Base or
+    Outer.Inner? javac gives no other error for such a supertype."""
+    m = _ABSENT_PACKAGE.search(message)
+    return m is not None and any(name.startswith(m.group(1) + ".") for name in scope.supertypes)
 
 
 def write_jobs(path: Path, jobs: list[Job]) -> None:
@@ -352,6 +412,36 @@ def _class_at(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, o
     return utf8.get(classes.get(int.from_bytes(data[offset:offset + 2], "big"), -1))
 
 
+_DESCRIPTOR_CLASS = re.compile(rb"L([^;<>()\[]+)[;<]")
+
+
+def package_refs(data: bytes) -> frozenset[str]:
+    """The classes of its own package that a class file names, as simple names: B and B$C for p/B$C.
+
+    javac needs each of them to compile the source of the class.
+    """
+    pool = _pool(data)
+    own = _class_at(pool, data, pool[2] + 2) if pool is not None else None
+    if own is None:
+        return frozenset()
+    utf8, classes, _ = pool
+    names = {utf8.get(i, b"") for i in classes.values()}
+    for text in utf8.values():
+        names.update(m.group(1) for m in _DESCRIPTOR_CLASS.finditer(text))
+    package = own.rpartition(b"/")[0]
+    out: set[str] = set()
+    for name in names:
+        where, _, simple = name.rpartition(b"/")
+        if where != package or not simple:
+            continue
+        i = simple.find(b"$", 1)  # a $ at the start of the simple name cuts no outer name
+        while i != -1:
+            out.add(simple[:i].decode("utf-8", "replace"))
+            i = simple.find(b"$", i + 1)
+        out.add(simple.decode("utf-8", "replace"))
+    return frozenset(out)
+
+
 def class_name(data: bytes) -> str | None:
     """The internal name of a class file (this_class, e.g. p/A), or None (#108)."""
     pool = _pool(data)
@@ -368,7 +458,8 @@ def _utf8(text: bytes) -> bytes:
 _ANNOTATIONS = tuple(_utf8(d) for d in (
     b"Lkotlin/Metadata;", b"Lscala/reflect/ScalaSignature;", b"Lscala/reflect/ScalaLongSignature;",
 ))
-_GROOVY = b"groovy/lang/GroovyObject"  # Groovy makes each class implement this interface
+_GROOVY = b"groovy/lang/GroovyObject"  # Groovy makes a class implement this interface when no superclass does
+_SOURCE_SUFFIXES = (b".groovy", b".scala", b".kt")
 
 
 def non_java(data: bytes) -> bool:
@@ -379,12 +470,35 @@ def non_java(data: bytes) -> bool:
     """
     if any(a in data for a in _ANNOTATIONS):
         return True
-    pool = _pool(data) if _utf8(_GROOVY) in data else None
+    pool = _pool(data) if _utf8(_GROOVY) in data or any(s in data for s in _SOURCE_SUFFIXES) else None
     if pool is None:
         return False
     start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
     count = int.from_bytes(data[start - 2:start], "big")
-    return any(_class_at(pool, data, start + 2 * k) == _GROOVY for k in range(count))
+    if any(_class_at(pool, data, start + 2 * k) == _GROOVY for k in range(count)):
+        return True
+    source = _source_file(pool, data, start + 2 * count)
+    return source is not None and source.endswith(_SOURCE_SUFFIXES)  # also a Groovy script or subclass
+
+
+def _source_file(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int) -> bytes | None:
+    """The SourceFile attribute of a class file, e.g. b"A.groovy"; pos is the offset of fields_count."""
+    utf8 = pool[0]
+    u2 = lambda at: int.from_bytes(data[at:at + 2], "big")  # noqa: E731
+    for _ in range(2):  # the fields, then the methods: skip each with its attributes
+        count, pos = u2(pos), pos + 2
+        for _ in range(count):
+            attributes, pos = u2(pos + 6), pos + 8
+            for _ in range(attributes):
+                pos += 6 + int.from_bytes(data[pos + 2:pos + 6], "big")
+    count, pos = u2(pos), pos + 2
+    for _ in range(count):
+        if pos + 8 > len(data):
+            return None
+        if utf8.get(u2(pos)) == b"SourceFile":
+            return utf8.get(u2(pos + 6))
+        pos += 6 + int.from_bytes(data[pos + 2:pos + 6], "big")
+    return None
 
 
 SOURCE = Path(__file__).with_name("checker") / "Checker.java"
@@ -503,17 +617,29 @@ def run_check(
     raw = parse_results(text)
     lines = [line for line in tail.splitlines() if line.strip()]
     crash = _short(lines[-1]) if lines else f"checker exit code {returncode}"  # e.g. a JVM out of memory (#108)
-    return [[_classify_file(raw.get((job.id, i)), timed_out, crash, f, job) for i, f in enumerate(job.files)]
-            for job in jobs]
+    out: list[list[FileResult]] = []
+    for job in jobs:
+        found = [raw.get((job.id, i)) for i in range(len(job.files))]
+        named = [f for f, r in zip(job.files, found) if _names_absent(r)]
+        refs = job.refs(named) if job.refs is not None and named else {}
+        out.append([_classify_file(r, timed_out, crash, f, job, refs.get(f, frozenset()))
+                    for f, r in zip(job.files, found)])
+    return out
 
 
-def _classify_file(raw: _Raw | None, timed_out: bool, crash: str, path: Path, job: Job) -> FileResult:
+def _names_absent(raw: _Raw | None) -> bool:
+    return raw is not None and any(code.startswith(_RESOLVE) for _, code, _, _ in raw.errors)
+
+
+def _classify_file(
+    raw: _Raw | None, timed_out: bool, crash: str, path: Path, job: Job, same_package: frozenset[str] = frozenset()
+) -> FileResult:
     """classify(), with the Scope of the file when one of its errors is an absent name, and its language."""
     scope = Scope()
-    if raw is not None and any(code.startswith(_RESOLVE) for _, code, _, _ in raw.errors):
+    if _names_absent(raw):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             text = ""
-        scope = scope_of(text, path.stem, job.twice)
+        scope = scope_of(text, path.stem, job.twice, same_package)
     return classify(raw, timed_out, crash, scope, path in job.non_java)
