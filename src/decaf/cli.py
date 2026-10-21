@@ -123,12 +123,14 @@ def engines_list(
         spec = specs[name]
         pin = spec.version + ("†" if name in cfg.engine_overrides else "")
         cached = "yes" if engines.cache_status(spec) else "no"
+        jar = engines.cache_root() / "engines" / f"{name}-{spec.version}.jar"
+        need = engines.required_java(spec, jar)  # a pin can need a newer Java than its spec (#113)
         if found is None:
             java = "no java"
-        elif found[1] >= spec.min_java:
+        elif found[1] >= need:
             java = "ok"
         else:
-            java = f"needs {spec.min_java}+"
+            java = f"needs {need}+"
         table.add_row(name, pin, cached, java)
     console.print(table)
     if cfg.engine_overrides:
@@ -689,6 +691,7 @@ def engines_update(
 
     failed = False
     ok, bad = marks(console)
+    java: tuple[str, int] | None = None
     with httpx.Client() as client:
         for name in wanted:
             spec = specs[name]
@@ -715,4 +718,11 @@ def engines_update(
             console.print(
                 f"[green]{ok}[/] {name} {safe(res.old_version)} → {safe(res.version)} (pinned in {safe(cfg_path)})"
             )
+            pinned = engines.active_specs({name: res.pin})[name]
+            need = engines.required_java(pinned, engines.cache_root() / "engines" / f"{name}-{res.version}.jar")
+            java = java or engines.find_java()
+            if java is not None and java[1] < need:  # the runs on this Java skip it, or stop (#113)
+                console.print(
+                    f"[yellow]{name} {safe(res.version)} needs Java {need}+, and the java on PATH is Java {java[1]}[/]"
+                )
     raise typer.Exit(code=1 if failed else 0)

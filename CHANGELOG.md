@@ -126,6 +126,25 @@ All notable changes to decaf are documented here.
   could not read such a jar either, also on the class path of the other
   inputs. Now such an input goes to the engines and to the check through a
   link in the temp folder.
+- The engine setup failed with no message, or with a traceback (#113). A
+  fallback engine that failed to download left the chain with no warning.
+  An error of the engine cache, for example a read-only cache, gave a
+  traceback and exit code 1. Now the warning `fallback chain: skipped ...`
+  gives the cause for a fallback engine, and for the primary engine the run
+  stops with the cause (exit code 2). Two runs that downloaded one engine at
+  the same time used the same temp files; now each download has its own.
+- Some Java versions stopped each run (#113). An early-access Java such as
+  `26-ea` counted as Java 0. Now decaf reads such versions. A `java -version`
+  that gives no answer in 30 s, or no version that decaf can read, now stops
+  the run with a clear error. A pin can need a newer Java than the built-in
+  spec says: for example, the newest Fernflower needs Java 25. Then
+  `engines list` showed `ok`, and the engine failed on each artifact. Now
+  `engines list` and each run read the Java that an engine jar needs from
+  its class files, so a fallback engine that needs a newer Java is skipped.
+  `engines update` now warns when the java on PATH is too old for a new pin.
+  When the Java is too old for the primary engine, the error now gives a
+  hint. The README no longer gives the Java version of each engine, because
+  these versions change; `decaf engines list` shows them.
 
 ### Security
 

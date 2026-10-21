@@ -1,11 +1,13 @@
 import hashlib
 import io
+import subprocess
 import zipfile
 from pathlib import Path
 
 import httpx
 import pytest
 
+import decaf.engines as engines
 from decaf.engines import (
     ENGINE_ORDER,
     ENGINES,
@@ -13,6 +15,7 @@ from decaf.engines import (
     EngineSpec,
     ensure_engine,
     parse_java_major,
+    required_java,
 )
 
 
@@ -111,11 +114,70 @@ def test_registry_complete_and_ordered():
         ('java version "1.8.0_392"', 8),
         ('openjdk version "11.0.22" 2024-01-16', 11),
         ('openjdk version "25" 2025-09-16', 25),
+        ('openjdk version "26-ea" 2026-03-17', 26),  # an early-access build (#113)
+        ('openjdk version "17-internal" 2021-09-14', 17),
         ("no version here", None),
     ],
 )
 def test_parse_java_major(text: str, major: int | None):
     assert parse_java_major(text) == major
+
+
+def test_download_leaves_the_temp_files_of_another_process(tmp_path: Path):
+    """#113: two runs can download one engine at the same time, so fixed temp names collide."""
+    inner = b"inner jar bytes"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("tool.jar", inner)
+    zipped = buf.getvalue()
+    spec = EngineSpec(
+        name="fake", version="1.0", url="https://x.test/dist.zip", sha256=hashlib.sha256(inner).hexdigest(),
+        min_java=11, download_sha256=hashlib.sha256(zipped).hexdigest(), archive_member="tool.jar",
+    )
+    (tmp_path / "fake-1.0.part").write_bytes(b"a part of another download")
+    (tmp_path / "fake-extract").mkdir()
+    (tmp_path / "fake-extract/tool.jar").write_bytes(b"another extract")
+    with make_client(lambda r: httpx.Response(200, content=zipped)) as c:
+        jar = ensure_engine(spec, c, cache_dir=tmp_path)
+    assert jar.read_bytes() == inner
+    assert (tmp_path / "fake-1.0.part").read_bytes() == b"a part of another download"
+    assert (tmp_path / "fake-extract/tool.jar").read_bytes() == b"another extract"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fake-1.0.jar", "fake-1.0.part", "fake-extract"]
+
+
+def _class(java: int) -> bytes:
+    return b"\xca\xfe\xba\xbe\x00\x00" + (java + 44).to_bytes(2, "big")
+
+
+def test_required_java_is_the_newest_class_file_of_the_jar(tmp_path: Path):
+    """#113: a pin can need a newer Java than the built-in spec says."""
+    jar = tmp_path / "engine.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("a/A.class", _class(8))
+        zf.writestr("a/B.class", _class(25))
+        zf.writestr("META-INF/versions/26/a/A.class", _class(26))  # loaded only on Java 26+
+        zf.writestr("module-info.class", _class(26))
+    assert required_java(spec_for(b""), jar) == 25
+
+
+def test_required_java_is_at_least_the_minimum_of_the_spec(tmp_path: Path):
+    jar = tmp_path / "engine.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("a/A.class", _class(6))
+    assert required_java(spec_for(b""), jar) == 11
+    assert required_java(spec_for(b""), tmp_path / "absent.jar") == 11
+
+
+def test_find_java_gives_up_on_a_java_that_does_not_answer(monkeypatch):
+    """#113: a java -version that hangs must not hang decaf."""
+    monkeypatch.setattr(engines.shutil, "which", lambda name: "/usr/bin/java")
+
+    def hang(cmd, **kwargs):
+        assert kwargs.get("timeout")
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(engines.subprocess, "run", hang)
+    assert engines.find_java() == ("/usr/bin/java", 0)
 
 
 def test_ensure_engine_download_hook_fires_only_on_download(tmp_path: Path):

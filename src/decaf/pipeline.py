@@ -1473,6 +1473,13 @@ class DecafError(Exception):
     """Environment or usage error; the CLI reports it and exits 2."""
 
 
+def _engine_failure(name: str, exc: Exception) -> str:
+    """Why an engine is not available, without its name (#113)."""
+    if isinstance(exc, OSError):
+        return f"{exc.strerror or exc}: {exc.filename}" if exc.filename else str(exc.strerror or exc)
+    return str(exc).removeprefix(f"{name}: ")
+
+
 def _preflight_engines(
     settings: Settings,
     java_major: int,
@@ -1489,31 +1496,38 @@ def _preflight_engines(
     skipped: list[str] = []
     for name in wanted:
         spec = specs[name]
-        if spec.min_java > java_major:
-            if name == settings.engine:
-                raise DecafError(
-                    f"engine {name} needs Java {spec.min_java}+, found Java {java_major}"
-                )
-            skipped.append(f"{name} (needs Java {spec.min_java}+, found {java_major})")
-            continue
-        downloaded = False
-        kwargs: dict = {}
-        if on_event is not None:
+        need = spec.min_java
+        if need <= java_major:
+            downloaded = False
+            kwargs: dict = {}
+            if on_event is not None:
 
-            def _hook(name: str = name, version: str = spec.version) -> None:
-                nonlocal downloaded
-                downloaded = True
-                on_event("engines", name, f"downloading {version}")
+                def _hook(name: str = name, version: str = spec.version) -> None:
+                    nonlocal downloaded
+                    downloaded = True
+                    on_event("engines", name, f"downloading {version}")
 
-            kwargs["on_download"] = _hook
-        try:
-            jars[name] = engines.ensure_engine(spec, client, **kwargs)
-        except engines.EngineError as exc:
-            if name == settings.engine:
-                raise DecafError(str(exc)) from exc
-        else:
+                kwargs["on_download"] = _hook
+            try:
+                jar = engines.ensure_engine(spec, client, **kwargs)
+            except (engines.EngineError, OSError) as exc:  # e.g. a read-only engine cache (#113)
+                cause = _engine_failure(name, exc)
+                if name == settings.engine:
+                    raise DecafError(f"{name}: {cause}") from exc
+                skipped.append(f"{name} ({cause})")
+                continue
             if downloaded:
                 on_event("engines", name, f"downloaded {spec.version}")
+            need = engines.required_java(spec, jar)  # a pin can need a newer Java than its spec (#113)
+        if need > java_major:
+            if name == settings.engine:
+                raise DecafError(
+                    f"engine {name} needs Java {need}+, found Java {java_major}: use Java {need}+, or choose"
+                    " another engine with --engine (`decaf engines list` shows the Java that each engine needs)"
+                )
+            skipped.append(f"{name} (needs Java {need}+, found {java_major})")
+            continue
+        jars[name] = jar
     chain = chain_for(settings.engine, settings.fallback, available=set(jars))
     if not chain:
         raise DecafError(f"primary engine {settings.engine!r} unavailable")
@@ -1572,6 +1586,8 @@ def run(
     if found is None:
         raise DecafError("java not found on PATH (Java 11+ required)")
     java_exe, java_major = found
+    if not java_major:  # no answer, or a version text that decaf cannot read (#113)
+        raise DecafError(f"cannot read the Java version of {java_exe}")
     if java_major < engines.JAVA_MIN:
         raise DecafError(f"Java {java_major} is too old (Java {engines.JAVA_MIN}+ required)")
 
