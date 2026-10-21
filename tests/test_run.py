@@ -480,6 +480,20 @@ def test_scheduler_wait_has_a_timeout(fake_env, make_jar, tmp_path: Path, monkey
     assert timeouts and None not in timeouts
 
 
+def test_run_sends_no_event_before_a_preflight_error(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """An exit-2 error leaves the stdout of --format ndjson empty (#109)."""
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 16))  # Vineflower needs Java 17
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    seen: list = []
+    with pytest.raises(DecafError, match="needs Java 17"):
+        run(
+            Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, memory_mb=4096),
+            runner=perfect_engine, on_found=seen.append, on_warn=seen.append,
+            on_event=lambda k, s, d: seen.append(k) if k != "engines" else None,
+        )
+    assert seen == []
+
+
 def test_run_resets_closed_registry(fake_env, make_jar, tmp_path: Path):
     import decaf.engines as _e
 

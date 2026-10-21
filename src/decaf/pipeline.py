@@ -1407,13 +1407,6 @@ def run(
 
     artifacts, nested_counts = scan_counted(settings.input)
     discovered = len(artifacts) + sum(nested_counts.values())
-    if on_found is not None:
-        on_found(discovered)
-    if on_event is not None:
-        on_event(
-            "scan", "",
-            f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
-        )
     cds_dir: Path | None = None
     default_runner = runner is None
     if runner is None:
@@ -1458,12 +1451,6 @@ def run(
     cpu_budget = max(1, total_cpus // jobs)
     fetch_jobs = min(8, 2 * jobs)  # IO-sized: stage 1 waits on the network, not cores
     queue_bound = 2 * jobs  # decompiles queued beyond the running `jobs` before stage 1 stalls
-    if on_event is not None:
-        ram_unknown = settings.memory_mb is None and not budget_mb
-        on_event("memory", "", memory.budget_line(mem_plan, ram_unknown=ram_unknown))
-    if mem_plan.budget_mb and on_warn is not None:
-        for line in memory.heap_env_warnings(os.environ, mem_plan.heap_mb(1)):
-            on_warn(line)
     affinity_base: set[int] | None = None
     if hasattr(os, "sched_setaffinity"):
         # ActiveProcessorCount only sizes JVM pools — JIT/GC warmup still bursts past
@@ -1479,6 +1466,20 @@ def run(
         chain, engine_jars = _preflight_engines(
             settings, java_major, client, on_event, on_warn=on_warn
         )
+        # The first events come after the last check that can end the run with DecafError,
+        # so such an error leaves the stdout of --format ndjson empty (#109).
+        if on_found is not None:
+            on_found(discovered)
+        if on_event is not None:
+            on_event(
+                "scan", "",
+                f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
+            )
+            ram_unknown = settings.memory_mb is None and not budget_mb
+            on_event("memory", "", memory.budget_line(mem_plan, ram_unknown=ram_unknown))
+        if mem_plan.budget_mb and on_warn is not None:
+            for line in memory.heap_env_warnings(os.environ, mem_plan.heap_mb(1)):
+                on_warn(line)
         if settings.check and checker is None and default_runner:
             # An injected runner without an injected checker has no check: fake engines write fake Java.
             javac_path = check.find_javac(java_exe)

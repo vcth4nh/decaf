@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import fnmatch
 import json
+import re
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -28,9 +29,43 @@ class ReportError(Exception):
     """A report file is missing or its JSON could not be parsed."""
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")  # C0, DEL, C1
+_CONTROL_IN_LINES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # tab and line feed stay
+
+
+def plain(text: object, *, lines: bool = False) -> str:
+    """Text from an archive or an engine for a terminal: each control character becomes \\xNN (#109).
+
+    With lines=True, tabs and line feeds stay (engine stderr).
+    """
+    pattern = _CONTROL_IN_LINES if lines else _CONTROL
+    return pattern.sub(lambda m: f"\\x{ord(m.group()):02x}", str(text))
+
+
+def safe(text: object, *, lines: bool = False) -> str:
+    """plain() text with its rich markup escaped, for console.print."""
+    return escape(plain(text, lines=lines))
+
+
+_MARKS = ("✓", "✗")
+
+
+def marks(console: Console) -> tuple[str, str]:
+    """The ok and failed marks, or ASCII marks when the console cannot encode them (#109)."""
+    try:
+        "".join(_MARKS).encode(console.encoding)
+    except (UnicodeEncodeError, LookupError):
+        return ("+", "x")
+    return _MARKS
+
+
 def _artifact(d: dict) -> ArtifactReport:
     r = ArtifactReport(**{k: v for k, v in d.items() if k in _AR and k != "attempts"})
-    r.attempts = [EngineAttempt(**{k: v for k, v in a.items() if k in _EA}) for a in d.get("attempts", [])]
+    attempts = d.get("attempts")
+    r.attempts = [
+        EngineAttempt(**{k: v for k, v in a.items() if k in _EA})
+        for a in (attempts if isinstance(attempts, list) else []) if isinstance(a, dict)
+    ]
     return r
 
 
@@ -56,9 +91,11 @@ def load_report(path: Path) -> tuple[RunReport, Path]:
     if not resolved.is_file():
         raise ReportError(f"report not found: {resolved}")
     try:
-        data = json.loads(resolved.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # ValueError: no JSON, or no UTF-8
         raise ReportError(f"could not parse {resolved}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ReportError(f"could not parse {resolved}: not a JSON object")
     return _run_report(data), resolved
 
 
@@ -89,10 +126,10 @@ def _bucket_groups(failed: list[ArtifactReport]) -> dict[str, list[ArtifactRepor
     return groups
 
 
-def _status_line(r: ArtifactReport) -> str:
+def _status_line(r: ArtifactReport, mark: tuple[str, str] = _MARKS) -> str:
     if r.outcome == "ok":
         if r.method == "maven":
-            detail = f"maven sources, {escape(str(r.gav))}"
+            detail = f"maven sources, {safe(r.gav)}"
             if r.sources_cached:
                 detail += ", cached"
         elif r.method == "extracted":
@@ -100,22 +137,22 @@ def _status_line(r: ArtifactReport) -> str:
         elif r.method is None and r.kind == "resource_only":
             detail = f"resources only, {r.resources_copied} files"
         else:
-            detail = f"{r.method}, {r.classes} classes"
+            detail = f"{safe(r.method)}, {r.classes} classes"
             if r.missing_classes:
                 detail += f", [yellow]{r.missing_classes} missing[/]"
             if r.stubs:
                 detail += f", [yellow]{len(r.stubs)} stubbed[/]"
             if r.flagged:
                 detail += f", [yellow]{len(r.flagged)} flagged[/]"
-        glyph = "[yellow]![/]" if r.partial else "[green]✓[/]"
-        line = f"{glyph} {escape(r.rel)} ({detail})"
+        glyph = "[yellow]![/]" if r.partial else f"[green]{mark[0]}[/]"
+        line = f"{glyph} {safe(r.rel)} ({detail})"
         if r.method == "maven" and r.sources_cached:
             return f"[dim]{line}[/]"
         return line
     if r.outcome == "skipped":
-        return f"[yellow]-[/] {escape(r.rel)} ({escape(r.failure or 'resource-only')}, skipped)"
-    reason = escape((r.failure or "failed").splitlines()[-1])
-    return f"[red]✗[/] {escape(r.rel)} ({reason})"
+        return f"[yellow]-[/] {safe(r.rel)} ({safe(r.failure or 'resource-only')}, skipped)"
+    reason = safe((r.failure or "failed").splitlines()[-1])
+    return f"[red]{mark[1]}[/] {safe(r.rel)} ({reason})"
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -176,7 +213,7 @@ def render_ending(
         lead = f"budget {gb(budget)}" if budget else "no cap"
         console.print(
             f"[dim]{'Memory':<{_BODY_LABEL_WIDTH}}[/]  {lead} · largest peak {gb(peak)} "
-            f"({escape(rel)}, {escape(engine)})"
+            f"({safe(rel)}, {safe(engine)})"
         )
 
     missing = sum(r.missing_classes for r in report.artifacts)
@@ -206,7 +243,7 @@ def render_ending(
         found = report.settings.get("java_major")
         console.print(f"[dim]compile check: {newer} files need Java {needs}+ (found Java {found})[/]")
     if flagged:
-        console.print(f'[dim]compile check: run "decaf report {escape(str(output))} --problems" for more information[/]')
+        console.print(f'[dim]compile check: run "decaf report {safe(output)} --problems" for more information[/]')
     if out_of_heap:
         cap = report.settings.get("heap_cap_mb")
         if not budget:
@@ -225,19 +262,19 @@ def render_ending(
             console.print(f"  {len(rs)}  {bucket}")
         console.print()
         for r in failed[:20]:
-            console.print(_status_line(r))
+            console.print(_status_line(r, marks(console)))
             if verbose:
                 for a in r.attempts:
                     if a.stderr_tail:
-                        console.print(f"    [dim]{a.engine} ({a.level}): {escape(a.stderr_tail[-300:])}[/]")
+                        console.print(f"    [dim]{safe(a.engine)} ({safe(a.level)}): {safe(a.stderr_tail[-300:], lines=True)}[/]")
         if len(failed) > 20:
             console.print(f"…and {len(failed) - 20} more failures (see report)")
         if any(failure_bucket(r) == "case collision" for r in failed):
             console.print(f"[dim]{_CASE_HINT}[/]")
 
     console.print()
-    console.print(f"[dim]{'Output':<{_FOOTER_LABEL_WIDTH}}[/]  {escape(str(output))}")
-    console.print(f"[dim]{'Report':<{_FOOTER_LABEL_WIDTH}}[/]  {escape(str(report_path))}")
+    console.print(f"[dim]{'Output':<{_FOOTER_LABEL_WIDTH}}[/]  {safe(output)}")
+    console.print(f"[dim]{'Report':<{_FOOTER_LABEL_WIDTH}}[/]  {safe(report_path)}")
 
 
 def render_problems(console: Console, report: RunReport) -> None:
@@ -247,13 +284,13 @@ def render_problems(console: Console, report: RunReport) -> None:
     for bucket, rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         console.print(f"[dim]{len(rs)}  {bucket}[/]")
         for r in rs:
-            console.print(_status_line(r))
+            console.print(_status_line(r, marks(console)))
     partial = [r for r in report.artifacts if r.partial]
     if partial:
         if failed:
             console.print()
         for r in partial:
-            console.print(_status_line(r))
+            console.print(_status_line(r, marks(console)))
 
 
 def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]) -> int:
@@ -265,11 +302,11 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
     for i, r in enumerate(matches):
         if i:
             console.print()
-        console.print(f"[bold]{escape(r.rel)}[/]")
-        console.print(f"  kind={r.kind} outcome={r.outcome} method={r.method}")
+        console.print(f"[bold]{safe(r.rel)}[/]")
+        console.print(f"  kind={safe(r.kind)} outcome={safe(r.outcome)} method={safe(r.method)}")
         console.print(
-            f"  gav={escape(str(r.gav))} repo={escape(str(r.repo))} "
-            f"resolved_by={escape(str(r.resolved_by))} sources_miss={escape(str(r.sources_miss))}"
+            f"  gav={safe(r.gav)} repo={safe(r.repo)} "
+            f"resolved_by={safe(r.resolved_by)} sources_miss={safe(r.sources_miss)}"
         )
         console.print(
             f"  classes={r.classes} java_files={r.java_files} "
@@ -281,37 +318,37 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
             console.print(
                 f"  check: checked={r.check.get('checked', 0)} flagged={r.check.get('flagged', 0)} "
                 f"noted={r.check.get('noted', 0)} unchecked={r.check.get('unchecked', 0)}"
-                + (f" ({escape(reasons)})" if reasons else "")
+                + (f" ({safe(reasons)})" if reasons else "")
             )
         for f in r.flagged:
             console.print(_check_line("flagged", f))
             for m in f.get("messages") or []:
-                console.print(f"    {escape(str(m))}")
+                console.print(f"    {safe(m)}")
         for f in r.noted:
             console.print(_check_line("noted", f))
         for f in r.unchecked:
             needs = f" (needs Java {f.get('needs_java')}+)" if f.get("needs_java") else ""
-            first = f" - {escape(str(f.get('first')))}" if f.get("first") else ""
+            first = f" - {safe(f.get('first'))}" if f.get("first") else ""
             console.print(
-                f"  unchecked {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
-                f"{escape(str(f.get('reason')))}{needs}{first}"
+                f"  unchecked {safe(f.get('path'))} ({safe(f.get('engine'))}): "
+                f"{safe(f.get('reason'))}{needs}{first}"
             )
         if r.failure:
-            console.print(f"  failure={escape(r.failure)}")
+            console.print(f"  failure={safe(r.failure, lines=True)}")
         for s in r.stubs:
             errors = ", ".join(s.get("errors") or []) or "no exception name"
             console.print(
-                f"  stub {escape(str(s.get('path')))} ({escape(str(s.get('engine')))}, "
-                f"{s.get('methods')} methods): {escape(errors)}"
+                f"  stub {safe(s.get('path'))} ({safe(s.get('engine'))}, "
+                f"{s.get('methods')} methods): {safe(errors)}"
             )
         for a in r.attempts:
             console.print(
-                f"  {a.engine} {a.level} rc={a.returncode} timed_out={a.timed_out} "
+                f"  {safe(a.engine)} {safe(a.level)} rc={a.returncode} timed_out={a.timed_out} "
                 f"java_files={a.java_files} stubbed={a.stubbed} flagged={a.flagged} "
                 f"peak_rss_mb={a.peak_rss_mb} heap_mb={a.heap_mb} out_of_memory={a.out_of_memory}"
             )
             if a.stderr_tail:
-                console.print(f"    [dim]{escape(a.stderr_tail)}[/]")
+                console.print(f"    [dim]{safe(a.stderr_tail, lines=True)}[/]")
     return len(matches)
 
 
@@ -319,9 +356,9 @@ def _check_line(label: str, f: dict) -> str:
     """One flagged or noted file: kinds, error count, and the error that decided its status (#99)."""
     n = f.get("errors", 0)
     return (
-        f"  {label} {escape(str(f.get('path')))} ({escape(str(f.get('engine')))}): "
-        f"{escape(', '.join(f.get('kinds') or []))}, {n} error{'' if n == 1 else 's'} - "
-        f"{escape(str(f.get('first')))}"
+        f"  {label} {safe(f.get('path'))} ({safe(f.get('engine'))}): "
+        f"{safe(', '.join(f.get('kinds') or []))}, {n} error{'' if n == 1 else 's'} - "
+        f"{safe(f.get('first'))}"
     )
 
 
@@ -329,7 +366,7 @@ def render_network_fallbacks(console: Console, report: RunReport) -> None:
     """List artifacts that lost sources to network failures, with the miss text."""
     for r in report.artifacts:
         if (r.sources_miss or "").startswith("network:"):
-            console.print(f"{r.rel}: {escape(r.sources_miss)}")
+            console.print(f"{safe(r.rel)}: {safe(r.sources_miss)}")
 
 
 def render_memory(console: Console, report: RunReport) -> None:
@@ -344,7 +381,7 @@ def render_memory(console: Console, report: RunReport) -> None:
     rows.sort(key=lambda row: (-row[0], row[1]))
     for peak, rel, a in rows[:10]:
         heap = "no cap" if a.heap_mb is None else f"heap {gb(a.heap_mb)}"
-        line = f"{gb(peak):>8}  {heap:<12}  {escape(a.engine)} {escape(a.level)}  {escape(rel)}"
+        line = f"{gb(peak):>8}  {heap:<12}  {safe(a.engine)} {safe(a.level)}  {safe(rel)}"
         if a.out_of_memory:
             line += "  [yellow]out of heap[/]"
         console.print(line)

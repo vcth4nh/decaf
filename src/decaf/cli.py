@@ -6,6 +6,7 @@ import dataclasses
 import json
 import shutil
 import signal
+import sys
 import threading
 from enum import Enum
 from pathlib import Path
@@ -15,7 +16,6 @@ from typing import Annotated, Optional
 import httpx
 import typer
 from rich.console import Console
-from rich.markup import escape
 from rich.progress import Progress, ProgressColumn, SpinnerColumn, TaskID
 from rich.table import Column, Table
 from rich.text import Text
@@ -25,7 +25,7 @@ from . import __version__, engines, memory
 from . import report_view, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
 from .pipeline import ArtifactReport, DecafError, Settings, run
-from .report_view import _status_line
+from .report_view import _status_line, marks, plain, safe
 from .scanner import ScanError
 
 
@@ -74,6 +74,28 @@ def _root(
                                           help="Print version and exit")] = False,
 ) -> None:
     """All-in-one Java decompiler."""
+    for stream in (sys.stdout, sys.stderr):  # a character that the stream cannot encode becomes an escape (#109)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="backslashreplace")
+    _for_logs(console)
+
+
+def _for_logs(c: Console) -> Console:
+    """Without a terminal, rich does not wrap lines, so a log file keeps each line whole (#109)."""
+    c.soft_wrap = not c.is_terminal
+    return c
+
+
+_NDJSON_LOCK = threading.Lock()
+
+
+def _emit(event: dict) -> None:
+    """One ndjson line in one write: the lines of two threads never mix (#109)."""
+    line = json.dumps(event) + "\n"
+    with _NDJSON_LOCK:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 engines_app = typer.Typer(name="engines", help="Manage decompiler engines", no_args_is_help=True)
@@ -123,19 +145,20 @@ def engines_fetch(
     cfg, specs = _active_specs_from(config)
     wanted = [n.value for n in names] if names else list(engines.ENGINE_ORDER)
     failed = False
+    ok, bad = marks(console)
     with httpx.Client() as client:
         for name in wanted:
             spec = specs[name]
             if engines.cache_status(spec):
-                console.print(f"[green]✓[/] {name} {spec.version} already cached")
+                console.print(f"[green]{ok}[/] {name} {safe(spec.version)} already cached")
                 continue
             try:
                 engines.ensure_engine(spec, client)
             except engines.EngineError as exc:
-                console.print(f"[red]✗[/] {exc}")
+                console.print(f"[red]{bad}[/] {safe(exc)}")
                 failed = True
                 continue
-            console.print(f"[green]✓[/] {name} {spec.version} downloaded")
+            console.print(f"[green]{ok}[/] {name} {safe(spec.version)} downloaded")
     raise typer.Exit(code=1 if failed else 0)
 
 
@@ -207,7 +230,7 @@ class Format(str, Enum):
 
 
 def _fail(message: str) -> typer.Exit:
-    console.print(f"[red]error:[/] {message}")
+    console.print(f"[red]error:[/] {safe(message)}")
     return typer.Exit(code=2)
 
 
@@ -325,10 +348,10 @@ class _RunDisplay:
                 self._drop(subject)
             elif kind == "fetch":
                 verb = detail or "fetching"
-                self._upsert(subject, f"{verb:<17} {_shorten(subject)}", kind)
+                self._upsert(subject, f"{verb:<17} {plain(_shorten(subject))}", kind)
             elif kind == "decompile":
                 self._upsert(
-                    subject, f"{'decompiling':<17} {_shorten(subject)}", kind, detail=detail
+                    subject, f"{'decompiling':<17} {plain(_shorten(subject))}", kind, detail=detail
                 )
             elif kind == "progress":
                 row = self._rows.get(subject)
@@ -350,7 +373,7 @@ class _RunDisplay:
             longest = self._longest_active()
             if longest is not None:
                 rel, since = longest
-                line += f" · longest active {_shorten(rel)} ({_elapsed(monotonic() - since)})"
+                line += f" · longest active {safe(_shorten(rel))} ({_elapsed(monotonic() - since)})"
             return line
 
     # -- internals; every method below expects the lock to be held --
@@ -363,7 +386,7 @@ class _RunDisplay:
             return
         if detail.startswith("downloaded "):
             ver = detail.split(" ", 1)[1]
-            self._p.console.print(f"[green]✓[/] {subject} {ver} downloaded")
+            self._p.console.print(f"[green]{marks(self._p.console)[0]}[/] {subject} {safe(ver)} downloaded")
             text = "engines: verifying…"
         elif detail.startswith("downloading "):
             ver = detail.split(" ", 1)[1]
@@ -445,7 +468,7 @@ def main(
     machine = format is not Format.human
     prior_console = console
     if machine:
-        console = Console(stderr=True, emoji=False)
+        console = _for_logs(Console(stderr=True, emoji=False))
     try:
         if not input.exists():
             raise _fail(f"input {input} does not exist")
@@ -504,36 +527,35 @@ def main(
             transient=True,
             disable=quiet or machine,
         )
-        display = None if machine else _RunDisplay(progress)
+        display = _RunDisplay(progress)  # also in the machine formats: their notes go to stderr (#109)
+        status_marks = marks(console)
         scan_sent = False
 
         def on_done(r: ArtifactReport) -> None:
-            if display is not None:
-                display.on_done(r)
+            display.on_done(r)
             if format is Format.ndjson:
-                print(json.dumps({"event": "artifact", **dataclasses.asdict(r)}), flush=True)
+                _emit({"event": "artifact", **dataclasses.asdict(r)})
             if not quiet:
-                progress.console.print(_status_line(r))
+                progress.console.print(_status_line(r, status_marks))
 
         def on_found(count: int) -> None:
             nonlocal scan_sent
-            if display is not None:
-                display.on_found(count)
+            display.on_found(count)
             # pipeline calls on_found more than once: the initial discovered
             # total, then bare deltas as fetch-time nested discovery diverges
             # from the scan estimate. Only the first call is a true total.
             if format is Format.ndjson and not scan_sent:
                 scan_sent = True
-                print(json.dumps({"event": "scan", "artifacts": count}), flush=True)
+                _emit({"event": "scan", "artifacts": count})
 
         def on_stderr(text: str) -> None:
-            progress.console.print(f"[dim]{escape(text)}[/]")
+            progress.console.print(f"[dim]{safe(text, lines=True)}[/]")
 
         def on_warn(text: str) -> None:
             if format is Format.ndjson:
-                print(json.dumps({"event": "warning", "text": text}), flush=True)
+                _emit({"event": "warning", "text": text})
             if not quiet:
-                progress.console.print(f"[yellow]{escape(text)}[/]")
+                progress.console.print(f"[yellow]{safe(text)}[/]")
 
         stop = threading.Event()
 
@@ -556,7 +578,7 @@ def main(
         try:
             with progress:
                 report = run(settings, on_done=on_done, on_found=on_found,
-                             on_event=None if (quiet or machine) else display.on_event,
+                             on_event=None if quiet else display.on_event,
                              on_stderr=on_stderr if verbose else None,
                              on_warn=on_warn if (format is Format.ndjson or not quiet) else None)
         except (DecafError, ScanError) as exc:
@@ -572,7 +594,7 @@ def main(
         if format is Format.json:
             print(report.to_json(), flush=True)
         elif format is Format.ndjson:
-            print(json.dumps({
+            _emit({
                 "event": "summary",
                 "status": report.status,
                 "totals": report.totals,
@@ -580,7 +602,7 @@ def main(
                 "duration_seconds": report.duration_seconds,
                 "output": str(output),
                 "report": str(output / "decaf-report.json"),
-            }), flush=True)
+            })
         if report.interrupted:
             raise typer.Exit(code=130)
         raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
@@ -604,9 +626,9 @@ def report_cmd(
 
     schema = report.schema_version or 0
     console.print(
-        f"[dim]{escape(str(resolved))} · schema {schema} · "
-        f"decaf {escape(report.decaf_version or 'unknown')} · "
-        f"{escape(report.ended_at or 'no timestamp')}[/]"
+        f"[dim]{safe(resolved)} · schema {schema} · "
+        f"decaf {safe(report.decaf_version or 'unknown')} · "
+        f"{safe(report.ended_at or 'no timestamp')}[/]"
     )
     if schema > 1:
         console.print(
@@ -659,10 +681,11 @@ def engines_update(
         except (ConfigError, OSError) as exc:
             raise _fail(f"config write failed: {exc}")
         for name in removed:
-            console.print(f"[green]✓[/] {name}: restored built-in pin {engines.ENGINES[name].version}")
+            console.print(f"[green]{marks(console)[0]}[/] {name}: restored built-in pin {engines.ENGINES[name].version}")
         return
 
     failed = False
+    ok, bad = marks(console)
     with httpx.Client() as client:
         for name in wanted:
             spec = specs[name]
@@ -672,19 +695,21 @@ def engines_update(
                     warn=lambda msg: console.print(f"[yellow]{msg}[/]"),
                 )
             except engines.EngineError as exc:
-                console.print(f"[red]✗[/] {exc}")
+                console.print(f"[red]{bad}[/] {safe(exc)}")
                 failed = True
                 continue
             if res is None:
-                console.print(f"[green]✓[/] {name} {spec.version} already at latest")
+                console.print(f"[green]{ok}[/] {name} {safe(spec.version)} already at latest")
                 continue
             overrides[name] = res.pin
             try:
                 write_engine_pins(cfg_path, overrides)
             except (ConfigError, OSError) as exc:
                 overrides.pop(name, None)
-                console.print(f"[red]✗[/] {name}: config write failed: {exc}")
+                console.print(f"[red]{bad}[/] {name}: config write failed: {safe(exc)}")
                 failed = True
                 continue
-            console.print(f"[green]✓[/] {name} {res.old_version} → {res.version} (pinned in {cfg_path})")
+            console.print(
+                f"[green]{ok}[/] {name} {safe(res.old_version)} → {safe(res.version)} (pinned in {safe(cfg_path)})"
+            )
     raise typer.Exit(code=1 if failed else 0)
