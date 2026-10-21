@@ -22,9 +22,28 @@ All notable changes to decaf are documented here.
   Ctrl-C, decaf starts no new network request, and no file of a killed
   engine goes to the output. The scheduler now waits with a timeout, so
   Ctrl-C on Windows does not wait for the next engine to finish.
+- A status line that stdout could not encode stopped the run, for example
+  ✓ on a redirected Windows stdout, or a file name that is not UTF-8 on
+  Linux (#109). Now such a character prints as an escape (`\udcff`), and
+  the marks fall back to `+` and `x`.
+- Markup in a name or an error text (for example `[/x]`) could stop decaf
+  with a traceback in a usage error, in the heartbeat line, and in
+  `decaf report --network-fallbacks`. Now these texts are escaped too.
+- In the `json` and `ndjson` formats, stderr now shows the same notes as the
+  human format: the found artifacts, the engine memory, and the engine
+  downloads. An error with exit code 2 now comes before the first ndjson
+  line, so stdout stays empty. Each ndjson line is now one write, so the
+  lines of two threads cannot mix.
+- Without a terminal, long lines were wrapped at 80 columns, so a log file
+  split long paths. Now each line stays whole.
+- `decaf report` showed a traceback for a file that is not a JSON object or
+  not UTF-8. Now it shows an error and exits with code 2.
 
 ### Security
 
+- Archive names and engine output could put terminal control codes on the
+  screen, because decaf escaped only the rich markup. Now each control
+  character (C0, DEL, and C1) prints as `\xNN`.
 - Maven coordinates are now checked before decaf uses them in a cache file
   name or a URL. Many coordinates come from the input archive
   (`pom.properties`, the manifest, the file name). Before, such text could

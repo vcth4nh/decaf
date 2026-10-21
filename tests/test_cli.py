@@ -842,6 +842,112 @@ def test_heartbeat_line_shape():
     assert "longest active b.jar" in line
 
 
+def test_heartbeat_line_escapes_a_name():
+    """A rel with markup or a control character must print as text (#109)."""
+    import io
+
+    from rich.console import Console
+
+    progress, disp = make_display()
+    disp.on_found(1)
+    disp.on_event("scan", "", "1 top-level + 0 nested")
+    disp.on_event("decompile", "a[/b]\x1b[2J.jar", "vineflower · 2 classes")
+    c = Console(file=io.StringIO(), width=200, emoji=False, color_system=None)
+    c.print(disp.heartbeat_line(5.0))
+    assert "a[/b]\\x1b[2J.jar" in c.file.getvalue() and "\x1b" not in c.file.getvalue()
+
+
+def test_status_lines_survive_a_stream_without_the_marks(tmp_path: Path, make_jar, monkeypatch):
+    """A redirected Windows stdout (an ANSI code page) cannot encode the marks (#109)."""
+    rep = ok_report()
+
+    def fake_run(settings, **kw):
+        kw["on_done"](rep.artifacts[0])
+        kw["on_done"](ArtifactReport(rel="b\u00e9\u3042.jar", kind="archive", outcome="failed", failure="boom"))
+        return rep
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = CliRunner(env={"COLUMNS": "200"}, charset="cp1252").invoke(
+        app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")]
+    )
+    assert result.exit_code == 0, result.output
+    assert "+ a.jar (maven sources" in result.stdout
+    assert "x b\u00e9\\u3042.jar (boom)" in result.stdout
+
+
+def test_status_line_of_a_name_that_is_no_utf8(tmp_path: Path, make_jar, monkeypatch):
+    """On Linux, a file name that is not UTF-8 has lone surrogates in Python (#109)."""
+    def fake_run(settings, **kw):
+        kw["on_done"](ArtifactReport(rel="bad\udcff.jar", kind="archive", outcome="failed", failure="boom"))
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0, result.output
+    assert "bad\\udcff.jar" in result.stdout
+
+
+def test_usage_error_with_markup_in_the_path(tmp_path: Path):
+    result = runner.invoke(app, [str(tmp_path / "in[bold]x"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 2
+    assert "in[bold]x does not exist" in ANSI.sub("", result.output)
+
+
+def test_machine_formats_keep_the_notes_on_stderr(tmp_path: Path, make_jar, monkeypatch):
+    """--format json and ndjson show the narration of the human format on stderr (#109)."""
+    def fake_run(settings, **kw):
+        assert kw["on_event"] is not None
+        kw["on_found"](1)
+        kw["on_event"]("scan", "", "1 top-level + 0 nested")
+        kw["on_event"]("memory", "", "engine memory: no cap")
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    for fmt in ("json", "ndjson"):
+        result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / f"out-{fmt}"), "--format", fmt])
+        assert result.exit_code == 0, result.output
+        assert "found 1 artifacts (1 top-level + 0 nested)" in result.stderr
+        assert "engine memory: no cap" in result.stderr
+        assert "found 1 artifacts" not in result.stdout
+
+
+def test_ndjson_line_is_one_write(monkeypatch):
+    """Two threads can print events at once: a line must not mix with another (#109)."""
+    import io
+
+    class Recorder(io.StringIO):
+        def __init__(self):
+            super().__init__()
+            self.writes: list[str] = []
+
+        def write(self, text):
+            self.writes.append(text)
+            return super().write(text)
+
+    out = Recorder()
+    monkeypatch.setattr(cli.sys, "stdout", out)
+    cli._emit({"event": "warning", "text": "x" * 20000})
+    assert len(out.writes) == 1 and out.writes[0].endswith("\n")
+
+
+def test_long_lines_stay_whole_without_a_terminal(tmp_path: Path, make_jar, monkeypatch):
+    """A log file must keep a long path on one line (#109)."""
+    long_rel = "deep/" * 60 + "a.jar"
+
+    def fake_run(settings, **kw):
+        kw["on_done"](ArtifactReport(rel=long_rel, kind="archive", outcome="failed", failure="boom"))
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    result = CliRunner(env={"COLUMNS": "80"}).invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0, result.output
+    assert f"{long_rel} (boom)" in result.stdout
+
+
 def test_heartbeat_thread_gated_by_quiet_and_format(tmp_path: Path, make_jar, monkeypatch):
     make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
     monkeypatch.setattr(cli, "_HEARTBEAT_INTERVAL", 0.02)

@@ -13,6 +13,7 @@ from decaf.report_view import (
     _status_line,
     failure_bucket,
     load_report,
+    marks,
     render_artifact,
     render_ending,
     render_network_fallbacks,
@@ -48,6 +49,47 @@ def report(**over) -> RunReport:
 
 def _console() -> Console:
     return Console(file=io.StringIO(), width=200)
+
+
+def _plain_console() -> Console:
+    return Console(file=io.StringIO(), width=200, emoji=False, color_system=None)
+
+
+def test_names_with_control_characters_print_as_text():
+    """An archive name can hold terminal control codes: ESC, C1 CSI, BEL (#109)."""
+    r = ArtifactReport(rel="a\x1b]0;x\x07\x9b2Jb.jar", kind="archive", outcome="failed",
+                       failure="boom\x1b[2J")
+    c = _plain_console()
+    c.print(_status_line(r))
+    out = c.file.getvalue()
+    assert not any(ch in out for ch in "\x1b\x07\x9b")
+    assert "a\\x1b]0;x\\x07\\x9b2Jb.jar (boom\\x1b[2J)" in out
+
+
+def test_render_network_fallbacks_escapes_names():
+    r = ArtifactReport(rel="x[/b].jar", kind="archive", outcome="ok", method="cfr", sources_miss="network: t")
+    c = _plain_console()
+    render_network_fallbacks(c, report(artifacts=[r], totals=compute_totals([r])))
+    assert c.file.getvalue() == "x[/b].jar: network: t\n"
+
+
+def test_marks_fall_back_to_ascii():
+    assert marks(Console(file=io.StringIO(), emoji=False)) == ("✓", "✗")
+
+    class Cp1252(io.StringIO):
+        encoding = "cp1252"
+
+    ascii_marks = marks(Console(file=Cp1252(), emoji=False))
+    assert ascii_marks == ("+", "x")
+    failed = ArtifactReport(rel="a.jar", kind="archive", outcome="failed", failure="boom")
+    assert _status_line(failed, ascii_marks) == "[red]x[/] a.jar (boom)"
+
+
+def test_load_report_rejects_text_that_is_no_report(tmp_path: Path):
+    for name, data in (("list.json", b"[]"), ("latin1.json", b'{"status": "\xff"}')):
+        (tmp_path / name).write_bytes(data)
+        with pytest.raises(ReportError):
+            load_report(tmp_path / name)
 
 
 def test_verdict_tiers():
