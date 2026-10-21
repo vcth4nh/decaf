@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -1374,19 +1375,27 @@ def _class_header(major: int) -> bytes:
 
 def test_class_versions_reads_top_level_majors(make_jar, tmp_path: Path):
     from decaf.pipeline import _class_versions
+    from test_check import _class_with
 
-    jar = make_jar("v.jar", {
+    entries = {
         "WEB-INF/classes/com/a/A.class": _class_header(69),
         "WEB-INF/classes/com/a/A$1.class": _class_header(70),
         "com/b/B.class": _class_header(52),
         "META-INF/versions/9/com/b/B.class": _class_header(53),
         "com/c/$Top.class": _class_header(61),  # a top-level class (#106)
         "com/c/$Top$In.class": _class_header(62),
+        "com/k/K.class": _class_with("com/k/K", utf8=("Lkotlin/Metadata;",)),  # #108
         "x.txt": b"no",
-    })
-    assert _class_versions(jar) == {
-        "com/a/A": 69, "com/b/B": 52, "META-INF/versions/9/com/b/B": 53, "com/c/$Top": 61,
     }
+    folder = tmp_path / "classes"
+    for rel, data in entries.items():
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_bytes(data)
+    expected = ({
+        "com/a/A": 69, "com/b/B": 52, "META-INF/versions/9/com/b/B": 53, "com/c/$Top": 61, "com/k/K": 52,
+    }, {"com/k/K"})
+    assert _class_versions(make_jar("v.jar", entries)) == expected
+    assert _class_versions(folder) == expected
 
 
 def test_family_classpath_war_and_nested_jar(make_jar, tmp_path: Path):
@@ -1475,6 +1484,28 @@ def test_check_jobs_carry_the_release_of_their_classes(make_jar, tmp_path: Path)
     ]
 
 
+def test_check_jobs_name_the_files_of_kotlin_groovy_and_scala_classes(make_jar, tmp_path: Path):
+    """#108: the marker is in the class file of the top-level class."""
+    from decaf.pipeline import _check_trees, _Held
+    from test_check import _class_with
+
+    jar = make_jar("app.jar", {
+        "p/K.class": _class_with("p/K", utf8=("Lkotlin/Metadata;",)),
+        "p/G.class": _class_with("p/G", interfaces=("groovy/lang/GroovyObject",)),
+        "p/G$_run_closure1.class": _class_with("p/G$_run_closure1"),
+        "p/J.class": _class_with("p/J", utf8=("groovy/lang/GroovyObject",)),
+    })
+    tree = tmp_path / "out-tree"
+    (tree / "p").mkdir(parents=True)
+    for name in ("K", "G", "G$_run_closure1", "J"):
+        (tree / f"p/{name}.java").write_text("package p; class X {}")
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
+    _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None)
+    (job,) = calls[0]
+    assert sorted(f.name for f in job.non_java) == ["G$_run_closure1.java", "G.java", "K.java"]
+
+
 def test_twice_finds_two_versions_of_one_library(make_jar, tmp_path: Path):
     """#108: a member that one version of a class lacks is no engine error."""
     from decaf.pipeline import _twice
@@ -1497,7 +1528,11 @@ def test_family_classpath_single_file_input_has_no_input_group(make_jar, tmp_pat
 
 
 def marker_checker(calls=None):
-    """Fake check: FLAG = flagged (name), NOTE = noted (type), ENV = unchecked, else clean."""
+    """Fake check: FLAG = flagged (name), NOTE = noted (type), ENV = unchecked, else clean.
+
+    SNEAKY:name@line = flagged (flow) with the first error "line: unreported exception name; ...",
+    an error that bytecode can cause legally (line 1 when not given) (#108).
+    """
 
     def _check(jobs, *, timeout, cpu_budget):
         if calls is not None:
@@ -1507,7 +1542,14 @@ def marker_checker(calls=None):
             results = []
             for f in job.files:
                 text = Path(f).read_text()
-                if "FLAG" in text:
+                sneaky = re.search(r"SNEAKY:(\w+)(?:@(\d+))?", text)
+                if sneaky:
+                    first = (f"{sneaky.group(2) or 1}: unreported exception {sneaky.group(1)};"
+                             " must be caught or declared to be thrown")
+                    results.append(check.FileResult(
+                        "flagged", kinds=("flow",), errors=1, first=first, messages=(first,), bytecode_only=True,
+                    ))
+                elif "FLAG" in text:
                     results.append(check.FileResult(
                         "flagged", kinds=("name",), errors=1, first="1: cannot find symbol: variable xx",
                         messages=("1: cannot find symbol: variable xx",),
@@ -1551,6 +1593,7 @@ def test_flagged_file_replaced_by_clean_retry(make_jar, tmp_path: Path):
 
 
 def test_all_engines_flagged_keeps_first_file_and_is_partial(make_jar, tmp_path: Path):
+    """The same engine error from all engines: each engine gets its try (#108)."""
     jar = make_jar("app.jar", {"com/x/A.class": b"a"})
     runner = writing_runner({name: {"com/x/A.java": f"class A {{}} // FLAG {name}"} for name in ENGINES})
     ctx = make_ctx(tmp_path, runner, checker=marker_checker())
@@ -1564,6 +1607,50 @@ def test_all_engines_flagged_keeps_first_file_and_is_partial(make_jar, tmp_path:
     assert "FLAG vineflower" in (tmp_path / "out/src/com/x/A.java").read_text()
     assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
     assert report.check["flagged"] == 1
+
+
+def test_retries_of_a_class_stop_when_the_next_engine_gives_the_same_first_error(make_jar, tmp_path: Path):
+    """#108: bytecode can throw an undeclared checked exception, for example after Lombok's @SneakyThrows.
+
+    The same such error from two engines in a row is in the bytecode, and the next engines
+    give it too. The line of the error can differ between engines; only its message counts.
+    """
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    runner = writing_runner({
+        name: {"com/x/A.java": f"// SNEAKY:IOException@{i + 3} {name}"} for i, name in enumerate(ENGINES)
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [(a.engine, a.flagged) for a in report.attempts] == [("vineflower", 1), ("cfr", 1)]
+    assert (tmp_path / "out/src/com/x/A.java").read_text() == "// SNEAKY:IOException@3 vineflower"
+    assert report.partial and [(f["engine"], f["first"]) for f in report.flagged] == [
+        ("vineflower", "3: unreported exception IOException; must be caught or declared to be thrown"),
+    ]
+
+
+def test_retries_stop_at_the_same_first_error_as_the_engine_before(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a"})
+    files = {"vineflower": "SNEAKY:A", "cfr": "FLAG", "fernflower": "SNEAKY:A", "procyon": "SNEAKY:A", "jd": "x"}
+    runner = writing_runner({name: {"com/x/A.java": f"// {text}"} for name, text in files.items()})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon"]
+    assert report.flagged[0]["first"].startswith("1: unreported exception A;")
+
+
+def test_retries_stop_only_for_the_class_with_the_same_first_error(make_jar, tmp_path: Path):
+    jar = make_jar("app.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"})
+    runner = writing_runner({
+        name: {"com/x/A.java": "// SNEAKY:A", "com/x/B.java": f"// SNEAKY:{name}"} for name in ENGINES
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
+    sent = [sorted(p.name for p in target.rglob("*.class")) for _, target in runner.calls[1:]]
+    assert sent == [["A.class", "B.class"], ["B.class"], ["B.class"], ["B.class"]]
+    assert [(f["path"], f["engine"]) for f in report.flagged] == [
+        ("com/x/A.java", "vineflower"), ("com/x/B.java", "vineflower"),
+    ]
 
 
 def test_unchecked_retry_file_does_not_replace_held_file(make_jar, tmp_path: Path):

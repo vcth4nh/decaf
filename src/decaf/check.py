@@ -59,6 +59,7 @@ _TYPE_CODES = frozenset({
     "compiler.err.incomparable.types",
 })
 _TYPE_PREFIXES = ("compiler.err.operator.cant.be.applied",)
+_UNREPORTED = "compiler.err.unreported.exception."
 _SYMBOL = re.compile(r"symbol:\s+(\w+)\s+(\S+)")
 _LOCATION = re.compile(
     r"location:\s+(?:(?:class|interface|enum|record)\s+([\w.$]+)"
@@ -116,6 +117,7 @@ class Job:
     files: tuple[Path, ...]
     release: int | None = None  # a file with errors gets a second try with javac --release <release> (#108)
     twice: Callable[[str], bool] | None = field(default=None, compare=False)  # see Scope
+    non_java: frozenset[Path] = frozenset()  # the files of Kotlin, Groovy, and Scala classes (#108)
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,7 @@ class FileResult:
     first: str | None = None  # "<line>: <message>" of the first error that decided the status
     needs_java: int | None = None  # newer class version: the Java version it needs
     messages: tuple[str, ...] = ()  # "<line>: <message>" of each error in line order, at most MESSAGES_PER_FILE
+    bytecode_only: bool = False  # flagged: bytecode can cause the first error legally, so other engines give it too (#108)
 
     @property
     def passes(self) -> bool:
@@ -199,6 +202,11 @@ def _is_env(code: str, message: str, scope: Scope, inherits_absent: bool = False
     return (kind in _TYPE_SYMBOLS or kind == "variable") and (name in scope.imports or scope.on_demand)
 
 
+def _bytecode_only(code: str, message: str) -> bool:
+    """An error that bytecode can cause legally: an undeclared checked exception, or a return-type overload."""
+    return code.startswith(_UNREPORTED) or (code == "compiler.err.already.defined" and message.startswith("method "))
+
+
 def _kind(phase: str, code: str) -> str:
     if phase == "P":
         return "parse"
@@ -223,11 +231,14 @@ def _line(error: tuple[str, str, int, str]) -> str:
     return f"{error[2]}: {_short(error[3])}"
 
 
-def classify(raw: _Raw | None, timed_out: bool, crash: str | None = None, scope: Scope = Scope()) -> FileResult:
+def classify(
+    raw: _Raw | None, timed_out: bool, crash: str | None = None, scope: Scope = Scope(), non_java: bool = False
+) -> FileResult:
     """Status of one file from its result lines (spec section 3).
 
     crash: the cause when the checker JVM stopped without a line for the file, e.g. its stderr (#108).
     scope: what can supply an absent name; a parse error never depends on the classpath (#108).
+    non_java: the class is Kotlin, Groovy, or Scala bytecode, so its bytecode-only errors are noted (#108).
     """
     if raw is not None and raw.crash is not None:
         return unchecked("javac crash", first=_short(raw.crash))
@@ -244,7 +255,8 @@ def classify(raw: _Raw | None, timed_out: bool, crash: str | None = None, scope:
     env = [] if any(e[0] == "P" for e in errors) else [
         e for e in errors if _is_env(e[1], e[3], scope, inherits_absent)
     ]
-    retry = [e for e in errors if e not in env and _kind(e[0], e[1]) in RETRY_KINDS]
+    retry = [e for e in errors if e not in env and _kind(e[0], e[1]) in RETRY_KINDS
+             and not (non_java and _bytecode_only(e[1], e[3]))]
     # An unqualified name that no import and no absent supertype can supply is an engine error,
     # also next to absent classes (#108). A flow error or a member of another class is not: an
     # absent catch type can cause the one, and an absent superclass of that class the other.
@@ -255,7 +267,8 @@ def classify(raw: _Raw | None, timed_out: bool, crash: str | None = None, scope:
     kinds = tuple(sorted({_kind(phase, code) for phase, code, _, _ in errors}))
     messages = tuple(_line(e) for e in errors[:MESSAGES_PER_FILE])
     if retry:
-        return FileResult("flagged", kinds=kinds, errors=len(errors), first=_line(retry[0]), messages=messages)
+        return FileResult("flagged", kinds=kinds, errors=len(errors), first=_line(retry[0]), messages=messages,
+                          bytecode_only=_bytecode_only(retry[0][1], retry[0][3]))
     return FileResult("noted", kinds=kinds, errors=len(errors), first=messages[0], messages=messages)
 
 
@@ -306,8 +319,8 @@ def class_major(header: bytes) -> int | None:
 _CP_SIZES = {3: 4, 4: 4, 5: 8, 6: 8, 7: 2, 8: 2, 9: 4, 10: 4, 11: 4, 12: 4, 15: 3, 16: 2, 17: 4, 18: 4, 19: 2, 20: 2}
 
 
-def class_name(data: bytes) -> str | None:
-    """The internal name of a class file (this_class, e.g. p/A), or None (#108)."""
+def _pool(data: bytes) -> tuple[dict[int, bytes], dict[int, int], int] | None:
+    """The Utf8 values and the Class name indexes of a class file's constant pool, and the offset after it."""
     if data[:4] != b"\xca\xfe\xba\xbe" or len(data) < 10:
         return None
     count, pos, i = int.from_bytes(data[8:10], "big"), 10, 1
@@ -328,10 +341,50 @@ def class_name(data: bytes) -> str | None:
             else:
                 return None
             i += 1
-        name = utf8.get(classes.get(int.from_bytes(data[pos + 2:pos + 4], "big"), -1))
     except IndexError:
         return None
+    return utf8, classes, pos
+
+
+def _class_at(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, offset: int) -> bytes | None:
+    """The name of the Class entry whose index is at an offset of the class file."""
+    utf8, classes, _ = pool
+    return utf8.get(classes.get(int.from_bytes(data[offset:offset + 2], "big"), -1))
+
+
+def class_name(data: bytes) -> str | None:
+    """The internal name of a class file (this_class, e.g. p/A), or None (#108)."""
+    pool = _pool(data)
+    name = _class_at(pool, data, pool[2] + 2) if pool is not None else None
     return name.decode("utf-8", "replace") if name else None
+
+
+def _utf8(text: bytes) -> bytes:
+    """The bytes of a Utf8 entry of a constant pool, to find the entry in a class file."""
+    return b"\x01" + len(text).to_bytes(2, "big") + text
+
+
+# Kotlin or Scala puts one of these annotations on each class.
+_ANNOTATIONS = tuple(_utf8(d) for d in (
+    b"Lkotlin/Metadata;", b"Lscala/reflect/ScalaSignature;", b"Lscala/reflect/ScalaLongSignature;",
+))
+_GROOVY = b"groovy/lang/GroovyObject"  # Groovy makes each class implement this interface
+
+
+def non_java(data: bytes) -> bool:
+    """Is a class file from Kotlin, Groovy, or Scala (#108)?
+
+    Their bytecode can throw undeclared checked exceptions and can have two methods that
+    differ only in the return type. A Java class that only uses these types is no match.
+    """
+    if any(a in data for a in _ANNOTATIONS):
+        return True
+    pool = _pool(data) if _utf8(_GROOVY) in data else None
+    if pool is None:
+        return False
+    start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
+    count = int.from_bytes(data[start - 2:start], "big")
+    return any(_class_at(pool, data, start + 2 * k) == _GROOVY for k in range(count))
 
 
 SOURCE = Path(__file__).with_name("checker") / "Checker.java"
@@ -447,7 +500,7 @@ def run_check(
 
 
 def _classify_file(raw: _Raw | None, timed_out: bool, crash: str, path: Path, job: Job) -> FileResult:
-    """classify(), with the Scope of the file when one of its errors is an absent name."""
+    """classify(), with the Scope of the file when one of its errors is an absent name, and its language."""
     scope = Scope()
     if raw is not None and any(code.startswith(_RESOLVE) for _, code, _, _ in raw.errors):
         try:
@@ -455,4 +508,4 @@ def _classify_file(raw: _Raw | None, timed_out: bool, crash: str, path: Path, jo
         except OSError:
             text = ""
         scope = scope_of(text, path.stem, job.twice)
-    return classify(raw, timed_out, crash, scope)
+    return classify(raw, timed_out, crash, scope, path in job.non_java)

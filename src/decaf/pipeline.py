@@ -481,13 +481,18 @@ def _copied_keys(source: Path) -> set[str]:
     return {key for key, found in places.items() if len(found) > 1}
 
 
-def _class_versions(source: Path) -> dict[str, int]:
-    """Lowest class-file major version of each top-level class file, by _held_key (#99)."""
+def _class_versions(source: Path) -> tuple[dict[str, int], set[str]]:
+    """Lowest class-file major version of each top-level class file, by _held_key (#99),
+    and the keys of the classes from Kotlin, Groovy, or Scala (#108)."""
     out: dict[str, int] = {}
+    non_java: set[str] = set()
 
-    def keep(key: str, major: int | None) -> None:
+    def keep(key: str, data: bytes) -> None:
+        major = check.class_major(data[:8])
         if major is not None:
             out[key] = min(out.get(key, major), major)
+        if check.non_java(data):
+            non_java.add(key)
 
     if source.is_dir():
         paths = {p.relative_to(source).as_posix(): p for p in source.rglob("*.class")}
@@ -495,8 +500,8 @@ def _class_versions(source: Path) -> dict[str, int]:
         for name, p in paths.items():
             if outer_stem(_held_key(name), keys) is None:
                 with open(p, "rb") as f:
-                    keep(_held_key(name), check.class_major(f.read(8)))
-        return out
+                    keep(_held_key(name), f.read())
+        return out, non_java
     try:
         with zipfile.ZipFile(source) as zf:
             names = [n for n in zf.namelist() if n.endswith(".class")]
@@ -506,12 +511,12 @@ def _class_versions(source: Path) -> dict[str, int]:
                     continue
                 try:
                     with zf.open(name) as f:
-                        keep(_held_key(name), check.class_major(f.read(8)))
+                        keep(_held_key(name), f.read())
                 except ZIP_ERRORS:
                     continue  # a damaged entry: only its file gets no version gate (#109)
     except ZIP_ERRORS:
         pass
-    return out
+    return out, non_java
 
 
 def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
@@ -599,13 +604,19 @@ class _Held:
     files: dict[str, _HeldFile] = field(default_factory=dict)  # key -> held file
     written: set[str] = field(default_factory=set)  # keys of the files that went to the writer
     checks: dict[str, _HeldFile] = field(default_factory=dict)  # key -> the written file and its check result
+    firsts: dict[str, str] = field(default_factory=dict)  # key -> the first error of its newest flagged file
+    settled: set[str] = field(default_factory=set)  # keys that get no more retries (#108)
     versions: dict[str, int] | None = None  # key -> class major version, read once
+    non_java: set[str] = field(default_factory=set)  # keys of the Kotlin, Groovy, and Scala classes, read with versions
     copies: set[str] | None = None  # the _copied_keys of the source, read once
     roots: list[Path] | None = None  # the _tree_roots of a class folder, read once
 
-    def stems(self) -> set[str]:
-        """The class stems of the held files: a copy's key loses its container root (#107)."""
-        return {_strip_container(k) for k in self.files}
+    def stems(self, settled: bool = True) -> set[str]:
+        """The class stems of the held files: a copy's key loses its container root (#107).
+
+        settled=False leaves out the files that get no more retries (#108).
+        """
+        return {_strip_container(k) for k in self.files if settled or k not in self.settled}
 
 
 def _check_trees(
@@ -623,11 +634,12 @@ def _check_trees(
     jobs: list[check.Job] = []
     for tree, artifact, source, held in items:
         if held.versions is None:
-            held.versions = _class_versions(source)
+            held.versions, held.non_java = _class_versions(source)
         if held.roots is None and source.is_dir():
             held.roots = _tree_roots(source)
         by_path: dict[str, check.FileResult] = {}
         by_release: dict[int | None, list[str]] = {}
+        non_java: set[str] = set()
         for p in sorted(tree.rglob("*")):
             suffix = p.suffix.lower()
             if not p.is_file() or suffix not in SOURCE_SUFFIXES or p.name.lower() in _METADATA_SOURCES:
@@ -637,7 +649,8 @@ def _check_trees(
                 by_path[rel] = check.unchecked("kotlin")
                 continue
             key = _held_key(rel)
-            major = held.versions.get(outer_stem(key, held.versions) or key)
+            top = outer_stem(key, held.versions) or key
+            major = held.versions.get(top)
             if limit is not None and major is not None and major > limit:
                 by_path[rel] = check.unchecked(
                     "newer class version", needs_java=major - check.CLASS_VERSION_OFFSET
@@ -647,13 +660,18 @@ def _check_trees(
             # old code may use removed APIs or names that newer Java restricts (#108).
             release = None if major is None else max(8, major - check.CLASS_VERSION_OFFSET)
             by_release.setdefault(release, []).append(rel)
+            if top in held.non_java:
+                non_java.add(rel)
         results.append(by_path)
         classpath = _family_classpath(artifact, source, ctx, held.roots)
         own = [e for e in classpath if _own_entry(e, artifact, source, held, ctx)]
         twice = _twice(own, [e for e in classpath if e not in own], ctx)
         for release, paths in by_release.items():
             sent.append((by_path, paths))
-            jobs.append(check.Job(str(len(jobs)), tuple(classpath), tuple(tree / r for r in paths), release, twice))
+            jobs.append(check.Job(
+                str(len(jobs)), tuple(classpath), tuple(tree / r for r in paths), release, twice,
+                frozenset(tree / r for r in paths if r in non_java),
+            ))
     if jobs:
         answers = ctx.checker(
             jobs, timeout=ctx.settings.timeout, cpu_budget=ctx.cpu_budget,
@@ -724,6 +742,8 @@ def _apply_hold(
     stub (flagged only) also needs a retry file that passes the check, and after Ctrl-C no
     retry file replaces a held file. The files of one output never replace or delete each
     other, and a retry of a held class drops its copy of a variant that the writer already has.
+    A held file gets no more retries when the next engine's file has the same first error, and
+    bytecode can cause this error legally (#108).
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
@@ -754,6 +774,11 @@ def _apply_hold(
                 if result is not None:
                     held.checks[key] = _HeldFile(engine, rel, None, result)
             else:
+                if is_flagged:  # two engines in a row with the same error that bytecode can cause legally (#108)
+                    first = _first_error(result)
+                    if result.bytecode_only and held.firsts.get(key) == first:
+                        held.settled.add(key)
+                    held.firsts[key] = first
                 p.unlink()  # the earlier engine's held file stays
         elif key in held.written and normalize_java_rel(rel).rsplit(".", 1)[0] in retried:
             p.unlink()  # another variant of a held class: the writer has it already
@@ -765,11 +790,18 @@ def _apply_hold(
             os.replace(p, target)
             held.files[key] = _HeldFile(engine, rel, stub, result)
             held_now.add(key)
+            if is_flagged:
+                held.firsts[key] = _first_error(result)
         else:
             held.written.add(key)
             if result is not None:
                 held.checks[key] = _HeldFile(engine, rel, None, result)
     return flagged
+
+
+def _first_error(result: check.FileResult) -> str:
+    """The first error of a flagged file without its line, which differs between engines (#108)."""
+    return (result.first or "").partition(": ")[2]
 
 
 def _hold_output(
@@ -903,7 +935,7 @@ def _retry_missing_classes(
         for name in chain:
             if engines.PROCESSES.closed:
                 break
-            retry = missing | (held.stems() & expected)  # a versioned key is no expected stem (#96)
+            retry = missing | (held.stems(settled=False) & expected)  # a versioned key is no expected stem (#96)
             if not retry:
                 break
             retry_tree = _extract_failed_classes(source, retry, ctx)

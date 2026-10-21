@@ -165,3 +165,29 @@ def test_absent_supertype_is_no_flag(checker, tmp_path: Path):
     r = check.run_check([check.Job("0", (), (f,))], timeout=120, cpu_budget=1, java=java, install=install,
                         tmp_root=tmp_path)[0][0]
     assert r.reason == "absent classes"
+
+
+def test_bytecode_only_errors_of_a_non_java_class_are_noted(checker, tmp_path: Path):
+    """#108: javac's codes and texts for an undeclared checked exception and a return-type overload."""
+    java, _, install = checker
+    text = "class {} {{\n  void f() {{ throw new java.io.IOException(); }}\n  int g() {{ return 1; }}\n  long g() {{ return 2; }}\n}}\n"
+    groovy, plain = tmp_path / "G.java", tmp_path / "J.java"
+    groovy.write_text(text.format("G"))
+    plain.write_text(text.format("J"))
+    out = check.run_check([check.Job("0", (), (groovy, plain), non_java=frozenset({groovy}))], timeout=120,
+                          cpu_budget=1, java=java, install=install, tmp_root=tmp_path)[0]
+    assert (out[0].status, out[0].kinds, out[0].errors) == ("noted", ("flow", "name"), 2)
+    assert (out[1].status, out[1].kinds, out[1].errors) == ("flagged", ("flow", "name"), 2)
+
+
+def test_non_java_reads_class_files_of_javac(checker, tmp_path: Path):
+    """#108: the markers in real class files, with stand-ins for the Kotlin and Groovy types."""
+    _, javac, _ = checker
+    out = _compile(javac, tmp_path / "classes", {
+        "kotlin/Metadata.java": "package kotlin; public @interface Metadata {}",
+        "groovy/lang/GroovyObject.java": "package groovy.lang; public interface GroovyObject {}",
+        "p/K.java": "package p; @kotlin.Metadata class K {}",
+        "p/G.java": "package p; class G implements Runnable, groovy.lang.GroovyObject { public void run() {} }",
+        "p/J.java": "package p; class J { groovy.lang.GroovyObject g; kotlin.Metadata m() { return null; } }",
+    })
+    assert {n: check.non_java((out / f"p/{n}.class").read_bytes()) for n in "KGJ"} == {"K": True, "G": True, "J": False}
