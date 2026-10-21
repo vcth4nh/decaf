@@ -2635,6 +2635,31 @@ def _flag_then_clean_engine(spec, jar_path, target, dest, timeout, java="java", 
     return EngineResult(spec.name, 0, False, 1, "")
 
 
+@pytest.mark.parametrize("check_on", [False, True])
+def test_the_package_roots_of_a_class_folder_are_read_once_and_only_for_the_check(fake_env, tmp_path: Path,
+                                                                                  monkeypatch, check_on):
+    """Review C10: decaf read each class file of a class folder for its package roots, also with --no-check,
+    and again in the check of the copy."""
+    import decaf.pipeline as pipeline
+    from test_check import _class_file
+
+    input_dir = tmp_path / "in"
+    (input_dir / "build/p").mkdir(parents=True)
+    (input_dir / "build/p/A.class").write_bytes(_class_file("p/A"))
+    calls: list = []
+    checks: list = []
+    real = pipeline._tree_roots
+    monkeypatch.setattr(pipeline, "_tree_roots", lambda source: calls.append(source) or real(source))
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, check=check_on),
+                 runner=perfect_engine, checker=_marker_checker(checks))
+    assert report.totals["ok"] == 1
+    assert len(calls) == check_on
+    if check_on:
+        (job,) = checks[0]
+        assert job.classpath[0].name == "build" and job.classpath[0] != input_dir / "build"  # the root of the copy
+        assert input_dir / "build" in job.classpath  # the input group: the package root of the folder
+
+
 def test_run_injected_checker_reports_check_and_settings(fake_env, make_jar, tmp_path: Path):
     input_dir = tmp_path / "in"
     make_jar("app.jar", {"com/x/A.class": b"a"}, base=input_dir)

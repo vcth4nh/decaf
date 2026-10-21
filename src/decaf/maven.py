@@ -87,6 +87,16 @@ def _parse_pom_properties(text: str) -> Gav | None:
     return Gav(*coords) if _coordinates_ok(*coords) else None
 
 
+_TEXT_ENTRY_MAX = 1 << 20  # bytes: decaf reads no larger pom.properties or manifest of an input
+
+
+def _read_text(zf: zipfile.ZipFile, name: str) -> str | None:
+    """A text entry of an archive, or None when it is larger than _TEXT_ENTRY_MAX."""
+    with zf.open(name) as f:
+        data = f.read(_TEXT_ENTRY_MAX + 1)
+    return data.decode(errors="replace") if len(data) <= _TEXT_ENTRY_MAX else None
+
+
 def gav_from_pom_properties(jar_path: Path) -> Gav | None:
     gavs: list[Gav] = []
     try:
@@ -94,10 +104,10 @@ def gav_from_pom_properties(jar_path: Path) -> Gav | None:
             for name in zf.namelist():
                 if name.startswith("META-INF/maven/") and name.endswith("/pom.properties"):
                     try:
-                        text = zf.read(name).decode(errors="replace")
+                        text = _read_text(zf, name)
                     except ZIP_ERRORS:
                         continue  # a damaged entry is no pom.properties (#111)
-                    gav = _parse_pom_properties(text)
+                    gav = _parse_pom_properties(text) if text is not None else None
                     if gav:
                         gavs.append(gav)
     except ZIP_ERRORS:
@@ -125,8 +135,10 @@ def _coords_from_filename(stem: str) -> tuple[str, str] | None:
 def _parse_manifest(jar_path: Path) -> dict[str, str]:
     try:
         with zipfile.ZipFile(jar_path) as zf:
-            text = zf.read("META-INF/MANIFEST.MF").decode(errors="replace")
+            text = _read_text(zf, "META-INF/MANIFEST.MF")
     except (KeyError, *ZIP_ERRORS):
+        return {}
+    if text is None:
         return {}
     attrs: dict[str, str] = {}
     key = None

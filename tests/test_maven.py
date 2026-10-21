@@ -1792,3 +1792,15 @@ def test_resolve_sources_forwards_on_state(make_jar, tmp_path: Path):
         )
     assert res.sources_jar is not None
     assert states == ["downloading"]
+
+
+def test_pom_properties_and_manifest_above_the_size_limit_are_not_read(make_jar, monkeypatch):
+    """Review C5: decaf reads no larger text entry of an input into its memory."""
+    pom, manifest = "groupId=com.example\nartifactId=lib\nversion=1.2\n", "Implementation-Version: 1.2\n"
+    jar = make_jar("lib-1.2.jar", {  # the first bytes of each entry are valid
+        "META-INF/maven/com.example/lib/pom.properties": pom + "#" * 100,
+        "META-INF/MANIFEST.MF": manifest + "X-Pad: " + "x" * 100 + "\n",
+    })
+    assert maven.gav_from_pom_properties(jar) is not None and maven._parse_manifest(jar)
+    monkeypatch.setattr(maven, "_TEXT_ENTRY_MAX", len(pom) + len(manifest))
+    assert maven.gav_from_pom_properties(jar) is None and maven._parse_manifest(jar) == {}

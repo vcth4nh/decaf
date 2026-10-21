@@ -75,7 +75,7 @@ All notable changes to decaf are documented here.
   made all its files `unchecked: timeout`, also the files with flags. Now
   each result is written when its file is done. A file that the check could
   not finish now shows its cause in `first` (for example the javac
-  exception, or the last line of the checker's stderr), and the ending
+  exception, or the exception that stopped the checker), and the ending
   counts such files. An unreadable jar on the classpath now costs only its
   own classes. A class folder such as `build/classes/java/main` now goes on
   the classpath at its package root, so its classes find each other. The
@@ -93,10 +93,11 @@ All notable changes to decaf are documented here.
   when the class file names it, for example in a split package or in a
   `-tests.jar` without its main jar. A missing member of another class
   counts as absent only when that class has two versions in the classpath. A
-  file with errors gets a second try with javac `--release` from its
-  class-file version (at least 8). Thus old code may use JDK APIs that newer
-  Java removed, such as `javax.xml.bind`, and names that newer Java
-  restricts. Four more javac flow errors of engines now get a retry.
+  file gets a second try with javac `--release` from its class-file version
+  (at least 8) when the JDK version can cause one of its errors. Thus old
+  code may use JDK APIs that newer Java removed, such as `javax.xml.bind`,
+  and names that newer Java restricts, such as `var`. Four more javac flow
+  errors of engines now get a retry.
 - The compile check flagged correct Kotlin, Groovy, and Scala code, and each
   flagged class went through all the engines of the chain (#108). The
   bytecode of these languages can throw undeclared checked exceptions and
@@ -244,6 +245,11 @@ All notable changes to decaf are documented here.
 - A file name in the input folder could act as an engine option, because
   decaf gave the engines relative paths. Now each engine gets absolute
   paths.
+- decaf read some entries of an input archive into its memory with no size
+  limit: the class files that the compile check reads, and the
+  `pom.properties` and the manifest. Thus one small archive could fill the
+  memory. Now decaf reads no class file above 16 MiB and no such text entry
+  above 1 MiB.
 
 ## [1.11.0] - 2026-10-21
 
