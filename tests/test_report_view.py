@@ -92,6 +92,21 @@ def test_load_report_rejects_text_that_is_no_report(tmp_path: Path):
             load_report(tmp_path / name)
 
 
+def test_ending_shows_files_that_the_check_could_not_finish():
+    """#108: a checker crash or timeout must not hide; the first cause shows."""
+    r = ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="vineflower", unchecked=[
+        {"path": "p/A.java", "engine": "vineflower", "reason": "javac crash", "needs_java": None,
+         "first": "java.lang.OutOfMemoryError: Java heap space"},
+        {"path": "p/B.java", "engine": "vineflower", "reason": "timeout", "needs_java": None, "first": None},
+        {"path": "p/C.java", "engine": "vineflower", "reason": "absent classes", "needs_java": None, "first": "x"},
+    ])
+    c = _plain_console()
+    render_ending(c, report(artifacts=[r], totals=compute_totals([r])),
+                  output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert ("compile check: 2 files not checked (1 javac crash, 1 timeout): "
+            "java.lang.OutOfMemoryError: Java heap space") in c.file.getvalue()
+
+
 def test_verdict_tiers():
     # interrupted wins even though this report also has failures
     c1 = _console()

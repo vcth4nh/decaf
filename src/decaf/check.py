@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -144,12 +145,15 @@ def _line(error: tuple[str, str, int, str]) -> str:
     return f"{error[2]}: {_short(error[3])}"
 
 
-def classify(raw: _Raw | None, timed_out: bool) -> FileResult:
-    """Status of one file from its result lines (spec section 3)."""
+def classify(raw: _Raw | None, timed_out: bool, crash: str | None = None) -> FileResult:
+    """Status of one file from its result lines (spec section 3).
+
+    crash: the cause when the checker JVM stopped without a line for the file, e.g. its stderr (#108).
+    """
     if raw is not None and raw.crash is not None:
-        return unchecked("javac crash")
+        return unchecked("javac crash", first=_short(raw.crash))
     if raw is None or not raw.done:
-        return unchecked("timeout" if timed_out else "javac crash")
+        return unchecked("timeout") if timed_out else unchecked("javac crash", first=crash)
     errors = sorted(raw.errors, key=lambda e: (e[2], e[3]))  # (phase, code, line, message) in line order
     old = [e for e in errors if e[0] == "P" and e[1] in _OLD_SOURCE]
     if old:
@@ -209,6 +213,37 @@ def class_major(header: bytes) -> int | None:
     return int.from_bytes(header[6:8], "big")
 
 
+_CP_SIZES = {3: 4, 4: 4, 5: 8, 6: 8, 7: 2, 8: 2, 9: 4, 10: 4, 11: 4, 12: 4, 15: 3, 16: 2, 17: 4, 18: 4, 19: 2, 20: 2}
+
+
+def class_name(data: bytes) -> str | None:
+    """The internal name of a class file (this_class, e.g. p/A), or None (#108)."""
+    if data[:4] != b"\xca\xfe\xba\xbe" or len(data) < 10:
+        return None
+    count, pos, i = int.from_bytes(data[8:10], "big"), 10, 1
+    utf8: dict[int, bytes] = {}
+    classes: dict[int, int] = {}
+    try:
+        while i < count:
+            tag = data[pos]
+            if tag == 1:  # Utf8
+                n = int.from_bytes(data[pos + 1:pos + 3], "big")
+                utf8[i] = data[pos + 3:pos + 3 + n]
+                pos += 3 + n
+            elif tag in _CP_SIZES:
+                if tag == 7:
+                    classes[i] = int.from_bytes(data[pos + 1:pos + 3], "big")
+                pos += 1 + _CP_SIZES[tag]
+                i += tag in (5, 6)  # a Long or a Double takes two slots
+            else:
+                return None
+            i += 1
+        name = utf8.get(classes.get(int.from_bytes(data[pos + 2:pos + 4], "big"), -1))
+    except IndexError:
+        return None
+    return name.decode("utf-8", "replace") if name else None
+
+
 SOURCE = Path(__file__).with_name("checker") / "Checker.java"
 
 
@@ -221,7 +256,7 @@ def find_javac(java: str) -> Path | None:
     try:
         proc = subprocess.run(
             [java, "-XshowSettings:properties", "-version"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, errors="replace", timeout=60,  # a path in another encoding (#108)
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -232,13 +267,16 @@ def find_javac(java: str) -> Path | None:
     return javac if javac.is_file() else None
 
 
+JAR = "checker.jar"  # CDS archives no class from a folder on -cp, so the classes go in a jar (#108)
+
+
 def install(javac: Path, java_major: int, root: Path | None = None) -> Path:
     """Compile Checker.java once for each source hash and Java version; return its directory."""
     try:
         digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()[:12]
         base = root or engines.cache_root() / "checker"
         target = base / f"{digest}-{java_major}"
-        if (target / "Checker.class").is_file():
+        if (target / JAR).is_file():
             return target
         base.mkdir(parents=True, exist_ok=True)
         tmp = Path(tempfile.mkdtemp(prefix=".tmp-", dir=base))
@@ -256,10 +294,13 @@ def install(javac: Path, java_major: int, root: Path | None = None) -> Path:
         shutil.rmtree(tmp, ignore_errors=True)
         raise CheckError(f"checker compile failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
     try:
+        with zipfile.ZipFile(tmp / JAR, "w") as zf:
+            for cls in sorted(tmp.glob("*.class")):
+                zf.write(cls, cls.name)
         os.replace(tmp, target)
     except OSError:  # another run installed it first
         shutil.rmtree(tmp, ignore_errors=True)
-    if not (target / "Checker.class").is_file():
+    if not (target / JAR).is_file():
         raise CheckError(f"checker install incomplete: {target}")
     return target
 
@@ -283,7 +324,7 @@ def build_command(
             "-XX:+AutoCreateSharedArchive",
             f"-XX:SharedArchiveFile={cds_dir / f'checker-{install_dir.name}.jsa'}",
         ]
-    return [*cmd, "-cp", str(install_dir), "Checker", str(jobs_file), str(result_file), str(threads)]
+    return [*cmd, "-cp", str(install_dir / JAR), "Checker", str(jobs_file), str(result_file), str(threads)]
 
 
 def run_check(
@@ -303,10 +344,12 @@ def run_check(
     write_jobs(jobs_file, jobs)
     threads = max(1, cpu_budget or 1)
     cmd = build_command(java, install, jobs_file, result_file, threads=threads, cds_dir=cds_dir, heap_mb=heap_mb)
-    _, timed_out, _, _, _ = engines.run_process(cmd, timeout)
+    returncode, timed_out, tail, _, _ = engines.run_process(cmd, timeout)
     try:
         text = result_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         text = ""
     raw = parse_results(text)
-    return [[classify(raw.get((job.id, i)), timed_out) for i in range(len(job.files))] for job in jobs]
+    lines = [line for line in tail.splitlines() if line.strip()]
+    crash = _short(lines[-1]) if lines else f"checker exit code {returncode}"  # e.g. a JVM out of memory (#108)
+    return [[classify(raw.get((job.id, i)), timed_out, crash) for i in range(len(job.files))] for job in jobs]
