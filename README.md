@@ -75,7 +75,10 @@ decaf ./libs --repo https://nexus.mycorp.com/repository/maven-public
 ```
 
 Exit codes: `0` all artifacts succeeded · `1` some failed (see
-`decaf-out/decaf-report.json`) · `2` usage/environment error.
+`decaf-out/decaf-report.json`) · `2` usage/environment error · `130`
+interrupted by Ctrl-C, SIGTERM, or SIGHUP. An interrupted run still writes
+its report (status `interrupted`), and a run that an error stops writes it
+with the status `aborted`.
 
 `--format json` prints the run report as one JSON document to stdout after
 the run (byte-identical to `decaf-report.json`); `--format ndjson` streams

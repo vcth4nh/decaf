@@ -1,5 +1,6 @@
 import json
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -438,6 +439,39 @@ def test_interrupted_summary_shows_denominator(tmp_path: Path, make_jar, monkeyp
     assert "Interrupted after" in plain
     assert "2/10 artifacts completed" in plain
     assert result.exit_code == 130
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows ends a process at once and has no SIGHUP")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_sigterm_and_sighup_end_the_run_like_ctrl_c(name, tmp_path: Path, make_jar, monkeypatch):
+    """#112: the run writes its report with the status interrupted, and the old handler comes back."""
+    import os
+    import signal
+
+    import decaf.engines as engines
+    from decaf.engines import EngineResult
+
+    sig = getattr(signal, name)
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(engines, "ensure_engine", lambda spec, client, cache_dir=None, on_download=None: Path("/fake.jar"))
+
+    def signalled_engine(spec, jar_path, target, dest, timeout, **kw):
+        os.kill(os.getpid(), sig)
+        deadline = time.monotonic() + 10
+        while not engines.PROCESSES.closed and time.monotonic() < deadline:
+            time.sleep(0.01)  # the JVM runs until decaf kills it
+        return EngineResult(spec.name, -9, False, 0, "")
+
+    monkeypatch.setattr(engines, "run_engine", signalled_engine)
+    make_jar("in/a.jar", {"A.class": b"x"}, base=tmp_path)
+    prior = signal.getsignal(sig)
+    try:
+        result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--no-maven", "--no-check"])
+    finally:
+        engines.PROCESSES.reset()
+    assert result.exit_code == 130, result.output
+    assert json.loads((tmp_path / "out/decaf-report.json").read_text())["status"] == "interrupted"
+    assert signal.getsignal(sig) is prior
 
 
 def test_status_line_partial_glyph():

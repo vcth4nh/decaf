@@ -50,6 +50,7 @@ _BATCH_MAX_JARS = 32
 _BATCH_MAX_CLASSES = 8000  # ceilings picked at the measured plateau (#74)
 
 _PROGRESS_INTERVAL = 1.0  # seconds between batch-dest polls (display only)
+_WAIT_TICK = 0.5  # seconds: on Windows, Ctrl-C ends only a wait with a timeout (#112)
 
 
 def _decompile_weight(artifact: Artifact) -> int:
@@ -844,6 +845,9 @@ def _retry_missing_classes(
                 **({"heap_mb": heap} if heap is not None else {}),
                 **_stream_kw_for(ctx, name, artifact.rel),
             )
+            if engines.PROCESSES.closed:  # Ctrl-C: no file of the killed retry goes out (#112)
+                report.attempts.append(_attempt(name, "class", res, res.java_files, [], heap))
+                break
             found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
             report.attempts.append(_attempt(name, "class", res, res.java_files, found, heap, flagged))
             if res.java_files > 0:
@@ -880,6 +884,9 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
             **({"heap_mb": heap} if heap is not None else {}),
             **_stream_kw_for(ctx, name, artifact.rel),
         )
+        if engines.PROCESSES.closed:  # Ctrl-C: the killed engine can leave a cut-off file (#112)
+            report.attempts.append(_attempt(name, "archive", res, res.java_files, [], heap))
+            break
         found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
         report.attempts.append(_attempt(name, "archive", res, res.java_files, found, heap, flagged))
         if res.java_files > 0:
@@ -893,7 +900,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
 
     if used_index is None:
         report.outcome = "failed"
-        report.failure = "all engines failed"
+        report.failure = "interrupted" if engines.PROCESSES.closed else "all engines failed"
         return
 
     _retry_missing_classes(
@@ -1188,7 +1195,10 @@ def _decompile_batch(
         return [], [(a, t, r) for a, t, r, _, _ in members]
     name = ctx.chain[0]
     heap = ctx.memory_plan.heap_mb(1)  # a batch JVM takes one slot
-    dest = _tmp_dir(ctx)
+    try:
+        dest = _tmp_dir(ctx)
+    except OSError:  # e.g. a full disk: each member gets its own try, and its own failure (#112)
+        return [], [(a, t, r) for a, t, r, _, _ in members]
     owners: dict[str, int] = {}
     for i, (_, _, _, stems, claims) in enumerate(members):
         for s in stems | claims:
@@ -1223,6 +1233,8 @@ def _decompile_batch(
         stop.set()
         if watcher is not None:
             watcher.join()
+    if engines.PROCESSES.closed:  # Ctrl-C: the killed batch can leave cut-off files (#112)
+        return [], [(a, t, r) for a, t, r, _, _ in members]
 
     trees: dict[int, Path] = {}
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
@@ -1425,6 +1437,7 @@ def run(
         resolver = partial(maven.resolve_sources, net=net, verdicts=verdict_cache)
 
     interrupted = False
+    aborted = False  # an error other than Ctrl-C ended the run (#112)
     reports: list[ArtifactReport] = []
     chain: list[str] = []
     javac_path: Path | None = None
@@ -1561,7 +1574,7 @@ def run(
                         if not fetch_futs and not dec_futs:
                             continue  # unreachable in practice: drain above always progresses
                         done, _ = wait(
-                            fetch_futs.keys() | dec_futs.keys(), return_when=FIRST_COMPLETED
+                            fetch_futs.keys() | dec_futs.keys(), timeout=_WAIT_TICK, return_when=FIRST_COMPLETED
                         )
                         for fut in done:
                             if fut in dec_futs:
@@ -1608,19 +1621,23 @@ def run(
                             reports.append(report)
                             if on_done is not None:
                                 on_done(report)
-                except KeyboardInterrupt:
+                except BaseException as exc:  # Ctrl-C, SIGTERM (see cli), or an error such as a broken pipe
                     interrupted = True
+                    aborted = not isinstance(exc, KeyboardInterrupt)
                     net.abort.set()  # wake fetch threads sleeping in retry backoff
                     engines.PROCESSES.kill_all()
                     for fut in [*fetch_futs, *dec_futs]:
                         fut.cancel()
+                    if aborted:
+                        raise  # after the report below
         finally:
             # Write the report even if a second Ctrl-C lands during teardown,
             # so partial results survive.
             reports.sort(key=lambda r: r.rel)
             totals = compute_totals(reports)
             status = (
-                "interrupted" if interrupted
+                "aborted" if aborted
+                else "interrupted" if interrupted
                 else "completed_with_failures" if totals["failed"] else "completed"
             )
             run_report = RunReport(

@@ -38,6 +38,19 @@ def _fast_retries(monkeypatch):
     monkeypatch.setattr(maven, "RETRY_BACKOFF", tuple(0.0 for _ in maven.RETRY_BACKOFF))
 
 
+def test_no_request_after_the_run_aborts(tmp_path: Path):
+    """#112: after Ctrl-C a fetch thread starts no request, so the run does not wait for network timeouts."""
+    net = NetState()
+    net.abort.set()
+    calls: list = []
+    with make_client(lambda r: calls.append(r) or httpx.Response(200)) as c:
+        with pytest.raises(NetworkFailure):
+            maven._get_retry(c, "https://r.test/x", net=net, log=ResolutionLog(), step="candidate probe")
+        with pytest.raises(NetworkFailure):
+            maven._download(c, "https://r.test/x.jar", tmp_path / "x.jar", net, ResolutionLog())
+    assert calls == []
+
+
 def test_redact_url_strips_userinfo():
     assert (
         redact_url("https://deploy:s3cr3t@nexus.example/repository/maven-public")
@@ -1144,14 +1157,14 @@ def test_wait_before_retry_jitters_backoff_and_reports_abort(monkeypatch):
     assert seen[1] == 7.0  # retry-after passes through unjittered
 
 
-def test_get_retry_pre_set_abort_gives_up_after_first_failure():
+def test_get_retry_abort_gives_up_after_first_failure():
     net = NetState()
-    net.abort.set()
     log = ResolutionLog()
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
+        net.abort.set()  # Ctrl-C lands during the first request
         raise httpx.ConnectError("boom")
 
     with make_client(handler) as c:
@@ -1544,12 +1557,12 @@ def test_download_429_exhausts_and_warns(tmp_path: Path):
 def test_download_abort_mid_backoff_gives_up_quietly(tmp_path: Path):
     warnings: list[str] = []
     net = NetState(warn=warnings.append)
-    net.abort.set()  # abort will be seen during the first backoff wait
     log = ResolutionLog()
     calls = {"n": 0}
 
     def handler(request):
         calls["n"] += 1
+        net.abort.set()  # Ctrl-C lands during the first request; the backoff wait sees it
         return httpx.Response(503)
 
     with make_client(handler) as c:
