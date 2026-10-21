@@ -196,7 +196,10 @@ class MergeWriter:
     def add_tree(self, tree: Path, sort_key: str) -> tuple[int, list[dict]]:
         java = 0
         collisions: list[dict] = []
-        for p in sorted(tree.rglob("*")):
+        files = sorted(tree.rglob("*"))
+        # A META-INF/versions twin has the path of its base class here: the base class wins (#107).
+        files.sort(key=lambda p: _strip_container(p.relative_to(tree).as_posix()).startswith("META-INF/versions/"))
+        for p in files:
             if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
                 continue
             java += 1
@@ -741,15 +744,16 @@ def _apply_hold(
     replaces a held file only when it has no stub and is not flagged; a held file without a
     stub (flagged only) also needs a retry file that passes the check, and after Ctrl-C no
     retry file replaces a held file. The files of one output never replace or delete each
-    other, and a retry of a held class drops its copy of a variant that the writer already has.
+    other, and a retry drops its copy of a class that an earlier output wrote, for example an
+    inner class or a variant of a held class (#107).
     A held file gets no more retries when the next engine's file has the same first error, and
     bytecode can cause this error legally (#108).
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
     flagged = 0
-    retried = held.stems()  # held classes; one is retried when it is an expected stem
     held_now: set[str] = set()
+    written_now: set[str] = set()
     for p in sorted(tree.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
             continue
@@ -780,8 +784,8 @@ def _apply_hold(
                         held.settled.add(key)
                     held.firsts[key] = first
                 p.unlink()  # the earlier engine's held file stays
-        elif key in held.written and normalize_java_rel(rel).rsplit(".", 1)[0] in retried:
-            p.unlink()  # another variant of a held class: the writer has it already
+        elif key in held.written and key not in written_now:
+            p.unlink()  # an earlier engine wrote this class, and its file stays (#107)
         elif stub is not None or is_flagged:
             if held.root is None:
                 held.root = _tmp_dir(ctx)
@@ -794,6 +798,7 @@ def _apply_hold(
                 held.firsts[key] = _first_error(result)
         else:
             held.written.add(key)
+            written_now.add(key)
             if result is not None:
                 held.checks[key] = _HeldFile(engine, rel, None, result)
     return flagged
@@ -884,7 +889,12 @@ def _attempt(
 
 
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
-    """Copy the .class files (plus their inner classes) for missing stems into a temp tree."""
+    """Copy the .class files (plus their inner classes) for missing stems into a temp tree.
+
+    Each class goes in once: its base class, or the class of its lowest META-INF/versions folder
+    when it has no base class. With two versions of a class in one tree, an engine can write the
+    body of one version as the other, or only one of them (#107).
+    """
     if source.is_dir():
         names = [p.relative_to(source).as_posix() for p in sorted(source.rglob("*.class"))]
     else:
@@ -892,9 +902,26 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
             names = [n for n in zf.namelist() if n.endswith(".class")]
     stems = {_class_stem(n) for n in names}
 
-    def wanted(entry: str) -> bool:
+    def top(entry: str) -> str:
         stem = _class_stem(entry)
-        return (outer_stem(stem, stems) or stem) in missing
+        return outer_stem(stem, stems) or stem
+
+    def version(entry: str) -> int:
+        """0 for a base class, else the number of its META-INF/versions folder."""
+        rel = _strip_container(entry)
+        if not rel.startswith("META-INF/versions/"):
+            return 0
+        number = rel.split("/", 3)[2]
+        return int(number) if number.isdigit() else -1  # the JVM reads no other folder
+
+    lowest: dict[str, int] = {}
+    for n in names:
+        t, v = top(n), version(n)
+        if t in missing and v >= 0:
+            lowest[t] = min(lowest.get(t, v), v)
+
+    def wanted(entry: str) -> bool:
+        return lowest.get(top(entry)) == version(entry)
 
     out = _tmp_dir(ctx)
     if source.is_dir():

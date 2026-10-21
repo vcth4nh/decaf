@@ -1835,6 +1835,13 @@ def test_same_key_sibling_in_one_output_is_not_deleted(make_jar, tmp_path: Path)
     assert [f["path"] for f in report.flagged] == ["WEB-INF/classes/com/x/A.java"]
 
 
+def test_same_key_files_of_one_output_are_both_written(make_jar, tmp_path: Path):
+    """Only a file of an earlier output makes a file with the same key go (#107)."""
+    files = {"vineflower": {"WEB-INF/classes/com/x/A.java": "class A { /* w */ }", "com/x/A.java": "class A {}"}}
+    report, written = _run_mr(make_jar, tmp_path, files, fallback=False)
+    assert written == {"WEB-INF/classes/com/x/A.java": "class A { /* w */ }", "com/x/A.java": "class A {}"}
+
+
 def test_retry_of_a_held_class_keeps_the_written_variant(make_jar, tmp_path: Path):
     # The retry re-decompiles both variants; the writer keeps its first copy of the clean one.
     report, written = _run_mr(make_jar, tmp_path, {
@@ -1844,6 +1851,51 @@ def test_retry_of_a_held_class_keeps_the_written_variant(make_jar, tmp_path: Pat
     assert written == {_MR9: "class A { /* vf 9 */ }", "com/x/A.java": "class A { /* cfr */ }"}
     assert report.flagged == [] and report.collisions == [] and not report.partial
     assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+
+
+def test_class_retry_sends_no_versioned_class(make_jar, tmp_path: Path):
+    """#107: with a base class and its versioned twin in one retry tree, Vineflower writes no
+    base class, and Fernflower writes the versioned body as the base class."""
+    jar = make_jar("mr.jar", {"com/x/A.class": b"a", "META-INF/versions/9/com/x/A.class": b"a9"})
+    runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}, "cfr": {"com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
+    retry_target = runner.calls[1][1]
+    assert [p.relative_to(retry_target).as_posix() for p in retry_target.rglob("*.class")] == ["com/x/A.class"]
+
+
+def test_class_retry_sends_the_lowest_version_of_a_class_with_no_base(make_jar, tmp_path: Path):
+    """A class can exist only in META-INF/versions folders; Vineflower writes none of them (#107)."""
+    jar = make_jar("mr.jar", {
+        "com/x/A.class": b"a",
+        "META-INF/versions/17/com/x/V.class": b"v17", "META-INF/versions/17/com/x/V$1.class": b"i17",
+        "META-INF/versions/21/com/x/V.class": b"v21", "META-INF/versions/21/com/x/V$1.class": b"i21",
+    })
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}, "cfr": {"com/x/V.java": "class V {}"}})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
+    retry_target = runner.calls[1][1]
+    assert sorted(p.relative_to(retry_target).as_posix() for p in retry_target.rglob("*.class")) == [
+        "META-INF/versions/17/com/x/V$1.class", "META-INF/versions/17/com/x/V.class",
+    ]
+    assert report.missing_classes == 0
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+@pytest.mark.parametrize("retry_copy", ["class A$B { /* cfr */ }", "class A$B { /* cfr */ } // FLAG"])
+def test_class_retry_keeps_the_written_file_of_an_inner_class(make_jar, tmp_path: Path, mirror, retry_copy):
+    """#107: a retry of A extracts A$B again, and its copy of A$B must not replace the written file."""
+    jar = make_jar("app.jar", {"com/x/A.class": b"a", "com/x/A$B.class": b"b"})
+    runner = writing_runner({
+        "vineflower": {"com/x/A.java": "// FLAG", "com/x/A$B.java": "class A$B { /* vf */ }"},
+        "cfr": {"com/x/A.java": "class A { /* cfr */ }", "com/x/A$B.java": retry_copy},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out") if mirror else None)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / ("out/app.jar" if mirror else "out/src")
+    assert (out / "com/x/A$B.java").read_text() == "class A$B { /* vf */ }"
+    assert (out / "com/x/A.java").read_text() == "class A { /* cfr */ }"
+    assert report.flagged == [] and report.collisions == [] and report.java_files == 2
 
 
 def test_flagged_versioned_variant_is_not_retried(make_jar, tmp_path: Path):
