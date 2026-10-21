@@ -638,7 +638,7 @@ def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
         dest = Path(dest)
         (dest / "com/a").mkdir(parents=True, exist_ok=True)
         (dest / "com/a/A.java").write_text("class A {}")
-        (dest / "com/a/A$1.java").write_text("class A$1 {}")  # inner: no owner stem of its own
+        (dest / "com/a/A$1.java").write_text("class A$1 {}")  # inner: a claim of a.jar (#106)
         (dest / "com/zz").mkdir(parents=True, exist_ok=True)
         (dest / "com/zz/Stray.java").write_text("class Stray {}")  # no member owns this
         return EngineResult(spec.name, 0, False, 3, "")
@@ -649,7 +649,7 @@ def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
     assert requeue == [] and done[0].outcome == "ok"
     out = tmp_path / "out" / "src"
     assert (out / "com/a/A.java").is_file()
-    assert (out / "com/a/A$1.java").is_file()      # $-inner mapped via outer stem
+    assert (out / "com/a/A$1.java").is_file()      # the inner class stays with its member
     assert not (out / "com/zz/Stray.java").exists()  # unmatched output dropped
 
 
@@ -692,9 +692,85 @@ def test_stems_and_claims_split_metadata_from_classes(make_jar, tmp_path):
     )
     stems, claims = _stems_and_claims(jar)
     assert stems == {"com/a/A"}
-    # The versioned entry normalizes onto the same root claim.
-    assert claims == {"com/a/package-info", "module-info"}
+    # The versioned entry normalizes onto the same root claim; the inner class is a claim (#106).
+    assert claims == {"com/a/A$1", "com/a/package-info", "module-info"}
     assert expected_class_stems(jar) == stems
+
+
+def test_stems_and_claims_keep_top_level_dollar_classes(make_jar, tmp_path):
+    """#106: a $ in a name does not make an inner class; the outer class file must exist."""
+    from decaf.pipeline import _stems_and_claims
+
+    jar = make_jar("d.jar", {
+        "com/a/A.class": b"x",
+        "com/a/A$1.class": b"i",
+        "com/a/$Util.class": b"u",
+        "com/a/$Util$In.class": b"ui",
+        "com/a/Gone$In.class": b"o",  # an orphan: the jar has no com/a/Gone.class
+    })
+    stems, claims = _stems_and_claims(jar)
+    assert stems == {"com/a/A", "com/a/$Util", "com/a/Gone$In"}  # the engines write a file for each
+    assert claims == {"com/a/A$1", "com/a/$Util$In"}
+
+
+def test_decompile_batch_keeps_dollar_classes_with_their_member(make_jar, tmp_path):
+    """#106: the split gives a $ class to the member that has its class file, and drops none."""
+    from decaf.pipeline import MirrorWriter, _decompile_batch
+
+    def dollar_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        for rel in ("com/a/A.java", "com/a/$Util.java", "q/Foo$Bar.java", "q/Foo.java"):
+            p = Path(dest) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("class X {}")
+        return EngineResult(spec.name, 0, False, 4, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "com/a/$Util.class": b"u", "q/Foo$Bar.class": b"o"})
+    m2 = _member(make_jar, "b.jar", {"q/Foo.class": b"f"})
+    ctx = _batch_ctx(tmp_path, dollar_batch)
+    ctx.writer = MirrorWriter(tmp_path / "out")
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    out = tmp_path / "out"
+    assert (out / "a.jar/com/a/$Util.java").is_file()
+    assert (out / "a.jar/q/Foo$Bar.java").is_file()  # an orphan: not the class of b.jar's q/Foo
+    assert not (out / "b.jar/q/Foo$Bar.java").exists()
+    assert (out / "b.jar/q/Foo.java").is_file()
+    assert [(r.rel, r.classes, r.java_files, r.missing_classes) for r in done] == [
+        ("a.jar", 3, 3, 0), ("b.jar", 1, 1, 0),
+    ]
+
+
+def test_form_batch_defers_dollar_class_overlap(make_jar):
+    """#106: two members with the same $ class would share one file in the batch dest."""
+    from collections import deque
+
+    from decaf.pipeline import _form_batch
+
+    q = deque([
+        _member(make_jar, "a.jar", {"p/$Util.class": b"1"}),
+        _member(make_jar, "b.jar", {"p/$Util.class": b"2"}),
+        _member(make_jar, "c.jar", {"p/A.class": b"3", "p/A$1.class": b"4"}),
+        _member(make_jar, "d.jar", {"p/A$1.class": b"5"}),  # an orphan with the name of c.jar's inner class
+    ])
+    assert [m[0].rel for m in _form_batch(q)] == ["a.jar", "c.jar"]
+    assert [m[0].rel for m in q] == ["b.jar", "d.jar"]
+
+
+def test_class_level_retry_takes_dollar_classes(make_jar, tmp_path: Path):
+    """#106: a missing $ class is a missing class; its retry tree has its inner classes."""
+    jar = make_jar("app.jar", {
+        "com/x/A.class": b"a", "com/x/$Util.class": b"u", "com/x/$Util$In.class": b"i",
+    })
+    runner = writing_runner({
+        "vineflower": {"com/x/A.java": "class A {}"},  # $Util missing
+        "cfr": {"com/x/$Util.java": "class $Util {}"},
+    })
+    ctx = make_ctx(tmp_path, runner)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.classes, report.missing_classes) == (2, 0)
+    assert [(a.engine, a.level) for a in report.attempts] == [("vineflower", "archive"), ("cfr", "class")]
+    assert sorted(p.name for p in runner.calls[1][1].rglob("*.class")) == ["$Util$In.class", "$Util.class"]
+    assert (tmp_path / "out/src/com/x/$Util.java").is_file()
 
 
 def test_decompile_batch_attributes_package_info_to_claiming_member(make_jar, tmp_path):
@@ -1163,9 +1239,13 @@ def test_class_versions_reads_top_level_majors(make_jar, tmp_path: Path):
         "WEB-INF/classes/com/a/A$1.class": _class_header(70),
         "com/b/B.class": _class_header(52),
         "META-INF/versions/9/com/b/B.class": _class_header(53),
+        "com/c/$Top.class": _class_header(61),  # a top-level class (#106)
+        "com/c/$Top$In.class": _class_header(62),
         "x.txt": b"no",
     })
-    assert _class_versions(jar) == {"com/a/A": 69, "com/b/B": 52, "META-INF/versions/9/com/b/B": 53}
+    assert _class_versions(jar) == {
+        "com/a/A": 69, "com/b/B": 52, "META-INF/versions/9/com/b/B": 53, "com/c/$Top": 61,
+    }
 
 
 def test_family_classpath_war_and_nested_jar(make_jar, tmp_path: Path):
