@@ -9,8 +9,8 @@ into a source tree that mirrors your input, or one merged package tree with
 ![decaf demo — sources-first resolution and live decompile progress](docs/demo.gif)
 
 - **Sources first:** artifacts that resolve to a Maven GAV (embedded
-  `pom.properties`, SHA-1 lookup on Maven Central, or coordinates guessed
-  from the filename/manifest and proven against the repo's `.jar.sha1`)
+  `pom.properties` or coordinates guessed from the filename/manifest, each
+  proven against the repo's `.jar.sha1`, or a SHA-1 lookup on Maven Central)
   get their real `-sources.jar` downloaded instead of decompiled. The
   report records how each artifact resolved — or why it didn't. Transient
   network errors are retried with backoff and never mistaken for missing
@@ -219,7 +219,9 @@ repositories = [
 
 `--repo URL` (repeatable) prepends ad-hoc repositories. SHA-1 lookup is
 Central-only; jars built by Maven almost always embed `pom.properties`, which
-works against any repository.
+works against any repository that publishes `.jar.sha1` files. A jar whose
+SHA-1 differs from the published jar (patched, shaded, or re-signed) gets
+no upstream sources: decaf decompiles it.
 
 ## Engines
 

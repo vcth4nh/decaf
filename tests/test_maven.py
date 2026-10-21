@@ -51,6 +51,18 @@ def test_no_request_after_the_run_aborts(tmp_path: Path):
     assert calls == []
 
 
+def _with_sidecar(jar: Path, handler):
+    """A handler that also answers the .jar.sha1 probe of the pom.properties check (#110) for jar."""
+    sha = sha1_of(jar)
+
+    def wrapped(request):
+        if request.url.path.endswith(".jar.sha1"):
+            return httpx.Response(200, text=f"{sha}  {jar.name}\n")
+        return handler(request)
+
+    return wrapped
+
+
 def test_redact_url_strips_userinfo():
     assert (
         redact_url("https://deploy:s3cr3t@nexus.example/repository/maven-public")
@@ -395,12 +407,88 @@ def test_resolve_sources_pom_path_skips_sha1(make_jar, tmp_path: Path):
         assert request.url.host != "search.maven.org", "sha1 lookup must not run"
         return httpx.Response(200, content=sources_payload)
 
-    with make_client(handler) as c:
+    with make_client(_with_sidecar(jar, handler)) as c:
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
     assert str(res.gav) == "com.example:lib:1.2"
     assert res.sources_jar is not None
     assert res.resolved_by == "pom-properties"
     assert res.miss is None
+
+
+def test_pom_properties_needs_a_matching_jar_sha1(make_jar, tmp_path: Path):
+    """#110: a patched or shaded jar can carry the pom.properties of another jar."""
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM, "A.class": b"patched"})
+    paths: list[str] = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith(".jar.sha1"):
+            return httpx.Response(200, text="0" * 40)  # the upstream jar is another jar
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        return httpx.Response(200, content=b"sources")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.sources_jar is None and res.gav is None
+    assert res.miss.startswith("pom.properties com.example:lib:1.2 not verified by .jar.sha1; sha1 not in Central index")
+    assert not [p for p in paths if p.endswith("-sources.jar")]
+
+
+@pytest.mark.parametrize("code, kind", [(400, "HTTP 400"), (407, "HTTP 407")])
+def test_download_status_that_says_nothing_about_the_artifact(code, kind, tmp_path: Path):
+    """#110: only 404 and 410 say that a repository has no such file."""
+    with make_client(lambda r: httpx.Response(code)) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._download(c, "https://r.test/m2/a-1-sources.jar", tmp_path / "a.jar", NetState(), ResolutionLog())
+    assert exc.value.kind == kind
+
+
+def test_download_410_is_a_verified_miss_and_408_is_retried(tmp_path: Path):
+    with make_client(lambda r: httpx.Response(410)) as c:
+        assert maven._download(c, "https://r.test/m2/a.jar", tmp_path / "a.jar", NetState(), ResolutionLog()) is None
+    calls = {"n": 0}
+
+    def timeout_then_ok(request):
+        calls["n"] += 1
+        return httpx.Response(408 if calls["n"] == 1 else 404)
+
+    with make_client(timeout_then_ok) as c:
+        assert maven._download(c, "https://r.test/m2/a.jar", tmp_path / "a.jar", NetState(), ResolutionLog()) is None
+    assert calls["n"] == 2
+
+
+def test_verify_gav_400_taints_the_probe():
+    log = ResolutionLog()
+    with make_client(lambda r: httpx.Response(400)) as c:
+        assert verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c, log=log) == (None, 1)
+    assert log.probe_failures == 1 and log.events == ["r.test: HTTP 400 during candidate probe"]
+
+
+def test_negative_verdict_counts_only_for_the_same_hints(tmp_path: Path):
+    """#110: a renamed jar gets other hints from its file name, so it is looked up again."""
+    from decaf.verdicts import VerdictCache
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    verdicts.record_sha1_miss("ab" * 20, "no hits", ["https://r.test/m2"], [("lib", "1.2")])
+    assert verdicts.lookup_sha1("ab" * 20, ["https://r.test/m2"], [("lib", "1.2")]).miss == "no hits"
+    assert verdicts.lookup_sha1("ab" * 20, ["https://r.test/m2"], [("lib", "1.3")]) is None
+    assert verdicts.lookup_sha1("ab" * 20, ["https://r.test/m2"]) is None
+
+
+def test_renamed_jar_is_looked_up_again(make_jar, tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    first = make_jar("mystery.jar", {"A.class": b"x"})
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    empty = lambda r: httpx.Response(200, json={"response": {"docs": []}})  # noqa: E731
+    with make_client(empty) as c:
+        assert resolve_sources(first, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts).miss
+    renamed = make_jar("lib-1.2.jar", {"A.class": b"x"})  # the same bytes, so the same sha1
+    wrapped, calls = _counting(empty)
+    with make_client(wrapped) as c:
+        res = resolve_sources(renamed, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert calls["n"] > 0 and not res.miss.startswith("cached verdict")
 
 
 def test_resolve_sources_sha1_fallback(make_jar, tmp_path: Path):
@@ -940,9 +1028,7 @@ def test_no_sources_verdict_replay(make_jar, tmp_path: Path):
     from decaf.verdicts import VerdictCache
 
     jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
-
-    def handler(request):
-        return httpx.Response(404)
+    handler = _with_sidecar(jar, lambda request: httpx.Response(404))
 
     verdicts = VerdictCache(tmp_path / "verdicts")
     with make_client(handler) as c:
@@ -953,8 +1039,8 @@ def test_no_sources_verdict_replay(make_jar, tmp_path: Path):
     with make_client(wrapped) as c:
         res2 = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
     assert calls["n"] == 0
-    assert res2.miss == (
-        "found com.example:lib:1.2 in pom.properties "
+    assert res2.miss == (  # the sha1 verdict of the .jar.sha1 check replays (#110)
+        "cached verdict com.example:lib:1.2 (pom-properties) "
         "but no -sources.jar in any repo (cached verdict)"
     )
 
@@ -1334,7 +1420,7 @@ def test_resolve_sources_download_network_failure_reachable_wording(make_jar, tm
     def handler(request):
         raise httpx.ReadTimeout("stalled")
 
-    with make_client(handler) as c:
+    with make_client(_with_sidecar(jar, handler)) as c:
         res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
     assert res.miss == (
         "network: r.test: timeout during sources download; "
@@ -1649,7 +1735,7 @@ def test_resolve_sources_forwards_on_state(make_jar, tmp_path: Path):
     jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
     payload = make_jar("payload.jar", {"com/example/A.java": "class A {}"}).read_bytes()
     states: list[str] = []
-    with make_client(lambda r: httpx.Response(200, content=payload)) as c:
+    with make_client(_with_sidecar(jar, lambda r: httpx.Response(200, content=payload))) as c:
         res = resolve_sources(
             jar, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
         )

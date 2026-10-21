@@ -103,8 +103,8 @@ def find_nested_archives(names: Iterable[str]) -> list[str]:
 def scan_counted(root: Path) -> tuple[list[Artifact], dict[str, int]]:
     """Scan plus, from the same zip read, each archive's nested-archive count.
 
-    Counts exist only for ARCHIVE/RESOURCE_ONLY artifacts — the kinds nested
-    discovery later runs on — so the pipeline can seed display totals upfront.
+    Counts exist only for ARCHIVE/SOURCES_JAR/RESOURCE_ONLY artifacts — the kinds
+    nested discovery later runs on — so the pipeline can seed display totals upfront.
     """
     counts: dict[str, int] = {}
 
@@ -113,7 +113,7 @@ def scan_counted(root: Path) -> tuple[list[Artifact], dict[str, int]]:
         if names is None:
             return Artifact(path, rel, ArtifactKind.CORRUPT)
         kind = _classify_names(names)
-        if kind in (ArtifactKind.ARCHIVE, ArtifactKind.RESOURCE_ONLY):
+        if kind in (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR, ArtifactKind.RESOURCE_ONLY):
             counts[rel] = len(find_nested_archives(names))
         return Artifact(path, rel, kind, _count_classes(names))
 

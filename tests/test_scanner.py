@@ -158,7 +158,7 @@ def test_scan_counted_resource_only_war_counted(make_jar, tmp_path: Path):
     assert counts == {"only-libs.war": 1}
 
 
-def test_scan_counted_skips_sources_and_corrupt(make_jar, tmp_path: Path):
+def test_scan_counted_counts_sources_and_skips_corrupt(make_jar, tmp_path: Path):
     make_jar(
         "lib-sources.jar",
         {"A.java": "class A {}", "vendor/tool.jar": b"z"},
@@ -169,7 +169,7 @@ def test_scan_counted_skips_sources_and_corrupt(make_jar, tmp_path: Path):
     kinds = {a.rel: a.kind for a in arts}
     assert kinds["bad.jar"] == ArtifactKind.CORRUPT
     assert kinds["lib-sources.jar"] == ArtifactKind.SOURCES_JAR
-    assert counts == {}
+    assert counts == {"lib-sources.jar": 1}  # a sources jar can hold jars too (#110)
 
 
 def test_scan_counted_single_file(make_jar):

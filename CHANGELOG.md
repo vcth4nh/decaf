@@ -53,6 +53,17 @@ All notable changes to decaf are documented here.
   sources jar now goes to the cache only when decaf can read each of its
   entries. A cached sources jar with a damaged entry is deleted, so the
   next run downloads it again.
+- One weak signal could pick the wrong source for an archive (#110). A jar
+  with one `pom.properties` got the sources of that artifact with no check,
+  so a fat, shaded, or patched jar could get the wrong sources and the
+  report said ok. Now decaf uses the `pom.properties` only when a
+  repository's `.jar.sha1` matches the jar, and the verdict cache keeps the
+  result. An archive with source entries and no class entries (for example
+  a war with one stray `.java`) lost its nested jars; now decaf decompiles
+  them too. HTTP 408 is now retried, and an answer other than 200, 404, or
+  410 (for example 400 or 407) no longer counts as missing sources. A
+  cached "no sources" verdict now counts only for the same file-name hints,
+  so a renamed jar is looked up again.
 
 ### Security
 
