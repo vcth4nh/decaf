@@ -604,6 +604,285 @@ def test_error_in_a_callback_aborts_the_run_with_a_report(fake_env, make_jar, tm
     assert (on_disk["status"], on_disk["interrupted"]) == ("aborted", True)
 
 
+def test_an_error_in_on_done_keeps_the_other_jars_of_the_batch(fake_env, make_jar, tmp_path: Path):
+    """Review S3: an error at one jar of a batch lost the other jars, though their files were written."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar("big.jar", {**{f"com/big/C{i}.class": b"x" for i in range(900)},
+                         "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()}, base=input_dir)
+    all_queued = threading.Event()
+    queued = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)  # the two small jars wait together and form one batch
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def on_done(report):
+        if "!/" in report.rel:
+            raise BrokenPipeError(32, "Broken pipe")
+
+    out = tmp_path / "out"
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=input_dir, output=out, maven=False, mirror=False, jobs=1, cpus=1),
+                runner=gated_solo, batch_runner=merged_batch_engine, on_event=on_event, on_done=on_done)
+    finally:
+        engines.PROCESSES.reset()
+    rels = {a["rel"] for a in json.loads((out / "decaf-report.json").read_text())["artifacts"]}
+    assert {"big.jar!/lib/s0.jar", "big.jar!/lib/s1.jar"} <= rels
+
+
+def test_an_error_in_on_done_keeps_a_job_that_ended_before_the_abort(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """Review S3: a job that ended while on_done failed for another job had its files, but no row."""
+    import decaf.pipeline as pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/a/A.class": b"x"}, base=input_dir)
+    make_jar("b.jar", {"com/b/B.class": b"x"}, base=input_dir)
+    a_reported, b_ended = threading.Event(), threading.Event()
+    real_stage = pipeline._decompile_stage
+
+    def stage(a, target, ctx, report):
+        result = real_stage(a, target, ctx, report)
+        if a.rel == "b.jar":
+            b_ended.set()
+        return result
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "b.jar":
+            a_reported.wait(timeout=30)  # b.jar ends while on_done of a.jar runs
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def on_done(report):
+        if report.rel == "a.jar":
+            a_reported.set()
+            assert b_ended.wait(timeout=30)
+            time.sleep(0.3)  # the future of b.jar is done just after its stage returns
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(pipeline, "_decompile_stage", stage)
+    out = tmp_path / "out"
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=input_dir, output=out, maven=False, jobs=2, cpus=2), runner=engine, on_done=on_done)
+    finally:
+        engines.PROCESSES.reset()
+    assert (out / "b.jar/com/b/B.java").is_file()
+    rels = {a["rel"] for a in json.loads((out / "decaf-report.json").read_text())["artifacts"]}
+    assert rels == {"a.jar", "b.jar"}
+
+
+def test_an_error_in_on_done_keeps_a_lookup_that_ended_before_the_abort(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """Review S3: sources that a lookup wrote while on_done failed for another job had no row.
+    A jar that its fetch only unpacked for the engines gets no row, and a fetch that failed
+    does not replace the error that stopped the run."""
+    import decaf.pipeline as pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/a/A.class": b"x"}, base=input_dir)
+    make_jar("b.jar", {"com/b/B.class": b"x"}, base=input_dir)
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// real source\nclass A {}"})
+    make_jar("c.jar", {"com/c/C.class": b"x"}, base=input_dir)
+    a_reported = threading.Event()
+    fetched = {name: threading.Event() for name in ("b.jar", "c.jar", "lib-1.2.jar")}
+    real_fetch = pipeline._fetch_stage
+
+    def fetch(a, ctx):
+        if a.rel in fetched:
+            a_reported.wait(timeout=30)  # these fetches end while on_done of a.jar runs
+        try:
+            if a.rel == "c.jar":
+                raise RuntimeError("a fault in the fetch of c.jar")
+            return real_fetch(a, ctx)
+        finally:
+            if a.rel in fetched:
+                fetched[a.rel].set()
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        if Path(jar_path).name != "lib-1.2.jar":
+            return Resolution(miss="no sources")
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    def on_done(report):
+        if report.rel == "a.jar":
+            a_reported.set()
+            assert all(e.wait(timeout=30) for e in fetched.values())
+            time.sleep(0.3)  # the futures are done just after their stages return
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(pipeline, "_fetch_stage", fetch)
+    out = tmp_path / "out"
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=input_dir, output=out, jobs=2, cpus=2), runner=perfect_engine,
+                resolver=resolver, on_done=on_done)
+    finally:
+        engines.PROCESSES.reset()
+    assert "real source" in (out / "lib-1.2.jar/com/x/A.java").read_text()
+    rels = {a["rel"] for a in json.loads((out / "decaf-report.json").read_text())["artifacts"]}
+    assert rels == {"a.jar", "lib-1.2.jar"}  # b.jar was not decompiled, and the fetch of c.jar failed
+
+
+def test_an_error_in_on_done_keeps_a_batch_that_ended_before_the_abort(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """Review S3: a batch that ended while on_done failed for another job had its files, but no rows."""
+    import decaf.pipeline as pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/a/A.class": b"x"}, base=input_dir)
+    make_jar("c.jar", {"com/c/C.class": b"x"}, base=input_dir)
+    smalls = {f"WEB-INF/lib/s{i}.jar": make_jar(f"s{i}.jar", {f"com/s{i}/A.class": b"x"}).read_bytes()
+              for i in range(2)}
+    make_jar("app.war", smalls, base=input_dir)
+    nested = {f"app.war!/WEB-INF/lib/s{i}.jar" for i in range(2)}
+    lock = threading.Lock()
+    started: set[str] = set()
+    queued: set[str] = set()
+    smalls_queued, batch_started, batch_ended, c_reported = (threading.Event() for _ in range(4))
+
+    def wait_for(names, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with lock:
+                if names <= started:
+                    return
+            time.sleep(0.01)
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            with lock:
+                queued.add(subject)
+                if nested <= queued:
+                    smalls_queued.set()
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        name = Path(target).name
+        with lock:
+            started.add(name)
+        if name == "a.jar":
+            smalls_queued.wait(timeout=30)  # the two small jars wait together and form one batch
+        else:
+            batch_started.wait(timeout=30)  # c.jar ends while the batch runs
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batch_started.set()
+        c_reported.wait(timeout=30)  # the batch ends while on_done of c.jar runs
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    real_fetch, real_batch = pipeline._fetch_stage, pipeline._decompile_batch
+
+    def fetch(a, ctx):
+        if a.rel == "c.jar":
+            wait_for({"a.jar"})  # a.jar and c.jar run alone, not as one batch
+        elif a.rel == "app.war":
+            wait_for({"a.jar", "c.jar"})
+        return real_fetch(a, ctx)
+
+    def decompile_batch(batch_items, ctx):
+        result = real_batch(batch_items, ctx)
+        batch_ended.set()
+        return result
+
+    def on_done(report):
+        if report.rel == "c.jar":
+            c_reported.set()
+            assert batch_ended.wait(timeout=30)
+            time.sleep(0.3)  # the future of the batch is done just after the batch returns
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(pipeline, "_fetch_stage", fetch)
+    monkeypatch.setattr(pipeline, "_decompile_batch", decompile_batch)
+    out = tmp_path / "out"
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=input_dir, output=out, maven=False, jobs=2, cpus=2), runner=engine,
+                batch_runner=batch, on_event=on_event, on_done=on_done)
+    finally:
+        engines.PROCESSES.reset()
+    rels = {a["rel"] for a in json.loads((out / "decaf-report.json").read_text())["artifacts"]}
+    assert {"a.jar", "c.jar", *nested} <= rels
+
+def test_an_interrupt_before_the_scheduler_writes_the_report(fake_env, make_jar, tmp_path: Path):
+    """Review S4: Ctrl-C or SIGTERM before the scheduler, for example in the javac build of the
+    checker, wrote no report, so the report of an older run stayed."""
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "decaf-report.json").write_text('{"status": "completed", "ended_at": "an older run"}')
+
+    def on_found(count):
+        raise KeyboardInterrupt
+
+    try:
+        report = run(Settings(input=tmp_path / "in", output=out, maven=False),
+                     runner=perfect_engine, on_found=on_found)
+    finally:
+        engines.PROCESSES.reset()
+    assert report.status == "interrupted"
+    on_disk = json.loads((out / "decaf-report.json").read_text())
+    assert (on_disk["status"], on_disk["interrupted"]) == ("interrupted", True)
+
+
+def test_a_callback_error_before_the_scheduler_writes_the_report(fake_env, make_jar, tmp_path: Path):
+    """Review S4: a broken pipe at the first ndjson line wrote no report."""
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    out = tmp_path / "out"
+
+    def on_found(count):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=tmp_path / "in", output=out, maven=False), runner=perfect_engine, on_found=on_found)
+    finally:
+        engines.PROCESSES.reset()
+    assert json.loads((out / "decaf-report.json").read_text())["status"] == "aborted"
+
+
+def test_a_setup_error_writes_no_report(make_jar, tmp_path: Path, monkeypatch):
+    """#109 stays: a setup error ends the run with exit 2 and writes no report."""
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+
+    def no_engine(spec, client, cache_dir=None, on_download=None):
+        raise engines.EngineError(f"{spec.name}: download failed")
+
+    monkeypatch.setattr(engines, "ensure_engine", no_engine)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    out = tmp_path / "out"
+    with pytest.raises(DecafError):
+        run(Settings(input=tmp_path / "in", output=out, maven=False), runner=perfect_engine)
+    assert not (out / "decaf-report.json").exists()
+
+
+def test_no_sources_reach_the_output_after_an_abort(fake_env, make_jar, tmp_path: Path):
+    """Review S5: sources that a lookup gave after the abort reached the output with no row."""
+    input_dir = tmp_path / "in"
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// real source\nclass A {}"})
+
+    def late_resolver(jar_path, repos, client, cache_dir, **kw):
+        engines.PROCESSES.kill_all()  # the run ends while the lookup runs
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    out = tmp_path / "out"
+    try:
+        run(Settings(input=input_dir, output=out), runner=perfect_engine, resolver=late_resolver)
+    finally:
+        engines.PROCESSES.reset()
+    assert not list(out.rglob("*.java"))
+
+
 def test_scheduler_wait_has_a_timeout(fake_env, make_jar, tmp_path: Path, monkeypatch):
     """#112: on Windows, a wait without a timeout sees Ctrl-C only when a future completes."""
     import decaf.pipeline as pipeline
@@ -768,6 +1047,81 @@ def test_a_waiting_whale_gets_the_next_freed_slots(fake_env, make_jar, tmp_path:
             gate.set()
         t.join(timeout=60)
     assert result["report"].totals["ok"] == 5  # the whale and the four small jars; the war has no files of its own
+
+
+def test_a_small_jar_takes_the_free_slot_while_a_whale_waits_for_a_whale(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """Review S1: with jobs=3, a whale that waits for a running whale cannot use the third slot,
+    so the small jars may use it. The hold of #133 left that slot empty."""
+    import decaf.pipeline as pipeline
+
+    input_dir = tmp_path / "in"
+    for name in ("w0.jar", "w1.jar"):
+        make_jar(name, {f"com/{name[:2]}/C{i}.class": b"x" for i in range(3000)}, base=input_dir)
+    smalls = {f"WEB-INF/lib/s{i}.jar": make_jar(f"s{i}.jar", {f"com/s{i}/A.class": b"x"}).read_bytes()
+              for i in range(2)}
+    make_jar("app.war", smalls, base=input_dir)
+    lock = threading.Lock()
+    started: list[str] = []
+    queued: set[str] = set()
+    whale_gate = threading.Event()
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            with lock:
+                queued.add(subject)
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        name = Path(target).name
+        with lock:
+            started.append(name)
+        if name.startswith("w"):
+            whale_gate.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        with lock:
+            started.extend(Path(t).name for t in targets)
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    real_fetch = pipeline._fetch_stage
+
+    def fetch(a, ctx):
+        if a.rel == "app.war":  # the small jars come after one whale runs and the other waits
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                with lock:
+                    if {"w0.jar", "w1.jar"} <= queued and any(n.startswith("w") for n in started):
+                        break
+                time.sleep(0.01)
+        return real_fetch(a, ctx)
+
+    monkeypatch.setattr(pipeline, "_fetch_stage", fetch)
+    result: dict = {}
+
+    def drive():
+        result["report"] = run(
+            Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=3, cpus=3),
+            runner=engine, batch_runner=batch, on_event=on_event,
+        )
+
+    t = threading.Thread(target=drive)
+    t.start()
+    try:
+        deadline = time.monotonic() + 10
+        small_started = False
+        while time.monotonic() < deadline and not small_started:
+            with lock:
+                small_started = any(n.startswith("s") for n in started)
+            time.sleep(0.01)
+        with lock:
+            assert small_started, started  # while the first whale still runs
+            assert sum(n.startswith("w") for n in started) == 1, started
+    finally:
+        whale_gate.set()
+        t.join(timeout=60)
+    outcomes = {r.rel: r.outcome for r in result["report"].artifacts}
+    assert all(outcomes[rel] == "ok" for rel in ("w0.jar", "w1.jar", "app.war!/WEB-INF/lib/s0.jar",
+                                                   "app.war!/WEB-INF/lib/s1.jar")), outcomes
 
 
 def test_run_cpu_budget_and_jobs_clamp(fake_env, make_jar, tmp_path: Path):

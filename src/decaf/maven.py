@@ -614,6 +614,8 @@ def _download(
                     return None
                 else:
                     for chunk in resp.iter_bytes():
+                        if net.abort.is_set():  # the run ends: no wait for the rest of the body
+                            raise NetworkFailure(host, "interrupted", f"{host}: interrupted")
                         tmp.write(chunk)
                     ok = True
         except httpx.TransportError as exc:

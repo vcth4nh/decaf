@@ -563,6 +563,26 @@ def test_run_process_refuses_after_registry_closed():
         PROCESSES.reset()
 
 
+def test_run_process_kills_the_child_when_the_wait_raises(monkeypatch):
+    """Review E3: a wait error removed the JVM from the registry and left it running."""
+    PROCESSES.reset()
+    killed: list = []
+    real_kill = engines._kill_group
+
+    def kill(proc):
+        killed.append(proc.pid)
+        real_kill(proc)
+
+    def broken_wait(self, timeout):
+        raise OverflowError("timestamp out of range for platform time_t")
+
+    monkeypatch.setattr(engines, "_kill_group", kill)
+    monkeypatch.setattr(engines._PeakWatch, "wait", broken_wait)
+    with pytest.raises(OverflowError):
+        engines.run_process([sys.executable, "-c", "import time; time.sleep(30)"], 5)
+    assert len(killed) == 1
+
+
 def test_build_command_heap_flag():
     cmd = build_command(ENGINES["vineflower"], JAR, APP, OUT, java=J, cpu_budget=3, heap_mb=2048)
     assert cmd[:3] == [J, "-XX:ActiveProcessorCount=3", "-Xmx2048m"]
