@@ -1425,9 +1425,25 @@ def test_run_sources_jar_emits_extract_then_copy(fake_env, make_jar, tmp_path: P
         runner=perfect_engine,
     )
     assert [e[2] for e in events if e[1] == "lib-sources.jar" and e[0] == "fetch"] == [
+        "scanning",  # nested archives of a sources jar (#110)
         "extracting",
         "copying resources",
     ]
+
+
+def test_run_stray_java_entry_keeps_the_jars_of_a_war(fake_env, make_jar, tmp_path: Path):
+    """#110: a war with source entries and no class entries is a sources jar; its jars still count."""
+    dep = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    make_jar("app.war", {"WEB-INF/src/Note.java": "class Note {}", "WEB-INF/lib/dep.jar": dep.read_bytes()},
+             base=tmp_path / "in")
+    found: list[int] = []
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+                 runner=perfect_engine, on_found=found.append)
+    assert {a.rel: (a.outcome, a.method) for a in report.artifacts} == {
+        "app.war": ("ok", "extracted"),
+        "app.war!/WEB-INF/lib/dep.jar": ("ok", "vineflower"),
+    }
+    assert found == [2]  # the scan counted the nested jar
 
 
 def test_run_resource_only_emits_scan_then_copy(fake_env, make_jar, tmp_path: Path):

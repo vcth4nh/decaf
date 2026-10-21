@@ -91,7 +91,10 @@ class VerdictCache:
         # non-monotonic, so a smaller repo set is not "already covered".
         return isinstance(recorded, list) and set(recorded) == set(repos)
 
-    def lookup_sha1(self, sha1: str, repos: Sequence[str]) -> ShaVerdict | None:
+    def lookup_sha1(
+        self, sha1: str, repos: Sequence[str], hints: Sequence[tuple[str, str]] = ()
+    ) -> ShaVerdict | None:
+        """A negative verdict counts only for the same (artifact, version) hints: a renamed jar looks again (#110)."""
         if self.fresh:
             return None
         path = self._sha1_path(sha1)
@@ -112,6 +115,8 @@ class VerdictCache:
             return None
         if not isinstance(data.get("miss"), str) or not self._fresh_negative(path, data, repos):
             return None
+        if data.get("hints", []) != [list(h) for h in hints]:
+            return None
         return ShaVerdict(gav=None, miss=data["miss"])
 
     def record_sha1(self, sha1: str, gav: tuple[str, str, str], resolved_by: str) -> None:
@@ -120,10 +125,12 @@ class VerdictCache:
             {"gav": list(gav), "resolved_by": resolved_by, "ts": time.time()},
         )
 
-    def record_sha1_miss(self, sha1: str, miss: str, repos: Sequence[str]) -> None:
+    def record_sha1_miss(
+        self, sha1: str, miss: str, repos: Sequence[str], hints: Sequence[tuple[str, str]] = ()
+    ) -> None:
         self._write(
             self._sha1_path(sha1),
-            {"gav": None, "miss": miss, "repos": list(repos), "ts": time.time()},
+            {"gav": None, "miss": miss, "repos": list(repos), "hints": [list(h) for h in hints], "ts": time.time()},
         )
 
     def has_no_sources(self, gav: tuple[str, str, str], repos: Sequence[str]) -> bool:

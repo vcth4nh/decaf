@@ -1040,6 +1040,8 @@ def _fetch_stage(
             report.outcome = "skipped"
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
+            state("scanning")
+            nested = _discover_nested(artifact, ctx)  # e.g. a war with one stray .java and its jars (#110)
             state("extracting")
             tmp = _tmp_dir(ctx)
             damaged: list[str] = []

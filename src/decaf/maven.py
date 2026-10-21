@@ -241,11 +241,15 @@ def _exc_kind(exc: httpx.TransportError) -> str:
 
 
 def _status_kind(code: int) -> str | None:
-    if code == 429:
-        return "HTTP 429"
+    if code in (408, 429):  # a request timeout or a rate limit: retry (#110)
+        return f"HTTP {code}"
     if 500 <= code < 600:
         return f"HTTP {code}"
     return None
+
+
+_ABSENT = (404, 410)  # only these answers say that a repository has no such file (#110)
+_AUTH = (401, 403, 407)
 
 
 def _kind_class(kind: str) -> str:
@@ -461,11 +465,13 @@ def verify_gav(
             continue
         except (httpx.HTTPError, httpx.InvalidURL):
             continue
-        if resp.status_code in (401, 403):
-            # Auth failure says nothing about the candidate (same rule as the
-            # sources-download path): taint the miss so no verdict is recorded.
+        if resp.status_code != 200 and resp.status_code not in _ABSENT:
+            # An auth or proxy answer (400, 401, 403, 407, ...) says nothing about the
+            # candidate (same rule as the sources-download path): taint the miss so no
+            # verdict is recorded (#110).
             host = httpx.URL(repo).host
-            log.events.append(f"{host}: HTTP {resp.status_code} (auth) during candidate probe")
+            auth = " (auth)" if resp.status_code in _AUTH else ""
+            log.events.append(f"{host}: HTTP {resp.status_code}{auth} during candidate probe")
             log.probe_failures += 1
             continue
         if resp.status_code != 200:
@@ -592,13 +598,14 @@ def _download(
                 if status_kind is not None:
                     kind = status_kind
                     retry_after = _retry_after_seconds(resp)
-                elif resp.status_code in (401, 403):
-                    # Auth failure says nothing about the artifact: taint the miss
-                    # instead of recording a verified one, and don't retry — auth
-                    # does not heal. Transport-class rule keeps the breaker out.
+                elif resp.status_code != 200 and resp.status_code not in _ABSENT:
+                    # An auth or proxy answer (400, 401, 403, 407, ...) says nothing about
+                    # the artifact: taint the miss instead of recording a verified one,
+                    # and don't retry. Transport-class rule keeps the breaker out (#110).
+                    auth = " (auth)" if resp.status_code in _AUTH else ""
                     raise NetworkFailure(
                         host, f"HTTP {resp.status_code}",
-                        f"{host}: HTTP {resp.status_code} (auth)",
+                        f"{host}: HTTP {resp.status_code}{auth}",
                     )
                 elif resp.status_code != 200:
                     log.ok_hosts.add(host)
@@ -711,18 +718,10 @@ def resolve_sources(
         net = NetState()
     log = ResolutionLog(subject=subject if subject is not None else jar_path.name)
 
-    gav = gav_from_pom_properties(jar_path)
-    if gav is not None:
-        fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
-        msg = _no_sources(
-            f"found {gav} in pom.properties", "no -sources.jar in any repo", log
-        )
-        return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
-
-    trail = ["no pom.properties"]
     sha1 = sha1_of(jar_path)
+    coords = candidate_coords(jar_path)  # also the key of a miss verdict: a renamed jar looks again (#110)
     if verdicts is not None:
-        known = verdicts.lookup_sha1(sha1, _redacted(repos))
+        known = verdicts.lookup_sha1(sha1, _redacted(repos), coords)
         if known is not None and known.gav is not None and not _coordinates_ok(*known.gav):
             known = None  # a verdict of an older decaf with coordinates that no Gav accepts
         if known is not None:
@@ -736,6 +735,26 @@ def resolve_sources(
                 )
                 return _finish(_fetched(gav, fetched, known.resolved_by, msg), log, net)
             return _finish(Resolution(miss=f"cached verdict: {known.miss}"), log, net)
+
+    gav = gav_from_pom_properties(jar_path)
+    if gav is None:
+        trail = ["no pom.properties"]
+    else:
+        # A shaded, patched, or renamed jar can carry the pom.properties of another jar:
+        # trust it only when a repository's .jar.sha1 matches this jar (#110).
+        before = log.probe_failures
+        repo, _ = verify_gav(gav, sha1, repos, client, MAX_PROBES, net, log)
+        if repo is not None:
+            if verdicts is not None:
+                verdicts.record_sha1(sha1, (gav.group, gav.artifact, gav.version), "pom-properties")
+            ordered = [repo, *[r for r in repos if r != repo]]
+            fetched = fetch_sources(gav, ordered, client, cache_dir, net, log, verdicts, on_state)
+            msg = _no_sources(
+                f"found {gav} in pom.properties", "no -sources.jar in any repo", log
+            )
+            return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
+        errs = " (probe errored)" if log.probe_failures > before else ""
+        trail = [f"pom.properties {gav} not verified by .jar.sha1{errs}"]
     if allow_sha1:
         before = len(log.events)
         gav = gav_from_central_sha1(sha1, client, net, log)
@@ -757,12 +776,11 @@ def resolve_sources(
     else:
         trail.append("sha1 lookup skipped")
 
-    coords = candidate_coords(jar_path)
     if not coords:
         trail.append("no artifact/version hints in filename or manifest")
         miss = "; ".join(trail)
         if verdicts is not None and not log.events:
-            verdicts.record_sha1_miss(sha1, miss, _redacted(repos))
+            verdicts.record_sha1_miss(sha1, miss, _redacted(repos), coords)
         return _finish(Resolution(miss=miss), log, net)
 
     budget = MAX_PROBES
@@ -804,5 +822,5 @@ def resolve_sources(
         trail.append("no candidate groups found")
     miss = "; ".join(trail)
     if verdicts is not None and not log.events:
-        verdicts.record_sha1_miss(sha1, miss, _redacted(repos))
+        verdicts.record_sha1_miss(sha1, miss, _redacted(repos), coords)
     return _finish(Resolution(miss=miss), log, net)
