@@ -259,7 +259,7 @@ write it, the next engine decompiles the class of its lowest version folder.
 ```bash
 decaf engines list             # pins, cache state, Java compatibility
 decaf engines fetch            # pre-download all engines (offline/CI prep)
-decaf engines clean --stale    # drop superseded jars (bare: wipe the cache)
+decaf engines clean --stale    # drop superseded files (bare: wipe the cache)
 decaf engines update           # update pins to upstream latest
 decaf engines update cfr --version 0.150   # pin an exact version
 decaf engines update --reset   # back to built-in pins
@@ -276,6 +276,11 @@ A new pin can need a newer Java than the old one. `engines list` and each run
 read the Java that a cached engine jar needs from its class files. A fallback
 engine that needs a newer Java is skipped with a warning, and `update` warns
 when the java on PATH is too old for the new pin.
+
+On Java 19+, the engine JVMs keep CDS archives (`.jsa`) next to the engine
+jars, so that later runs start faster. `clean --stale` keeps the archives of
+the active pins. With a read-only engine cache, decaf runs the JVMs without
+these archives.
 
 ## Development
 

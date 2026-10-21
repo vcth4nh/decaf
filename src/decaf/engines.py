@@ -174,6 +174,18 @@ def ensure_engine(
     return jar
 
 
+def cds_writable(cds_dir: Path) -> bool:
+    """Can a JVM write its CDS archive in cds_dir? One that cannot exits with code 1 after its work (#113)."""
+    try:
+        cds_dir.mkdir(parents=True, exist_ok=True)
+        fd, probe = tempfile.mkstemp(dir=cds_dir, suffix=".probe")
+    except OSError:
+        return False
+    os.close(fd)
+    os.unlink(probe)
+    return True
+
+
 def parse_java_major(text: str) -> int | None:
     m = re.search(r'version "(\d+)(?:\.(\d+))?', text)  # also "26-ea" and "17-internal" (#113)
     if not m:
@@ -293,7 +305,8 @@ else:
     _SPAWN_KWARGS = {}  # Windows rejects preexec_fn; macOS has no prctl
 
 
-_OOM_BYTES = b"java.lang.OutOfMemoryError"
+# On a small heap, Procyon prints only the message of the OutOfMemoryError (#113).
+_OOM_MARKS = (b"java.lang.OutOfMemoryError", b"Java heap space", b"GC overhead limit exceeded")
 
 if sys.platform == "win32":
     from ctypes import wintypes
@@ -340,6 +353,18 @@ else:
         return None
 
 
+def _own_rss() -> int:
+    """The resident memory of decaf in bytes on Linux, else 0."""
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+_FORK_SLACK = 16 << 20  # what a forked child can touch before its exec, and what decaf can grow meanwhile
+
+
 class _PeakWatch:
     """Wait for an engine JVM and keep its peak resident memory (#98).
 
@@ -347,10 +372,15 @@ class _PeakWatch:
     kernel's peak RSS; decaf then sets returncode itself, so Popen never waits
     on the reaped pid. Windows: a handle opened at the start gives
     PeakWorkingSetSize after the exit.
+
+    On Linux, a forked child starts with the pages of decaf, and ru_maxrss keeps them after
+    the exec. A peak that is not above them (floor) is unknown, for example the peak of a JVM
+    that stops at start (#113).
     """
 
-    def __init__(self, proc: subprocess.Popen) -> None:
+    def __init__(self, proc: subprocess.Popen, floor: int = 0) -> None:
         self._proc = proc
+        self._floor = floor  # bytes
         self._peak: int | None = None  # bytes
         self._thread: threading.Thread | None = None
         self._handle = None
@@ -366,7 +396,8 @@ class _PeakWatch:
         except ChildProcessError:
             return  # reaped elsewhere (a Popen.poll during a kill): its returncode stays
         self._proc.returncode = os.waitstatus_to_exitcode(status)
-        self._peak = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+        peak = usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+        self._peak = None if self._floor and peak <= self._floor + _FORK_SLACK else peak
 
     def wait(self, timeout: float | None) -> bool:
         """True when the JVM exited within timeout."""
@@ -535,12 +566,13 @@ def run_process(
     """
     if PROCESSES.closed:
         return -1, False, "interrupted", None, False
+    floor = _own_rss()
     proc = subprocess.Popen(
         cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
         **_SPAWN_KWARGS,
     )
     PROCESSES.register(proc)
-    watch = _PeakWatch(proc)
+    watch = _PeakWatch(proc, floor)
     chunks: list[bytes] = []
 
     def _pump() -> None:  # always a thread: communicate() would reap the JVM before wait4 can
@@ -563,7 +595,7 @@ def run_process(
     proc.stderr.close()
     err = b"".join(chunks)
     tail = err.decode(errors="replace")[-2000:]
-    return proc.returncode or 0, timed_out, tail, watch.peak_mb, _OOM_BYTES in err
+    return proc.returncode or 0, timed_out, tail, watch.peak_mb, any(m in err for m in _OOM_MARKS)
 
 
 def _exec_command(

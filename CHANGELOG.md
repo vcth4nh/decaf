@@ -145,6 +145,20 @@ All notable changes to decaf are documented here.
   When the Java is too old for the primary engine, the error now gives a
   hint. The README no longer gives the Java version of each engine, because
   these versions change; `decaf engines list` shows them.
+- The engine runs had smaller faults (#113). With a read-only engine cache,
+  each JVM exited with code 1 after its work, because it could not write its
+  CDS archive. Thus each batch ran two times. Now decaf turns CDS off when it
+  cannot write to the cache. A pinned engine got the CDS archive name of the
+  built-in version, and `engines clean --stale` deleted the CDS archives of
+  the active pins and of the compile check. Now the archive name has the
+  version of the pin, and `--stale` keeps these archives. A symlink in the
+  engine cache stopped `engines clean` with a traceback. Now decaf deletes
+  the link and keeps its target. On a small heap, Procyon prints only
+  `Java heap space`, so the report did not count the out-of-heap failure.
+  Now decaf also finds this text and `GC overhead limit exceeded`. On Linux,
+  the peak memory of a JVM that stopped at start was the memory of decaf,
+  because a forked child keeps the pages of decaf in `ru_maxrss`. Now such
+  a peak is unknown.
 
 ### Security
 

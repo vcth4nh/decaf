@@ -385,6 +385,7 @@ class Ctx:
     runner: Callable
     resolver: Callable
     batch_runner: Callable | None = None
+    specs: dict[str, engines.EngineSpec] = field(default_factory=lambda: dict(ENGINES))  # with the pins (#113)
     cpu_budget: int | None = None  # visible cores per engine JVM
     memory_plan: memory.MemoryPlan = memory.NO_CAP  # the heap shares of the engine JVMs (#98)
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
@@ -994,7 +995,7 @@ def _retry_missing_classes(
             if ctx.on_event is not None:
                 ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
             res = ctx.runner(
-                ENGINES[name], ctx.engine_jars[name], retry_tree, dest,
+                ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
                 ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
                 **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
                 **({"heap_mb": heap} if heap is not None else {}),
@@ -1032,7 +1033,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         if ctx.on_event is not None:
             ctx.on_event("decompile", artifact.rel, f"{name} · {len(expected):,} classes")
         res = ctx.runner(
-            ENGINES[name], ctx.engine_jars[name], target, dest,
+            ctx.specs[name], ctx.engine_jars[name], target, dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
             **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
@@ -1391,7 +1392,7 @@ def _decompile_batch(
         watcher.start()
     try:
         res = ctx.batch_runner(
-            ENGINES[name], ctx.engine_jars[name], [t for _, t, _, _, _ in members], dest,
+            ctx.specs[name], ctx.engine_jars[name], [t for _, t, _, _, _ in members], dest,
             ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
             **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
             **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
@@ -1654,6 +1655,8 @@ def run(
         chain, engine_jars = _preflight_engines(
             settings, java_major, client, on_event, on_warn=on_warn
         )
+        if cds_dir is not None and not engines.cds_writable(cds_dir):
+            cds_dir = None  # a JVM that cannot write its CDS archive exits with code 1 (#113)
         # The first events come after the last check that can end the run with DecafError,
         # so such an error leaves the stdout of --format ndjson empty (#109).
         if on_found is not None:
@@ -1703,6 +1706,7 @@ def run(
             runner=runner,
             resolver=resolver,
             batch_runner=batch_runner,
+            specs=engines.active_specs(settings.engine_overrides),
             cpu_budget=cpu_budget,
             memory_plan=mem_plan,
             cds_dir=cds_dir,

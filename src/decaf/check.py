@@ -413,10 +413,15 @@ def find_javac(java: str) -> Path | None:
 JAR = "checker.jar"  # CDS archives no class from a folder on -cp, so the classes go in a jar (#108)
 
 
+def source_digest() -> str:
+    """The hash of Checker.java in the names of its install folders and CDS archives."""
+    return hashlib.sha256(SOURCE.read_bytes()).hexdigest()[:12]
+
+
 def install(javac: Path, java_major: int, root: Path | None = None) -> Path:
     """Compile Checker.java once for each source hash and Java version; return its directory."""
     try:
-        digest = hashlib.sha256(SOURCE.read_bytes()).hexdigest()[:12]
+        digest = source_digest()
         base = root or engines.cache_root() / "checker"
         target = base / f"{digest}-{java_major}"
         if (target / JAR).is_file():
