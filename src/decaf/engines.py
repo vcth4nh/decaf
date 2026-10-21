@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -19,7 +20,7 @@ import httpx
 import platformdirs
 
 from . import memory
-from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, outer_stem, safe_extract_zip
+from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, ZIP_ERRORS, outer_stem, safe_extract_zip
 
 JAVA_MIN = 11
 CDS_MIN_JAVA = 19  # -XX:+AutoCreateSharedArchive
@@ -377,7 +378,8 @@ def build_command(
     engine_args: Sequence[str] = (),
     heap_mb: int | None = None,
 ) -> list[str]:
-    t, d, jar = str(target), str(dest), str(jar_path)
+    # Absolute paths: a relative name that starts with "-" would reach the engine as an option (#113).
+    t, d, jar = os.path.abspath(target), os.path.abspath(dest), str(jar_path)
     # ActiveProcessorCount caps the JVM's visible cores, which sizes the
     # engine's own thread pools (e.g. vineflower --thread-count), GC, and JIT.
     prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
@@ -427,17 +429,17 @@ def build_batch_command(
             "-XX:+AutoCreateSharedArchive",
             f"-XX:SharedArchiveFile={cds_dir / f'{spec.name}-{spec.version}.jsa'}",
         ]
-    t = [str(p) for p in targets]
+    t, d = [os.path.abspath(p) for p in targets], os.path.abspath(dest)  # see build_command (#113)
     if spec.name == "vineflower":
-        return [*prefix, "-jar", str(jar_path), *engine_args, *t, str(dest)]
+        return [*prefix, "-jar", str(jar_path), *engine_args, *t, d]
     if spec.name == "cfr":
-        return [*prefix, "-jar", str(jar_path), *t, "--outputdir", str(dest), "--silent", "true", *engine_args]
+        return [*prefix, "-jar", str(jar_path), *t, "--outputdir", d, "--silent", "true", *engine_args]
     if spec.name == "procyon":
-        return [*prefix, "-jar", str(jar_path), *t, "-o", str(dest), *engine_args]
+        return [*prefix, "-jar", str(jar_path), *t, "-o", d, *engine_args]
     if spec.name == "fernflower":
-        return [*prefix, "-cp", str(jar_path), str(spec.main_class), *engine_args, *t, str(dest)]
+        return [*prefix, "-cp", str(jar_path), str(spec.main_class), *engine_args, *t, d]
     if spec.name == "jd":
-        return [*prefix, "-jar", str(jar_path), *t, "-od", str(dest), *engine_args]
+        return [*prefix, "-jar", str(jar_path), *t, "-od", d, *engine_args]
     raise EngineError(f"unknown engine {spec.name!r}")
 
 
@@ -594,10 +596,15 @@ def _run_per_class(
     peak: int | None = None
     out_of_memory = False
     files = {f.relative_to(root).as_posix()[: -len(".class")]: f for f in sorted(root.rglob("*.class"))}
+    deadline = time.monotonic() + timeout  # the timeout is for the whole folder (#113)
     for stem, f in files.items():
         if outer_stem(stem, files) is not None:
             continue  # inner classes ride along with their outer class (#106)
-        r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        r = _run_once(spec, jar_path, f, dest, left, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
                       heap_mb=heap_mb)
         returncode = returncode or r.returncode
         timed_out = timed_out or r.timed_out
@@ -614,5 +621,8 @@ def _run_per_class(
 def _unpack_emitted_archives(dest: Path) -> None:
     """Fernflower-family engines emit dest/<input>.jar full of sources; flatten it."""
     for arch in list(dest.glob("*.jar")) + list(dest.glob("*.zip")):
-        safe_extract_zip(arch, dest)
+        try:
+            safe_extract_zip(arch, dest)
+        except ZIP_ERRORS:
+            pass  # cut off by a timeout: the next engine of the chain gets its try (#113)
         arch.unlink()

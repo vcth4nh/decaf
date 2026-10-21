@@ -2889,3 +2889,52 @@ def test_run_gives_batch_eligible_jars_no_estimate(fake_env, tmp_path):
         on_warn=warnings.append,
     )
     assert not any("may need about" in w for w in warnings)  # under 3000 classes: batch-eligible
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="macOS and Windows file names are Unicode")
+def test_run_gives_the_jvms_paths_they_can_open_for_an_input_folder_that_is_not_utf8(
+    fake_env, make_jar, tmp_path, monkeypatch
+):
+    """Java decodes the bytes of a path as UTF-8, so a Latin-1 name reaches it as other characters (#113).
+
+    The input is relative, as the CLI gives it.
+    """
+    monkeypatch.chdir(tmp_path)
+    input_dir = Path(os.fsdecode(b"caf\xe9"))
+    jar = make_jar("x.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    (input_dir / "p").mkdir()
+    (input_dir / "p/C.class").write_bytes(b"c")
+    targets: dict[Path, Path] = {}  # path -> the file it opens, read while the run's links exist
+    classpath: dict[Path, Path] = {}
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        targets[Path(target)] = Path(target).resolve()
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def checker(jobs, *, timeout, cpu_budget):
+        classpath.update((p, p.resolve()) for job in jobs for p in job.classpath)
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine, checker=checker)
+    assert [r.outcome for r in report.artifacts] == ["ok", "ok"]
+    for p in [*targets, *classpath]:
+        str(p).encode("utf-8")  # no lone surrogate: Java reads this name
+    assert jar.resolve() in targets.values()
+    assert {jar.resolve(), input_dir.resolve()} <= set(classpath.values())
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="macOS and Windows file names are Unicode")
+def test_run_keeps_the_input_path_when_the_link_fails(fake_env, make_jar, tmp_path, monkeypatch):
+    jar = make_jar(os.fsdecode(b"caf\xe9.jar"), {"com/x/A.class": b"a"}, base=tmp_path / "in")
+    targets: list[Path] = []
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        targets.append(Path(target))
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def no_link(*args, **kwargs):
+        raise PermissionError("no links here")
+
+    monkeypatch.setattr(os, "symlink", no_link)
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=engine)
+    assert report.artifacts[0].outcome == "ok" and targets == [jar]

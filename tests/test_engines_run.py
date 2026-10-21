@@ -20,10 +20,10 @@ from decaf.engines import (
 
 J = "/usr/bin/java"
 JAR = Path("/cache/engine.jar")
-OUT = Path("/out")
+OUT = Path(os.path.abspath("/out"))  # absolute also on Windows, where an engine path gets the drive (#113)
 
 
-APP = Path("/in/app.jar")  # str() so asserts match native path rendering on Windows
+APP = Path(os.path.abspath("/in/app.jar"))  # str() so asserts match native path rendering on Windows
 
 
 def test_build_command_vineflower():
@@ -38,7 +38,7 @@ def test_build_command_cfr():
 
 def test_build_command_procyon_archive_and_class():
     spec = ENGINES["procyon"]
-    war, cls = Path("/in/app.war"), Path("/in/Foo.class")
+    war, cls = Path(os.path.abspath("/in/app.war")), Path(os.path.abspath("/in/Foo.class"))
     assert build_command(spec, JAR, war, OUT, java=J) == [
         J, "-jar", str(JAR), "-jar", str(war), "-o", str(OUT),
     ]
@@ -56,6 +56,17 @@ def test_build_command_fernflower_uses_main_class():
 def test_build_command_jd():
     cmd = build_command(ENGINES["jd"], JAR, APP, OUT, java=J)
     assert cmd == [J, "-jar", str(JAR), str(APP), "-od", str(OUT)]
+
+
+@pytest.mark.parametrize("name", list(ENGINES))
+def test_build_command_gives_absolute_paths(name):
+    """Security (#113): a relative input name that starts with "-" must not reach the engine as an option."""
+    cmd = build_command(ENGINES[name], JAR, Path("-in.jar"), Path("out"), java=J)
+    assert os.path.abspath("-in.jar") in cmd and os.path.abspath("out") in cmd
+    assert not any(arg.startswith("-in") for arg in cmd)
+    batch = engines.build_batch_command(ENGINES[name], JAR, [Path("-in.jar"), Path("b.jar")], Path("out"), java=J)
+    assert {os.path.abspath("-in.jar"), os.path.abspath("b.jar"), os.path.abspath("out")} <= set(batch)
+    assert not any(arg.startswith("-in") for arg in batch)
 
 
 def test_build_command_cpu_budget():
@@ -169,6 +180,34 @@ def test_run_engine_unpacks_emitted_archive(tmp_path: Path, monkeypatch):
     assert res.java_files == 1
     assert (tmp_path / "out/com/x/A.java").read_text() == "class A {}"
     assert not (tmp_path / "out/in.jar").exists()
+
+
+def test_run_engine_survives_an_incomplete_emitted_archive(tmp_path: Path, monkeypatch):
+    """#113: a Fernflower timeout leaves a cut-off jar, and the unpack must not stop the chain."""
+    script = "import pathlib; pathlib.Path(r'{dest}').joinpath('in.jar').write_bytes(b'PK\\x03\\x04 cut off')"
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    res = run_engine(ENGINES["fernflower"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    assert res.java_files == 0 and not (tmp_path / "out/in.jar").exists()
+
+
+def test_class_runs_of_a_folder_share_the_timeout(tmp_path: Path, monkeypatch):
+    """#113: --timeout is for one archive or folder, not for each of its classes."""
+    tree = tmp_path / "classes"
+    tree.mkdir()
+    for i in range(5):
+        (tree / f"C{i}.class").write_bytes(b"c")
+    clock = [100.0]
+    given: list[float] = []
+
+    def fake_run_once(spec, jar_path, target, dest, timeout, *args, **kwargs):
+        given.append(timeout)
+        clock[0] += 0.5  # each class takes 0.5 s, in its time
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    monkeypatch.setattr(engines.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(engines, "_run_once", fake_run_once)
+    res = run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=1.0)
+    assert given == [1.0, 0.5] and res.timed_out  # no time is left for the other three classes
 
 
 def test_run_engine_dir_target_iterates_for_non_native(tmp_path: Path, monkeypatch):
@@ -339,7 +378,7 @@ def test_run_engine_counts_kotlin_sources(tmp_path: Path, monkeypatch):
 def test_build_batch_command_multi_source():
     from decaf.engines import build_batch_command
 
-    a, b = Path("/in/a.jar"), Path("/in/b.jar")
+    a, b = Path(os.path.abspath("/in/a.jar")), Path(os.path.abspath("/in/b.jar"))
     assert build_batch_command(ENGINES["vineflower"], JAR, [a, b], OUT, java=J) == [
         J, "-jar", str(JAR), str(a), str(b), str(OUT),
     ]
@@ -438,7 +477,7 @@ def test_build_command_splices_engine_args():
     assert build_command(ENGINES["procyon"], JAR, APP, OUT, java=J, engine_args=EA) == [
         J, "-jar", str(JAR), "-jar", str(APP), "-o", str(OUT), *EA,
     ]
-    cls = Path("/in/Foo.class")
+    cls = Path(os.path.abspath("/in/Foo.class"))
     assert build_command(ENGINES["procyon"], JAR, cls, OUT, java=J, engine_args=EA) == [
         J, "-jar", str(JAR), "-o", str(OUT), str(cls), *EA,
     ]
@@ -450,7 +489,7 @@ def test_build_command_splices_engine_args():
 def test_build_batch_command_splices_engine_args():
     from decaf.engines import build_batch_command
 
-    a, b = Path("/in/a.jar"), Path("/in/b.jar")
+    a, b = Path(os.path.abspath("/in/a.jar")), Path(os.path.abspath("/in/b.jar"))
     ff = ENGINES["fernflower"]
     assert build_batch_command(ENGINES["vineflower"], JAR, [a, b], OUT, java=J, engine_args=EA) == [
         J, "-jar", str(JAR), *EA, str(a), str(b), str(OUT),

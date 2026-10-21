@@ -113,6 +113,19 @@ All notable changes to decaf are documented here.
   when no base class exists. With `--merge`, a versioned twin that CFR or
   JD writes replaced its base class. Now the base class wins. The README
   now says which engines write the versioned classes.
+- A Fernflower run that the timeout stopped ended the fallback chain
+  (#113). The cut-off archive of sources gave an error in the unpack, so no
+  other engine ran. Now decaf deletes such an archive, and the next engine
+  runs. `--timeout` accepted 0, negative values, NaN, and infinity. These
+  values failed each artifact, wrote a report that is not valid JSON, or let
+  the JVMs run with no limit. Now `--timeout` must be a number of seconds
+  above 0. CFR and Procyon run one JVM for each class of a class folder, and
+  each JVM got the full timeout. Now the timeout is for the whole folder. An
+  input name that is not UTF-8, for example a Latin-1 name on Linux, failed
+  on all engines, because Java decodes a path as UTF-8. The compile check
+  could not read such a jar either, also on the class path of the other
+  inputs. Now such an input goes to the engines and to the check through a
+  link in the temp folder.
 
 ### Security
 
@@ -139,6 +152,9 @@ All notable changes to decaf are documented here.
   config with credentials could become readable to other users. The write
   also replaced a symlink with a file. Now the config file keeps its mode,
   and decaf writes through a symlink.
+- A file name in the input folder could act as an engine option, because
+  decaf gave the engines relative paths. Now each engine gets absolute
+  paths.
 
 ## [1.11.0] - 2026-10-21
 
