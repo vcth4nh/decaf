@@ -409,6 +409,29 @@ def test_report_tolerates_null_fields(tmp_path: Path):
     assert "Completed" in ANSI.sub("", result.output)
 
 
+def test_report_of_wrong_types_prints_no_control_codes(tmp_path: Path):
+    """Review M5: a report file gave the terminal its number fields as they were, or a traceback."""
+    evil = "\x1b]0;x\x07"
+    a = {
+        "rel": "a.jar", "kind": "archive", "outcome": "ok", "method": "cfr", "classes": evil,
+        "missing_classes": evil, "stubs": [{"path": "p/A.java", "methods": evil, "errors": [1]}],
+        "flagged": [{"path": "p/B.java", "errors": evil, "kinds": 1, "messages": 2}],
+        "unchecked": [{"path": "p/C.java", "reason": "timeout", "needs_java": evil}],
+        "check": {"checked": evil, "unchecked_reasons": {"newer class version": evil}, "needs_java": evil},
+        "attempts": [{"engine": "cfr", "batch": [1], "peak_rss_mb": evil, "out_of_memory": True}],
+    }
+    p = tmp_path / "decaf-report.json"
+    p.write_text(json.dumps({
+        "schema_version": evil, "discovered": evil, "interrupted": evil, "duration_seconds": float("nan"),
+        "settings": {"memory_budget_mb": evil, "heap_cap_mb": evil, "java_major": evil},
+        "totals": {"artifacts": evil, "failed": evil}, "artifacts": [a],
+    }))
+    for args in ([], ["--problems"], ["--artifact", "*"], ["--network-fallbacks"], ["--memory"]):
+        result = runner.invoke(app, ["report", str(p), *args])
+        assert result.exit_code == 0, (args, result.exception)
+        assert "\x1b]" not in result.output and "\x07" not in result.output, args
+
+
 def test_status_line_cached_suffix():
     r = ArtifactReport(
         rel="a.jar", kind="archive", outcome="ok", method="maven",

@@ -16,10 +16,6 @@ from rich.markup import escape
 from .pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals, out_of_memory_runs
 from .memory import gb
 
-_AR = {f.name for f in dataclasses.fields(ArtifactReport)}
-_EA = {f.name for f in dataclasses.fields(EngineAttempt)}
-_RR = {f.name for f in dataclasses.fields(RunReport)}
-
 _TOTALS_DEFAULTS = compute_totals([])  # every key compute_totals emits, zeroed
 
 _BODY_LABEL_WIDTH = max(len(s) for s in ("Artifacts", "Sources", "Warnings"))
@@ -37,10 +33,11 @@ _CONTROL_IN_LINES = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # tab and line
 def plain(text: object, *, lines: bool = False) -> str:
     """Text from an archive or an engine for a terminal: each control character becomes \\xNN (#109).
 
-    With lines=True, tabs and line feeds stay (engine stderr).
+    With lines=True, tabs and line feeds stay (engine stderr), and a CRLF of a Windows JVM is a line feed.
     """
+    text = str(text).replace("\r\n", "\n") if lines else str(text)
     pattern = _CONTROL_IN_LINES if lines else _CONTROL
-    return pattern.sub(lambda m: f"\\x{ord(m.group()):02x}", str(text))
+    return pattern.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
 
 
 def safe(text: object, *, lines: bool = False) -> str:
@@ -60,30 +57,70 @@ def marks(console: Console) -> tuple[str, str]:
     return _MARKS
 
 
+# A report file can come from any source: each value that the views read must have its type (#109).
+_TYPES = {"str": str, "int": int, "bool": bool, "float": float, "dict": dict, "list": list}
+_NUMBER_MAX = 2**53  # no count, size, or time is this large; NaN and infinity fail the test too
+_SETTINGS = {"output": str, "memory_budget_mb": int, "heap_cap_mb": int, "java_major": int}
+_TOTALS = dict.fromkeys(_TOTALS_DEFAULTS, int)
+_CHECK = {"checked": int, "flagged": int, "noted": int, "unchecked": int, "needs_java": int, "unchecked_reasons": dict}
+_FOUND = {"path": str, "engine": str, "kinds": list, "errors": int, "first": str, "messages": list}
+_ENTRIES = {
+    "stubs": {"path": str, "engine": str, "methods": int, "errors": list},
+    "flagged": _FOUND,
+    "noted": _FOUND,
+    "unchecked": {"path": str, "engine": str, "reason": str, "needs_java": int, "first": str},
+}
+
+
+def _fits(t: type, v: object) -> bool:
+    if t is int:
+        return type(v) is int and abs(v) < _NUMBER_MAX  # a bool is no count
+    if t is float:
+        return type(v) in (int, float) and abs(v) < _NUMBER_MAX
+    return isinstance(v, t)
+
+
+def _keep(d: dict, types: dict[str, type]) -> dict:
+    """The keys of d that types names, with a value of that type."""
+    return {k: v for k, v in d.items() if k in types and _fits(types[k], v)}
+
+
+def _entry(d: dict, types: dict[str, type]) -> dict:
+    """A list entry of a report: its keys of the right type, and only the text items of its lists."""
+    return {k: [x for x in v if isinstance(x, str)] if isinstance(v, list) else v for k, v in _keep(d, types).items()}
+
+
+def _typed(cls: type, d: dict) -> dict:
+    """The fields of cls from d: a value of a wrong type gets the default, and a required field an empty value."""
+    out = {}
+    for f in dataclasses.fields(cls):
+        t = _TYPES[f.type.split(" | ")[0].split("[")[0]]  # the annotations are text: "int | None", "list[dict]"
+        if _fits(t, d.get(f.name)):
+            out[f.name] = d[f.name]
+        elif f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
+            out[f.name] = t()
+    return out
+
+
 def _artifact(d: dict) -> ArtifactReport:
-    r = ArtifactReport(**{k: v for k, v in d.items() if k in _AR and k != "attempts"})
-    attempts = d.get("attempts")
-    r.attempts = [
-        EngineAttempt(**{k: v for k, v in a.items() if k in _EA})
-        for a in (attempts if isinstance(attempts, list) else []) if isinstance(a, dict)
-    ]
+    r = ArtifactReport(**_typed(ArtifactReport, d))
+    r.attempts = [EngineAttempt(**_typed(EngineAttempt, a)) for a in r.attempts if isinstance(a, dict)]
+    for name, types in _ENTRIES.items():
+        setattr(r, name, [_entry(e, types) for e in getattr(r, name) if isinstance(e, dict)])
+    if r.check is not None:  # unchecked_reasons: a count for each reason
+        r.check = {
+            k: {n: c for n, c in v.items() if _fits(int, c)} if isinstance(v, dict) else v
+            for k, v in _keep(r.check, _CHECK).items()
+        }
     return r
 
 
 def _run_report(d: dict) -> RunReport:
-    kwargs = {k: v for k, v in d.items() if k in _RR and k != "artifacts"}
-    settings = d.get("settings")
-    totals = d.get("totals")
-    duration = d.get("duration_seconds")
-    artifacts = d.get("artifacts")
-    kwargs["settings"] = settings if isinstance(settings, dict) else {}
-    kwargs["totals"] = totals if isinstance(totals, dict) else {}
-    kwargs["duration_seconds"] = duration if isinstance(duration, (int, float)) else 0.0
-    kwargs["artifacts"] = (
-        [_artifact(a) for a in artifacts if isinstance(a, dict)]
-        if isinstance(artifacts, list) else []
-    )
-    return RunReport(**kwargs)
+    report = RunReport(**_typed(RunReport, d))
+    report.settings = _keep(report.settings, _SETTINGS)
+    report.totals = _keep(report.totals, _TOTALS)
+    report.artifacts = [_artifact(a) for a in report.artifacts if isinstance(a, dict)]
+    return report
 
 
 def load_report(path: Path) -> tuple[RunReport, Path]:
@@ -93,7 +130,7 @@ def load_report(path: Path) -> tuple[RunReport, Path]:
         raise ReportError(f"report not found: {resolved}")
     try:
         data = json.loads(resolved.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:  # ValueError: no JSON, or no UTF-8
+    except (OSError, ValueError, RecursionError) as exc:  # ValueError: no JSON, or no UTF-8; RecursionError: deep nesting
         raise ReportError(f"could not parse {resolved}: {exc}") from exc
     if not isinstance(data, dict):
         raise ReportError(f"could not parse {resolved}: not a JSON object")
@@ -376,11 +413,20 @@ def render_network_fallbacks(console: Console, report: RunReport) -> None:
 
 
 def render_memory(console: Console, report: RunReport) -> None:
-    """The 10 engine attempts with the largest peak memory (#98)."""
-    rows = [
-        (a.peak_rss_mb, r.rel, a)
-        for r in report.artifacts for a in r.attempts if a.peak_rss_mb is not None
-    ]
+    """The 10 engine JVMs with the largest peak memory (#98): the jars of one batch share one JVM (#114)."""
+    rows = []
+    batches: dict[int, list[tuple[str, EngineAttempt]]] = {}
+    for r in report.artifacts:
+        for a in r.attempts:
+            if a.peak_rss_mb is None:
+                continue
+            if a.batch is None:
+                rows.append((a.peak_rss_mb, r.rel, a))
+            else:
+                batches.setdefault(a.batch, []).append((r.rel, a))
+    for members in batches.values():  # the run writes the jars in the order of their names
+        (rel, a), more = members[0], len(members) - 1
+        rows.append((a.peak_rss_mb, f"{rel} and {more} more" if more else rel, a))
     if not rows:
         console.print("no memory data in this report (an older decaf wrote it, or no engine ran)")
         return

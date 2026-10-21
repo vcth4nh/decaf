@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
 import platformdirs
 import tomli_w
 
@@ -87,7 +88,25 @@ def _is_central(url: str) -> bool:
         parts = urlsplit(url)
     except ValueError:
         return False
-    return parts.hostname in _CENTRAL_HOSTS and parts.path.rstrip("/") == "/maven2"
+    # Central answers plain HTTP with 501, so only an https entry is Central (#115).
+    return parts.scheme == "https" and parts.hostname in _CENTRAL_HOSTS and parts.path.rstrip("/") == "/maven2"
+
+
+def _check_repo(where: str, r: str) -> None:
+    """Refuse a repository URL that httpx cannot read, that has no host, or with an unclear user part (#115).
+
+    redact_url hides the text up to the last @. httpx reads the user part only before the first / ? or #,
+    so for an @ after one of them, the request goes to a wrong host.
+    """
+    if not r.startswith(("http://", "https://")):
+        raise ConfigError(f"{where} {redact_url(r)!r} must be an http(s) URL")
+    try:
+        host = httpx.URL(r).host
+    except httpx.InvalidURL:
+        host = ""
+    if not host or "@" in re.sub(r"^[^/?#]*", "", r.partition("://")[2]):
+        hint = "; write a / ? # or @ of a user name or a password as %2F %3F %23 %40" if "@" in r else ""
+        raise ConfigError(f"{where} {redact_url(r)!r} is not a valid URL{hint}")
 
 
 def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Config:
@@ -107,14 +126,12 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
         if not all(isinstance(r, str) for r in repos):
             raise ConfigError(f"{cfg_path}: repositories entries must be strings")
         for r in repos:
-            if not r.startswith(("http://", "https://")):
-                raise ConfigError(f"{cfg_path}: repository {redact_url(r)!r} must be an http(s) URL")
+            _check_repo(f"{cfg_path}: repository", r)
         file_repos = repos
         engine_overrides = _parse_engines(cfg_path, data["engines"]) if "engines" in data else {}
 
     for r in extra_repos:
-        if not r.startswith(("http://", "https://")):
-            raise ConfigError(f"--repo {redact_url(r)!r} must be an http(s) URL")
+        _check_repo("--repo", r)
 
     ordered: list[str] = []
     for repo in [*extra_repos, *file_repos]:

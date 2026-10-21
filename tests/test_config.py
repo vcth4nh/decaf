@@ -196,6 +196,32 @@ def test_repository_url_errors_hide_the_credentials(tmp_path: Path, monkeypatch)
     assert "s3cr3t" not in str(err.value)
 
 
+def test_a_repository_url_with_an_unclear_user_part_is_refused(tmp_path: Path, monkeypatch):
+    """Review M1: decaf hides the text up to the last @, and httpx must send the request to the same host."""
+    monkeypatch.setattr(config, "default_config_path", lambda: tmp_path / "nope.toml")
+    for bad in (
+        "https://deploy:12/s3cr3t@nexus.example/m2",  # httpx: host deploy, port 12
+        "https://deploy:pa/s3cr3t@nexus.example/m2",  # httpx: a bad port
+        "https://deploy:s3cr3t@/m2",  # no host
+        "https://deploy:s3cr3t@[::1/m2",  # httpx: a bad IPv6 address
+        "https://nexus.example/m2/a@b",
+    ):
+        with pytest.raises(ConfigError, match="not a valid URL") as err:
+            load_config(None, extra_repos=[bad])
+        assert "s3cr3t" not in str(err.value) and "deploy" not in str(err.value), bad
+        assert "%40" in str(err.value), bad  # the hint for a user part
+    with pytest.raises(ConfigError, match="must be an http") as err:
+        load_config(None, extra_repos=["ftp://deploy:pa/s3cr3t@nexus.example/m2"])
+    assert "s3cr3t" not in str(err.value)
+    f = tmp_path / "config.toml"
+    f.write_text('repositories = ["https://deploy:12/s3cr3t@nexus.example/m2"]\n')
+    with pytest.raises(ConfigError, match="not a valid URL") as err:
+        load_config(f)
+    assert "s3cr3t" not in str(err.value)
+    good = "https://deploy:p%2Fss@nexus.example/m2"
+    assert load_config(None, extra_repos=[good]).repositories[0] == good
+
+
 def test_config_is_utf8_on_each_platform(tmp_path: Path):
     """The config is TOML, and TOML is UTF-8, also where the locale codec is not (Windows)."""
     path = tmp_path / "config.toml"
@@ -221,3 +247,10 @@ def test_central_by_its_other_name_is_one_repository(tmp_path: Path):
     f = tmp_path / "config.toml"
     f.write_text('repositories = ["https://nexus.example/m2", "https://repo.maven.apache.org/maven2/"]\n')
     assert load_config(f).repositories == ("https://nexus.example/m2", "https://repo.maven.apache.org/maven2")
+
+
+def test_an_http_central_entry_keeps_the_https_central(tmp_path: Path):
+    """Review M2: Central answers plain HTTP with 501, so an old http entry stopped all Central sources."""
+    f = tmp_path / "config.toml"
+    f.write_text('repositories = ["http://repo1.maven.org/maven2"]\n')
+    assert load_config(f).repositories == ("http://repo1.maven.org/maven2", "https://repo1.maven.org/maven2")

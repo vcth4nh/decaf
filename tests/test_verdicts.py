@@ -23,7 +23,7 @@ def test_sha1_negative_roundtrip_and_ttl(tmp_path: Path):
     cache.record_sha1_miss("b" * 40, "no pom.properties; sha1 not in Central index", REPOS)
     got = cache.lookup_sha1("b" * 40, REPOS)
     assert got == ShaVerdict(gav=None, miss="no pom.properties; sha1 not in Central index")
-    path = tmp_path / "sha1" / f"{'b' * 40}.json"
+    [path] = (tmp_path / "sha1").glob(f"{'b' * 40}-*.json")  # the file of this hint set
     data = json.loads(path.read_text())
     data["ts"] = time.time() - NEGATIVE_TTL - 1
     path.write_text(json.dumps(data))
@@ -38,7 +38,7 @@ def test_sha1_negative_repo_set_rules(tmp_path: Path):
     assert cache.lookup_sha1("c" * 40, list(reversed(two))) is not None  # order-insensitive
     assert cache.lookup_sha1("c" * 40, two[:1]) is None  # subset does NOT match
     assert cache.lookup_sha1("c" * 40, [*two, "https://c.test/m2"]) is None
-    assert (tmp_path / "sha1" / f"{'c' * 40}.json").exists()  # mismatch is kept on disk
+    assert list((tmp_path / "sha1").glob(f"{'c' * 40}-*.json"))  # mismatch is kept on disk
 
 
 def test_corrupt_and_wrong_shape_read_as_absent(tmp_path: Path):
@@ -84,3 +84,21 @@ def test_record_overwrites(tmp_path: Path):
     cache.record_sha1("a" * 40, GAV, "verified-guess")
     got = cache.lookup_sha1("a" * 40, REPOS)
     assert got is not None and got.gav == GAV
+
+
+def test_each_hint_set_keeps_its_own_negative_verdict(tmp_path: Path):
+    """Review M9: one jar under two names wrote its two misses over each other, so each run looked up both again."""
+    cache = VerdictCache(tmp_path)
+    a, b = [("lib", "1.2")], [("lib-copy", "1.2")]
+    cache.record_sha1_miss("a" * 40, "miss a", REPOS, a)
+    cache.record_sha1_miss("a" * 40, "miss b", REPOS, b)
+    assert cache.lookup_sha1("a" * 40, REPOS, a) == ShaVerdict(gav=None, miss="miss a")
+    assert cache.lookup_sha1("a" * 40, REPOS, b) == ShaVerdict(gav=None, miss="miss b")
+
+
+def test_a_fresh_miss_replaces_a_positive_verdict(tmp_path: Path):
+    """--fresh-maven derives again: a miss replaces an older positive, for example one from an unverified pom.properties."""
+    cache = VerdictCache(tmp_path)
+    cache.record_sha1("a" * 40, GAV, "pom-properties")
+    VerdictCache(tmp_path, fresh=True).record_sha1_miss("a" * 40, "miss", REPOS)
+    assert cache.lookup_sha1("a" * 40, REPOS) == ShaVerdict(gav=None, miss="miss")

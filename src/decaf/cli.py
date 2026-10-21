@@ -650,7 +650,7 @@ def report_cmd(
     problems: Annotated[bool, typer.Option("--problems", help="List failed and partial artifacts, grouped by cause")] = False,
     artifact: Annotated[Optional[list[str]], typer.Option("--artifact", help="Show full detail for artifacts matching this glob (repeatable)")] = None,
     network_fallbacks: Annotated[bool, typer.Option("--network-fallbacks", help="List artifacts that lost sources to network failures")] = False,
-    memory_peaks: Annotated[bool, typer.Option("--memory", help="List the 10 engine attempts with the largest peak memory")] = False,
+    memory_peaks: Annotated[bool, typer.Option("--memory", help="List the 10 engine JVMs with the largest peak memory")] = False,
 ) -> None:
     """Inspect a decaf-report.json offline."""
     try:

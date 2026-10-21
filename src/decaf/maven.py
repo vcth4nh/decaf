@@ -22,18 +22,19 @@ from .verdicts import VerdictCache
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
 
 
-_AUTHORITY = re.compile(r"([^:/?#]*://)?([^/?#]*)(.*)", re.DOTALL)
+_SCHEME = re.compile(r"[^:/?#@]*://")
 
 
 def redact_url(url: str) -> str:
     """Strip user[:pass]@ userinfo for display/persistence; never raises.
 
-    Also for a bad URL in an error message, for example one with no scheme (#115).
+    All text from the scheme to the last @ goes, so a bad URL in an error message shows no user part
+    either (#115). The config refuses a repository URL with an @ after its host.
     """
-    scheme, authority, rest = _AUTHORITY.match(url).groups()
-    if "@" not in authority:
+    if "@" not in url:
         return url
-    return (scheme or "") + authority.rpartition("@")[2] + rest
+    scheme = _SCHEME.match(url)
+    return (scheme.group() if scheme else "") + url.rpartition("@")[2]
 
 
 def _redacted(repos: Sequence[str]) -> list[str]:
@@ -194,6 +195,10 @@ class NetworkFailure(Exception):
         self.detail = detail
 
 
+class DamagedDownload(Exception):
+    """A complete download that is no readable zip (#111)."""
+
+
 @dataclass
 class NetState:
     """Per-run network policy state, shared across fetch threads."""
@@ -248,6 +253,7 @@ class ResolutionLog:
     probe_failures: int = 0
     download_failures: int = 0
     cached_no_sources: bool = False
+    damaged: str = ""  # a downloaded -sources.jar that is no readable zip: no clean miss (#111)
 
 
 def _exc_kind(exc: httpx.TransportError) -> str:
@@ -578,6 +584,9 @@ def fetch_sources(
             continue
         except httpx.HTTPError:
             continue
+        except DamagedDownload as exc:  # no verdict: the next run downloads it again
+            log.damaged = log.damaged or f"the -sources.jar in {redact_url(repo)} {exc}"
+            continue
         if got is None:
             verified_misses += 1
             continue
@@ -593,8 +602,9 @@ def _download(
 ) -> Path | None:
     """One repo's sources download with transient retries.
 
-    Returns the cached path on success, None for a verified miss (non-200 or
-    not a zip); raises NetworkFailure after exhausted or aborted retries.
+    Returns the cached path on success, None for a verified miss (non-200);
+    raises DamagedDownload for a body that is no readable zip, and
+    NetworkFailure after exhausted or aborted retries.
     """
     host = httpx.URL(url).host
     _check_alive(net, host)
@@ -638,9 +648,10 @@ def _download(
                 os.unlink(tmp_name)
         if ok:
             log.ok_hosts.add(host)
-            if not _readable_zip(tmp_name):
+            damage = _zip_damage(tmp_name)
+            if damage is not None:
                 os.unlink(tmp_name)
-                return None
+                raise DamagedDownload(damage)
             try:
                 os.replace(tmp_name, cached)
             except OSError:
@@ -655,13 +666,21 @@ def _download(
     raise _exhausted(net, log, host, kind, "sources download")
 
 
-def _readable_zip(path: Path) -> bool:
-    """True when each entry of the zip can be read; is_zipfile reads only the end record (#111)."""
+def _zip_damage(path: Path) -> str | None:
+    """Why the zip cannot be read, or None when each entry can; is_zipfile reads only the end record (#111)."""
     try:
-        with zipfile.ZipFile(path) as zf:
-            return zf.testzip() is None
+        zf = zipfile.ZipFile(path)
     except ZIP_ERRORS:
-        return False
+        return "is not a zip"
+    with zf:
+        for info in zf.infolist():  # testzip() names no entry for a zlib error
+            try:
+                with zf.open(info) as f:
+                    while f.read(1 << 20):
+                        pass
+            except ZIP_ERRORS:
+                return f"has a damaged entry: {info.filename}"
+    return None
 
 
 def drop_cached_sources(sources_jar: Path) -> None:
@@ -703,6 +722,8 @@ def _fetched(gav: Gav, fetched: tuple[Path, str, bool] | None, resolved_by: str,
 
 
 def _no_sources(prefix: str, absent: str, log: ResolutionLog) -> str:
+    if log.damaged:
+        return f"{prefix} but {log.damaged}"
     if log.download_failures:
         return f"{prefix} but no -sources.jar in any reachable repo"
     if log.cached_no_sources:
