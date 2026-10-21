@@ -1,3 +1,4 @@
+import errno
 import os
 import signal
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import decaf.engines as engines
+import decaf.scanner as scanner
 from decaf.engines import (
     ENGINES,
     PROCESSES,
@@ -56,6 +58,14 @@ def test_build_command_fernflower_uses_main_class():
 def test_build_command_jd():
     cmd = build_command(ENGINES["jd"], JAR, APP, OUT, java=J)
     assert cmd == [J, "-jar", str(JAR), str(APP), "-od", str(OUT)]
+
+
+def test_build_command_keeps_the_dot_dot_of_a_path():
+    """Review E4: abspath removed `..` as text, but the kernel resolves `..` after a symlink."""
+    target = Path("link/../libs/a.jar")
+    given = str(Path.cwd() / "link" / ".." / "libs" / "a.jar")
+    assert given in build_command(ENGINES["cfr"], JAR, target, Path("out"), java=J)
+    assert given in engines.build_batch_command(ENGINES["cfr"], JAR, [target], Path("out"), java=J)
 
 
 @pytest.mark.parametrize("name", list(ENGINES))
@@ -188,6 +198,24 @@ def test_run_engine_survives_an_incomplete_emitted_archive(tmp_path: Path, monke
     monkeypatch.setattr(engines, "build_command", _fake_build(script))
     res = run_engine(ENGINES["fernflower"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
     assert res.java_files == 0 and not (tmp_path / "out/in.jar").exists()
+
+
+def test_run_engine_stops_at_a_disk_error_of_the_unpack(tmp_path: Path, monkeypatch):
+    """Review E1: the unpack hid a full disk, so a cut-off file went to the output."""
+    script = (
+        "import pathlib, zipfile\n"
+        "d = pathlib.Path(r'{dest}')\n"
+        "with zipfile.ZipFile(d / 'in.jar', 'w') as zf:\n"
+        "    zf.writestr('com/x/A.java', 'class A {{}}')\n"
+    )
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+
+    def full(src, out):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(scanner.shutil, "copyfileobj", full)
+    with pytest.raises(OSError, match="No space left"):
+        run_engine(ENGINES["fernflower"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
 
 
 def test_class_runs_of_a_folder_share_the_timeout(tmp_path: Path, monkeypatch):

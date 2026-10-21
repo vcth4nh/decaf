@@ -236,6 +236,61 @@ def test_github_zip_dist_records_both_hashes(tmp_path: Path):
     assert (tmp_path / "ghzip-2.0.jar").read_bytes() == NEW
 
 
+def _nested_update(monkeypatch, spec, client, cache_dir):
+    """Run a second update of spec while the first one has its download (review E8)."""
+    real_fetch = update.fetch_to
+    nested: list = []
+
+    def fetch_to(client_, url, dest, label):
+        real_fetch(client_, url, dest, label)
+        if not nested:
+            nested.append(None)  # the second update gets the real download only
+            nested[0] = update.update_engine(spec, client, cache_dir, version="2.0")
+
+    monkeypatch.setattr(update, "fetch_to", fetch_to)
+    first = update.update_engine(spec, client, cache_dir, version="2.0")
+    return first, nested[0]
+
+
+def test_two_maven_updates_at_once_keep_their_own_temp_files(tmp_path: Path, monkeypatch):
+    """Review E8: with fixed temp names, one update moved the .part file of the other away."""
+    routes = {
+        f"{BASE}/2.0/fake-2.0.jar": httpx.Response(200, content=NEW),
+        f"{BASE}/2.0/fake-2.0.jar.sha256": httpx.Response(200, text=NEW_SHA),
+    }
+    (tmp_path / "fake-2.0.part").write_bytes(b"a part of another download")  # the old fixed name
+    with make_client(routes) as c:
+        first, second = _nested_update(monkeypatch, MAVEN_SPEC, c, tmp_path)
+    assert first.pin == second.pin and (tmp_path / "fake-2.0.jar").read_bytes() == NEW
+    assert (tmp_path / "fake-2.0.part").read_bytes() == b"a part of another download"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fake-2.0.jar", "fake-2.0.part"]  # no temp file stays
+
+
+def test_two_github_updates_at_once_keep_their_own_temp_files(tmp_path: Path, monkeypatch):
+    """Review E8: the fixed extract folder of one update was the folder of the other."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("tool.jar", NEW)
+    dist = buf.getvalue()
+    spec = EngineSpec(
+        name="ghzip", version="1.0",
+        url="https://github.com/own/proj/releases/download/v1.0/tool-1.0-dist.zip",
+        sha256=hashlib.sha256(OLD).hexdigest(), min_java=11,
+        download_sha256="0" * 64, archive_member="tool.jar",
+    )
+    dl = "https://gh.test/dl/tool-2.0-dist.zip"
+    asset = {"name": "tool-2.0-dist.zip", "digest": f"sha256:{hashlib.sha256(dist).hexdigest()}",
+             "browser_download_url": dl}
+    routes = {f"{API}/releases/tags/v2.0": _release("v2.0", [asset]), dl: httpx.Response(200, content=dist)}
+    (tmp_path / "ghzip-extract").mkdir()  # the old fixed name
+    (tmp_path / "ghzip-extract/tool.jar").write_bytes(b"another extract")
+    with make_client(routes) as c:
+        first, second = _nested_update(monkeypatch, spec, c, tmp_path)
+    assert first.pin == second.pin and (tmp_path / "ghzip-2.0.jar").read_bytes() == NEW
+    assert (tmp_path / "ghzip-extract/tool.jar").read_bytes() == b"another extract"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ghzip-2.0.jar", "ghzip-extract"]
+
+
 def test_github_checksum_mismatch_fails_and_cleans_up(tmp_path: Path):
     routes = {
         f"{API}/releases/latest": _release(

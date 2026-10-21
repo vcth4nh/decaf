@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import subprocess
 import zipfile
 from pathlib import Path
@@ -143,6 +144,19 @@ def test_download_leaves_the_temp_files_of_another_process(tmp_path: Path):
     assert (tmp_path / "fake-1.0.part").read_bytes() == b"a part of another download"
     assert (tmp_path / "fake-extract/tool.jar").read_bytes() == b"another extract"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["fake-1.0.jar", "fake-1.0.part", "fake-extract"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_cached_engine_jar_has_the_mode_of_the_umask(tmp_path: Path):
+    """Review E2: the temp file of mkstemp made each cached jar 0600, so another user could not read it."""
+    data = b"jarbytes"
+    old = os.umask(0o022)
+    try:
+        with make_client(lambda r: httpx.Response(200, content=data)) as c:
+            jar = ensure_engine(spec_for(data), c, cache_dir=tmp_path)
+    finally:
+        os.umask(old)
+    assert jar.stat().st_mode & 0o777 == 0o644
 
 
 def _class(java: int) -> bytes:

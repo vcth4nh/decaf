@@ -135,6 +135,7 @@ gets more heap than the JVM default either, so a whale or a low `-j` never
 gets more than before; an explicit `--memory` uses the plain shares. Before
 the decompile starts, decaf prints the split and warns when an artifact
 probably needs more heap than its share. The report records the peak memory
+(on Linux, unknown for a peak near or below the memory of decaf)
 and the heap of each engine attempt, the ending shows the largest peak and
 counts the attempts that ran out of heap (the jars of one batch share one
 JVM, which counts once), and `decaf report out --memory`

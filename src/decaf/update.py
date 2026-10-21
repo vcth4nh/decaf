@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import httpx
 
-from .engines import EngineError, EngineSpec, _sha256, fetch_to
+from .engines import EngineError, EngineSpec, _sha256, fetch_to, new_part
 from .maven import sha1_of
 from .scanner import safe_extract_zip
 
@@ -100,9 +101,9 @@ def _update_maven(
     base = spec.url.rsplit("/", 2)[0]
     filename = spec.url.rsplit("/", 1)[1]
     url = f"{base}/{target}/{filename.replace(spec.version, target)}"
-    part = cache_dir / f"{spec.name}-{target}.part"
-    fetch_to(client, url, part, spec.name)
+    part = new_part(cache_dir, f"{spec.name}-{target}-")  # two updates at once each have their own
     try:
+        fetch_to(client, url, part, spec.name)
         expected = _fetch_checksum(client, url + ".sha256", _HEX256, spec.name)
         via = "sha256"
         if expected is None:
@@ -123,10 +124,9 @@ def _update_maven(
             raise EngineError(
                 f"{spec.name}: checksum mismatch for {url}: expected {expected}, got {digest}"
             )
-    except EngineError:
+        part.replace(cache_dir / f"{spec.name}-{target}.jar")
+    finally:
         part.unlink(missing_ok=True)
-        raise
-    part.replace(cache_dir / f"{spec.name}-{target}.jar")
     return UpdateResult(
         spec.name, spec.version, target,
         {"version": target, "url": url, "sha256": digest}, via,
@@ -185,28 +185,29 @@ def _update_github(
     url = asset.get("browser_download_url")
     if not url:
         raise EngineError(f"{spec.name}: release asset has no download URL")
-    part = cache_dir / f"{spec.name}-{target}.part"
-    fetch_to(client, url, part, spec.name)
-    got = _sha256(part)
-    if got != expected:
-        part.unlink()
-        raise EngineError(f"{spec.name}: checksum mismatch for {url}: expected {expected}, got {got}")
-    jar = cache_dir / f"{spec.name}-{target}.jar"
-    if spec.archive_member:
-        extract_dir = cache_dir / f"{spec.name}-extract"
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        found = safe_extract_zip(part, extract_dir, members=[spec.archive_member])
-        part.unlink()
-        member = extract_dir / spec.archive_member
-        if found != 1:
-            shutil.rmtree(extract_dir, ignore_errors=True)
-            raise EngineError(f"{spec.name}: member {spec.archive_member!r} missing from {want}")
-        inner = _sha256(member)
-        member.replace(jar)
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        pin = {"version": target, "url": url, "sha256": inner,
-               "download_sha256": expected, "archive_member": spec.archive_member}
-    else:
-        part.replace(jar)
-        pin = {"version": target, "url": url, "sha256": got}
+    part = new_part(cache_dir, f"{spec.name}-{target}-")  # two updates at once each have their own
+    try:
+        fetch_to(client, url, part, spec.name)
+        got = _sha256(part)
+        if got != expected:
+            raise EngineError(f"{spec.name}: checksum mismatch for {url}: expected {expected}, got {got}")
+        jar = cache_dir / f"{spec.name}-{target}.jar"
+        if spec.archive_member:
+            extract_dir = Path(tempfile.mkdtemp(dir=cache_dir, prefix=f"{spec.name}-extract-"))
+            try:
+                found = safe_extract_zip(part, extract_dir, members=[spec.archive_member])
+                member = extract_dir / spec.archive_member
+                if found != 1:
+                    raise EngineError(f"{spec.name}: member {spec.archive_member!r} missing from {want}")
+                inner = _sha256(member)
+                member.replace(jar)
+            finally:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            pin = {"version": target, "url": url, "sha256": inner,
+                   "download_sha256": expected, "archive_member": spec.archive_member}
+        else:
+            part.replace(jar)
+            pin = {"version": target, "url": url, "sha256": got}
+    finally:
+        part.unlink(missing_ok=True)
     return UpdateResult(spec.name, spec.version, target, pin, "github-digest")

@@ -169,6 +169,33 @@ def test_engines_fetch_reports_and_exit_code(tmp_path: Path, monkeypatch):
     assert fetched == ["vineflower"]
 
 
+@pytest.mark.parametrize("command, broken", [
+    ("fetch", "ensure_engine"),  # for example a read-only engine cache
+    ("update", "update_engine"),
+    ("list", "cache_status"),  # for example an unreadable jar
+])
+def test_engine_commands_give_the_cause_of_a_cache_error(tmp_path: Path, monkeypatch, command, broken):
+    """Review E5: an OSError of the engine cache gave a traceback in these commands."""
+    import decaf.engines as engines
+    import decaf.update as upd
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    part = tmp_path / "engines" / "x.part"
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(part))
+
+    monkeypatch.setattr(upd if broken == "update_engine" else engines, broken, denied)
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text("")
+    result = runner.invoke(app, ["engines", command, "--config", str(cfgf)])
+    assert not isinstance(result.exception, OSError)
+    plain = ANSI.sub("", result.output)
+    assert f"vineflower: Permission denied: {part}" in plain.replace("\n", "")
+    assert result.exit_code == (0 if command == "list" else 1)
+
+
 def test_engines_fetch_already_cached(tmp_path: Path, monkeypatch):
     import decaf.engines as engines
 
@@ -273,6 +300,43 @@ def test_engines_clean_removes_everything(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["engines", "clean"])  # idempotent on empty
     assert result.exit_code == 0
     assert "nothing to clean" in ANSI.sub("", result.output)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a junction is a link of Windows")
+@pytest.mark.parametrize("args", [["--stale"], []])
+def test_engines_clean_removes_a_junction_but_not_its_target(tmp_path: Path, monkeypatch, args):
+    """Review E7: Path.is_symlink is False for a junction, and rmtree refuses it."""
+    import subprocess
+
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    cache = tmp_path / "cache/engines"
+    cache.mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "keep.txt").write_bytes(b"x")
+    (target / "also.txt").write_bytes(b"y")  # the count is of the junction, not of these files
+    subprocess.run(["cmd", "/c", "mklink", "/J", str(cache / "jd-extract"), str(target)], check=True, capture_output=True)
+    result = runner.invoke(app, ["engines", "clean", *args])
+    assert result.exit_code == 0, result.output
+    assert not (cache / "jd-extract").exists() and (target / "keep.txt").is_file()
+    assert "removed 1 files" in ANSI.sub("", result.output)
+
+
+def test_a_windows_junction_counts_as_a_link(tmp_path: Path, monkeypatch):
+    """Review E7: Python 3.11 has no Path.is_junction, so decaf reads the reparse tag."""
+    import stat
+    from types import SimpleNamespace
+
+    from decaf import cli
+
+    junction = tmp_path / "jd-extract"
+    junction.mkdir()
+    real = Path.lstat
+    fake = SimpleNamespace(st_mode=stat.S_IFDIR, st_size=8, st_reparse_tag=0xA0000003)  # IO_REPARSE_TAG_MOUNT_POINT
+    monkeypatch.setattr(Path, "lstat", lambda self: fake if self == junction else real(self))
+    assert cli._is_link(junction) and not cli._is_link(tmp_path)
 
 
 def _fake_result(name: str, old: str):
