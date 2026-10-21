@@ -38,7 +38,7 @@ def test_build_command_cfr():
 
 def test_build_command_procyon_archive_and_class():
     spec = ENGINES["procyon"]
-    war, cls = Path("/in/app.war"), Path("/in/Foo.class")
+    war, cls = Path(os.path.abspath("/in/app.war")), Path(os.path.abspath("/in/Foo.class"))
     assert build_command(spec, JAR, war, OUT, java=J) == [
         J, "-jar", str(JAR), "-jar", str(war), "-o", str(OUT),
     ]
@@ -378,7 +378,7 @@ def test_run_engine_counts_kotlin_sources(tmp_path: Path, monkeypatch):
 def test_build_batch_command_multi_source():
     from decaf.engines import build_batch_command
 
-    a, b = Path("/in/a.jar"), Path("/in/b.jar")
+    a, b = Path(os.path.abspath("/in/a.jar")), Path(os.path.abspath("/in/b.jar"))
     assert build_batch_command(ENGINES["vineflower"], JAR, [a, b], OUT, java=J) == [
         J, "-jar", str(JAR), str(a), str(b), str(OUT),
     ]
@@ -477,7 +477,7 @@ def test_build_command_splices_engine_args():
     assert build_command(ENGINES["procyon"], JAR, APP, OUT, java=J, engine_args=EA) == [
         J, "-jar", str(JAR), "-jar", str(APP), "-o", str(OUT), *EA,
     ]
-    cls = Path("/in/Foo.class")
+    cls = Path(os.path.abspath("/in/Foo.class"))
     assert build_command(ENGINES["procyon"], JAR, cls, OUT, java=J, engine_args=EA) == [
         J, "-jar", str(JAR), "-o", str(OUT), str(cls), *EA,
     ]
@@ -489,7 +489,7 @@ def test_build_command_splices_engine_args():
 def test_build_batch_command_splices_engine_args():
     from decaf.engines import build_batch_command
 
-    a, b = Path("/in/a.jar"), Path("/in/b.jar")
+    a, b = Path(os.path.abspath("/in/a.jar")), Path(os.path.abspath("/in/b.jar"))
     ff = ENGINES["fernflower"]
     assert build_batch_command(ENGINES["vineflower"], JAR, [a, b], OUT, java=J, engine_args=EA) == [
         J, "-jar", str(JAR), *EA, str(a), str(b), str(OUT),
