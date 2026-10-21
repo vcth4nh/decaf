@@ -63,6 +63,25 @@ def test_merge_keeps_the_base_version_of_a_multi_release_class(tmp_path: Path):
     assert java == 2 and [c["path"] for c in collisions] == ["com/x/A.java"]
 
 
+@pytest.mark.parametrize("twin_first", [True, False], ids=["twin-first", "base-first"])
+def test_merge_keeps_the_base_version_from_another_tree_of_the_artifact(tmp_path: Path, twin_first):
+    """Review A1: a held or retried base class comes in a later tree, and the twin of the same jar won."""
+    w = MergeWriter(tmp_path / "src")
+    twin = tree(tmp_path / "t1", {"META-INF/versions/11/com/x/A.java": "// v11"})
+    base = tree(tmp_path / "t2", {"com/x/A.java": "// base"})
+    collisions = [c for t in ((twin, base) if twin_first else (base, twin)) for c in w.add_tree(t, "mr.jar")[1]]
+    assert (tmp_path / "src/com/x/A.java").read_text() == "// base"
+    assert collisions == [{"path": "com/x/A.java", "kept": "mr.jar", "dropped": "mr.jar"}]  # as for one tree
+
+
+def test_merge_lowest_key_wins_also_over_a_base_version(tmp_path: Path):
+    """The base version wins only within one artifact: across artifacts, the lowest sort key wins."""
+    w = MergeWriter(tmp_path / "src")
+    w.add_tree(tree(tmp_path / "t1", {"com/x/A.java": "// base of b"}), "b.jar")
+    w.add_tree(tree(tmp_path / "t2", {"META-INF/versions/11/com/x/A.java": "// v11 of a"}), "a.jar")
+    assert (tmp_path / "src/com/x/A.java").read_text() == "// v11 of a"
+
+
 def test_merge_skips_resources_and_normalizes(tmp_path: Path):
     w = MergeWriter(tmp_path / "src")
     t = tree(

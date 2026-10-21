@@ -253,6 +253,39 @@ def test_safe_extract_zip_skips_a_damaged_entry(make_damaged_jar, tmp_path: Path
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["b.txt"]
 
 
+@pytest.mark.parametrize(
+    "damaged, failed_names, on_disk",
+    [
+        ((0,), [], "last"),  # review A4: the good last copy is the file, as Java reads it
+        ((1,), ["A.java"], None),
+        ((0, 1), ["A.java"], None),  # one name, so one damaged name
+    ],
+    ids=["first-damaged", "last-damaged", "both-damaged"],
+)
+def test_safe_extract_zip_judges_a_name_by_its_last_copy(tmp_path: Path, damaged, failed_names, on_disk):
+    import warnings
+
+    jar = tmp_path / "d.jar"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
+        with zipfile.ZipFile(jar, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("A.java", "first" * 20)
+            zf.writestr("A.java", "last" * 20)
+    with zipfile.ZipFile(jar) as zf:
+        offsets = [i.header_offset for i in zf.infolist()]
+    for n in damaged:
+        with open(jar, "r+b") as f:  # an invalid deflate block at the start of the copy
+            f.seek(offsets[n] + 26)
+            name_len, extra_len = struct.unpack("<HH", f.read(4))
+            f.seek(offsets[n] + 30 + name_len + extra_len)
+            f.write(b"\xff")
+    failed: list[str] = []
+    safe_extract_zip(jar, tmp_path / "out", failed=failed)
+    assert failed == failed_names
+    target = tmp_path / "out/A.java"
+    assert (target.read_text() if target.exists() else None) == (None if on_disk is None else on_disk * 20)
+
+
 def test_safe_extract_zip_raises_a_disk_error(make_jar, tmp_path: Path, monkeypatch):
     """A full disk is no damage of the archive: the extraction stops."""
     jar = make_jar("j.jar", {"a.txt": "a"})

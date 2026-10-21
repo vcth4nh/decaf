@@ -153,6 +153,7 @@ def safe_extract_zip(
     """Extract files from a zip, refusing paths that escape dest. Returns count.
 
     An entry that cannot be read is skipped, and its name goes to failed (#109).
+    Of two entries with one name, the last one decides, as in Java.
     A disk error, for example a full disk, still raises.
     """
     count = 0
@@ -182,9 +183,11 @@ def safe_extract_zip(
                 if isinstance(exc, OSError) and exc.errno is not None:
                     raise  # the disk, not the entry
                 target.unlink(missing_ok=True)
-                if failed is not None:
+                if failed is not None and name not in failed:
                     failed.append(name)
                 continue
+            if failed is not None and name in failed:
+                failed.remove(name)
             count += 1
     return count
 

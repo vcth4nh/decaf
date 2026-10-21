@@ -11,8 +11,10 @@ All notable changes to decaf are documented here.
   `missing_classes: 0` (#106). For guice-5.1.0, a batch wrote 243 of its 275
   files. A class is now an inner class only when the class file of its outer
   class exists. Thus decaf now counts and retries classes such as
-  `$Gson$Types` and inner classes without their outer class. CFR and Procyon
-  now also decompile these classes in class folders.
+  `$Gson$Types` and inner classes without their outer class. A jar with
+  such an inner class no longer shares a batch with a jar that has its outer
+  class, because the engine then puts both classes into one file. CFR and
+  Procyon now also decompile these classes in class folders.
 - An error such as a broken pipe stopped a run, but the report said
   `completed` and the engine JVMs continued (#112). Now decaf kills the
   JVMs and writes the report with the new status `aborted` before it stops.
@@ -208,7 +210,9 @@ All notable changes to decaf are documented here.
   decompiled the file two times. A damaged first entry
   also failed the name when the last entry was good. Now the name gets one
   row for the last entry, which Java reads, and a warning names the entry
-  when the entries are not the same.
+  when the entries are not the same. The last entry now also decides for a
+  source file of a sources jar: a damaged earlier entry is no missing file,
+  and decaf uses a Maven sources jar with such an entry.
 - On a case-insensitive output, decaf found the names that share one file
   with `str.casefold`. APFS and ext4 casefold also ignore the Unicode normal
   form, so decaf missed two names such as `é` (NFC) and `e` + U+0301 (NFD),
