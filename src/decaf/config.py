@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import platformdirs
 import tomli_w
 
+from .maven import redact_url
+
 MAVEN_CENTRAL = "https://repo1.maven.org/maven2"
+_CENTRAL_HOSTS = ("repo1.maven.org", "repo.maven.apache.org")  # two names of one repository
 
 
 class ConfigError(Exception):
@@ -64,6 +69,27 @@ def _parse_engines(cfg_path: Path, raw: object) -> dict[str, dict[str, str]]:
     return {name: _validate_override(cfg_path, name, entry) for name, entry in raw.items()}
 
 
+def _read_toml(path: Path) -> dict:
+    try:
+        text = path.read_text(encoding="utf-8")  # TOML is UTF-8, also where the locale codec is not
+    except OSError as exc:
+        raise ConfigError(f"{path}: cannot read config: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: cannot read config: not UTF-8 (byte {exc.start})") from exc
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+
+
+def _is_central(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.hostname in _CENTRAL_HOSTS and parts.path.rstrip("/") == "/maven2"
+
+
 def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Config:
     file_repos: list[str] = []
     engine_overrides: dict[str, dict[str, str]] = {}
@@ -71,14 +97,7 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
     if path is not None and not path.is_file():
         raise ConfigError(f"{path}: config file not found")
     if cfg_path.is_file():
-        try:
-            text = cfg_path.read_text()
-        except OSError as exc:
-            raise ConfigError(f"{cfg_path}: cannot read config: {exc}") from exc
-        try:
-            data = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            raise ConfigError(f"{cfg_path}: invalid TOML: {exc}") from exc
+        data = _read_toml(cfg_path)
         for key in data:
             if key not in ("repositories", "engines"):
                 raise ConfigError(f"{cfg_path}: unknown key {key!r}")
@@ -89,40 +108,39 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
             raise ConfigError(f"{cfg_path}: repositories entries must be strings")
         for r in repos:
             if not r.startswith(("http://", "https://")):
-                raise ConfigError(f"{cfg_path}: repository {r!r} must be an http(s) URL")
+                raise ConfigError(f"{cfg_path}: repository {redact_url(r)!r} must be an http(s) URL")
         file_repos = repos
         engine_overrides = _parse_engines(cfg_path, data["engines"]) if "engines" in data else {}
 
     for r in extra_repos:
         if not r.startswith(("http://", "https://")):
-            raise ConfigError(f"--repo {r!r} must be an http(s) URL")
+            raise ConfigError(f"--repo {redact_url(r)!r} must be an http(s) URL")
 
     ordered: list[str] = []
-    for repo in [*extra_repos, *file_repos, MAVEN_CENTRAL]:
+    for repo in [*extra_repos, *file_repos]:
         repo = repo.rstrip("/")
         if repo not in ordered:
             ordered.append(repo)
+    if not any(_is_central(r) for r in ordered):
+        ordered.append(MAVEN_CENTRAL)
     return Config(repositories=tuple(ordered), engine_overrides=engine_overrides)
 
 
 def write_engine_pins(path: Path, overrides: dict[str, dict[str, str]]) -> None:
     for name, entry in overrides.items():
         _validate_override(path, name, entry)
-    data: dict = {}
-    if path.is_file():
-        try:
-            text = path.read_text()
-        except OSError as exc:
-            raise ConfigError(f"{path}: cannot read config: {exc}") from exc
-        try:
-            data = tomllib.loads(text)
-        except tomllib.TOMLDecodeError as exc:
-            raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+    data: dict = _read_toml(path) if path.is_file() else {}
     if overrides:
         data["engines"] = overrides
     else:
         data.pop("engines", None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(tomli_w.dumps(data))
-    os.replace(tmp, path)
+    # The config can hold repository credentials: the new file gets the mode of the old one,
+    # and a symlink, for example into a dotfiles folder, stays a symlink (#115).
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(target.stat().st_mode) if target.is_file() else 0o666
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w", encoding="utf-8") as f:
+        f.write(tomli_w.dumps(data))
+    os.replace(tmp, target)

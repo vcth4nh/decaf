@@ -212,11 +212,16 @@ check off.
 
 ## Configuration
 
-`~/.config/decaf/config.toml` (or `--config PATH`):
+The config file is `~/.config/decaf/config.toml` on Linux,
+`~/Library/Application Support/decaf/config.toml` on macOS, and
+`%LOCALAPPDATA%\decaf\decaf\config.toml` on Windows (or `--config PATH`).
+It is TOML, so it must be UTF-8. When `XDG_CONFIG_HOME` is set, the file is
+`$XDG_CONFIG_HOME/decaf/config.toml` on Linux and macOS.
 
 ```toml
 # Maven repositories, tried in order.
-# Maven Central is appended automatically unless listed explicitly.
+# Maven Central is appended automatically unless listed explicitly
+# (as repo1.maven.org or repo.maven.apache.org).
 repositories = [
   "https://nexus.mycorp.com/repository/maven-public",
   "https://user:pass@private.repo/maven2",   # basic auth via URL userinfo

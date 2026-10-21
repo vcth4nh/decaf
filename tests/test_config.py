@@ -1,3 +1,5 @@
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -156,3 +158,66 @@ def test_write_engine_pins_rejects_unknown_engine(tmp_path: Path):
     with pytest.raises(ConfigError, match="unknown engine"):
         config.write_engine_pins(path, bad)
     assert not path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_write_engine_pins_keeps_the_file_mode(tmp_path: Path):
+    """#115: the config can hold repository credentials, so a pin write must not widen its mode."""
+    path = tmp_path / "config.toml"
+    path.write_text('repositories = ["https://deploy:s3cr3t@nexus.example/m2"]\n')
+    path.chmod(0o600)
+    config.write_engine_pins(path, {"cfr": {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": SHA}})
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need extra rights on Windows")
+def test_write_engine_pins_writes_through_a_symlink(tmp_path: Path):
+    """#115: a config that is a symlink, for example into a dotfiles folder, stays a symlink."""
+    target = tmp_path / "dotfiles/decaf.toml"
+    target.parent.mkdir()
+    target.write_text('repositories = ["https://nexus.example/m2"]\n')
+    link = tmp_path / "config.toml"
+    link.symlink_to(target)
+    pins = {"cfr": {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": SHA}}
+    config.write_engine_pins(link, pins)
+    assert link.is_symlink() and load_config(target).engine_overrides == pins
+
+
+def test_repository_url_errors_hide_the_credentials(tmp_path: Path, monkeypatch):
+    """#115: an error message goes to the terminal and to CI logs."""
+    f = tmp_path / "config.toml"
+    f.write_text('repositories = ["ftp://deploy:s3cr3t@nexus.example/m2"]\n')
+    with pytest.raises(ConfigError, match="ftp://nexus.example/m2") as err:
+        load_config(f)
+    assert "s3cr3t" not in str(err.value)
+    monkeypatch.setattr(config, "default_config_path", lambda: tmp_path / "nope.toml")
+    with pytest.raises(ConfigError, match="nexus.example/m2") as err:
+        load_config(None, extra_repos=["deploy:s3cr3t@nexus.example/m2"])
+    assert "s3cr3t" not in str(err.value)
+
+
+def test_config_is_utf8_on_each_platform(tmp_path: Path):
+    """The config is TOML, and TOML is UTF-8, also where the locale codec is not (Windows)."""
+    path = tmp_path / "config.toml"
+    path.write_bytes('repositories = ["https://nexus.example/dépôt"]\n'.encode())
+    pins = {"cfr": {"version": "0.153", "url": "https://x.test/cfr-é.jar", "sha256": SHA}}
+    config.write_engine_pins(path, pins)
+    cfg = load_config(path)
+    assert cfg.repositories[0] == "https://nexus.example/dépôt" and cfg.engine_overrides == pins
+    assert "dépôt".encode() in path.read_bytes()
+
+
+def test_config_that_is_not_utf8_gives_a_config_error(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'repositories = ["https://nexus.example/\xff"]\n')
+    with pytest.raises(ConfigError, match="UTF-8"):
+        load_config(path)
+    with pytest.raises(ConfigError, match="UTF-8"):
+        config.write_engine_pins(path, {})
+
+
+def test_central_by_its_other_name_is_one_repository(tmp_path: Path):
+    """repo.maven.apache.org and repo1.maven.org serve the same repository: two probes for each miss."""
+    f = tmp_path / "config.toml"
+    f.write_text('repositories = ["https://nexus.example/m2", "https://repo.maven.apache.org/maven2/"]\n')
+    assert load_config(f).repositories == ("https://nexus.example/m2", "https://repo.maven.apache.org/maven2")
