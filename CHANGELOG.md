@@ -4,6 +4,8 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-21
+
 ### Added
 
 - Engine memory is measured and budgeted (#98). Each engine attempt records
