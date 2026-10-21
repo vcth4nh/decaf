@@ -257,6 +257,16 @@ def test_routing_positional_and_option_first(tmp_path: Path, make_jar, monkeypat
     assert runner.invoke(app, ["run", str(tmp_path / "in"), "-o", str(tmp_path / "o3")]).exit_code == 0
 
 
+def test_a_routed_usage_error_names_the_run_command(tmp_path: Path):
+    """Review low item: `decaf -o x` showed `Usage: decaf -o [OPTIONS]` and `Try 'decaf -o -h'`."""
+    for args in (["-o", str(tmp_path / "out")], [str(tmp_path / "in.jar"), "--bogus"]):
+        result = runner.invoke(app, args, prog_name="decaf")
+        plain = ANSI.sub("", result.output)
+        assert result.exit_code == 2
+        assert "Usage: decaf run [OPTIONS]" in plain, plain
+        assert "Try 'decaf run -h' for help." in plain, plain
+
+
 def test_bare_decaf_shows_group_help():
     result = runner.invoke(app, [])
     plain = ANSI.sub("", result.output)
@@ -940,6 +950,33 @@ def test_ndjson_line_is_one_write(monkeypatch):
     monkeypatch.setattr(cli.sys, "stdout", out)
     cli._emit({"event": "warning", "text": "x" * 20000})
     assert len(out.writes) == 1 and out.writes[0].endswith("\n")
+
+
+def test_ndjson_broken_pipe_in_a_worker_thread_is_left_to_the_main_thread(monkeypatch):
+    """Review low item: a Maven warning of a fetch thread hit the broken pipe, and the error
+    became the sources miss of that artifact. The main thread gets it at its next line."""
+    import io
+    import threading
+
+    class Closed(io.StringIO):
+        def flush(self):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(cli.sys, "stdout", Closed())
+    errors: list[BaseException] = []
+
+    def warn() -> None:
+        try:
+            cli._emit({"event": "warning", "text": "maven: x"})
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=warn)
+    thread.start()
+    thread.join()
+    assert errors == []
+    with pytest.raises(BrokenPipeError):
+        cli._emit({"event": "artifact"})
 
 
 def test_long_lines_stay_whole_without_a_terminal(tmp_path: Path, make_jar, monkeypatch):
