@@ -13,7 +13,7 @@ def test_parse_size(text, mb):
     assert memory.parse_size(text) == mb
 
 
-@pytest.mark.parametrize("text", ["12", "12x", "-1g", "", "g", "12k", "1.2.3g"])
+@pytest.mark.parametrize("text", ["12", "12x", "-1g", "", "g", "12k", "1.2.3g", "9" * 400 + "g"])
 def test_parse_size_rejects(text):
     with pytest.raises(ValueError):
         memory.parse_size(text)  # "12k" rounds to 0 MB: an error, never a silent "no cap"

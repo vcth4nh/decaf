@@ -13,7 +13,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.markup import escape
 
-from .pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
+from .pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals, out_of_memory_runs
 from .memory import gb
 
 _AR = {f.name for f in dataclasses.fields(ArtifactReport)}
@@ -220,7 +220,7 @@ def render_ending(
     missing = sum(r.missing_classes for r in report.artifacts)
     stubbed = sum(len(r.stubs) for r in report.artifacts)
     flagged = sum(len(r.flagged) for r in report.artifacts)
-    out_of_heap = sum(1 for r in report.artifacts for a in r.attempts if a.out_of_memory)
+    out_of_heap = out_of_memory_runs(a for r in report.artifacts for a in r.attempts)
     warnings = []
     if missing:
         warnings.append(f"{missing} missing classes")

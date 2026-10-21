@@ -108,7 +108,9 @@ decaf pins itself to the first `cpus` cores and every engine JVM inherits
 the mask, so the rest of the machine stays genuinely free. Each JVM is also
 started with `-XX:ActiveProcessorCount = cpus ÷ jobs` to size its thread
 pools (on other platforms this hint is the only limit). The default budget
-is all cores minus one, keeping the machine responsive during long runs;
+is all the cores that decaf may use (its CPU affinity, for example from
+`taskset` or the cpuset of a container) minus one, keeping the machine
+responsive during long runs;
 `--cpus N` sets it exactly (e.g. your full core count to use everything).
 Workers are clamped so they never exceed the budget. Maven resolution and
 sources downloads run on a separate IO-sized fetch stage feeding the
@@ -128,7 +130,8 @@ gets more than before; an explicit `--memory` uses the plain shares. Before
 the decompile starts, decaf prints the split and warns when an artifact
 probably needs more heap than its share. The report records the peak memory
 and the heap of each engine attempt, the ending shows the largest peak and
-counts the attempts that ran out of heap, and `decaf report out --memory`
+counts the attempts that ran out of heap (the jars of one batch share one
+JVM, which counts once), and `decaf report out --memory`
 lists the ten largest peaks. A heap flag in `JAVA_TOOL_OPTIONS` or
 `JDK_JAVA_OPTIONS` loses to decaf's `-Xmx`; one in `_JAVA_OPTIONS` overrides
 it, and decaf warns that the budget is then not enforced. The same applies to

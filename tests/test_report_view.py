@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import json
 from pathlib import Path
@@ -559,6 +560,15 @@ def test_ending_memory_line_without_a_cap_and_without_peaks():
     console = _console()
     render_ending(console, report(), output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
     assert "Memory" not in console.file.getvalue()  # no engine attempt with a peak
+
+
+def test_ending_counts_one_batch_jvm_once():
+    """#114: the jars of one batch share one JVM."""
+    one, two = (dataclasses.replace(_att(900, oom=True, level="batch"), batch=n) for n in (0, 1))
+    rep = _mem_report(_mem_art("a.jar", one), _mem_art("b.jar", one), _mem_art("c.jar", two))
+    console = _console()
+    render_ending(console, rep, output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    assert "2 attempts ran out of heap" in console.file.getvalue()
 
 
 def test_ending_warns_and_hints_about_out_of_heap():

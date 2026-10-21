@@ -12,7 +12,7 @@ import time
 import traceback
 import zipfile
 from collections import deque
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -57,10 +57,11 @@ def _decompile_weight(artifact: Artifact) -> int:
     return 2 if artifact.classes >= _WHALE_CLASSES else 1
 
 
-def _class_bytes(target: Path) -> int:
-    """The uncompressed size of a decompile target's class files (#98)."""
+def _class_bytes(target: Path, largest: bool = False) -> int:
+    """The uncompressed size of a decompile target's class files (#98), or of its largest one."""
     if target.is_dir():
-        return sum(p.stat().st_size for p in target.rglob("*.class") if p.is_file())
+        sizes = [p.stat().st_size for p in target.rglob("*.class") if p.is_file()]
+        return max(sizes, default=0) if largest else sum(sizes)
     try:
         with zipfile.ZipFile(target) as zf:
             return sum(i.file_size for i in zf.infolist() if i.filename.endswith(".class"))
@@ -76,7 +77,8 @@ def _share_warning(artifact: Artifact, target: Path, ctx: Ctx) -> str | None:
     engine = ctx.chain[0]
     if memory.estimate_heap_mb(engine, 0) is None:
         return None  # no size model: do not read the jar
-    est = memory.estimate_heap_mb(engine, _class_bytes(target))
+    per_class = target.is_dir() and engine not in engines.NATIVE_DIR_ENGINES  # one JVM for each class (#114)
+    est = memory.estimate_heap_mb(engine, _class_bytes(target, largest=per_class))
     if est is None or est <= heap:
         return None
     return (
@@ -124,6 +126,13 @@ class EngineAttempt:
     heap_mb: int | None = None  # the -Xmx it got; None = no cap
     out_of_memory: bool = False  # java.lang.OutOfMemoryError in stderr or in a stub
     flagged: int = 0  # files that the compile check flagged in this attempt's output (#99)
+    batch: int | None = None  # the number of the batch JVM: the jars of one batch share it (#114)
+
+
+def out_of_memory_runs(attempts: Iterable[EngineAttempt]) -> int:
+    """The JVM runs that ran out of heap: the attempts of one batch are one run (#114)."""
+    oom = [a for a in attempts if a.out_of_memory]
+    return sum(a.batch is None for a in oom) + len({a.batch for a in oom if a.batch is not None})
 
 
 @dataclass
@@ -328,7 +337,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
             1 for r in reports if (r.sources_miss or "").startswith("network:")
         ),
         "stubbed_classes": sum(len(r.stubs) for r in reports),
-        "out_of_memory_attempts": sum(1 for r in reports for a in r.attempts if a.out_of_memory),
+        "out_of_memory_attempts": out_of_memory_runs(a for r in reports for a in r.attempts),
         "checked_files": sum((r.check or {}).get("checked", 0) for r in reports),
         "flagged_files": sum((r.check or {}).get("flagged", 0) for r in reports),
         "noted_files": sum((r.check or {}).get("noted", 0) for r in reports),
@@ -386,6 +395,7 @@ class Ctx:
     resolver: Callable
     batch_runner: Callable | None = None
     specs: dict[str, engines.EngineSpec] = field(default_factory=lambda: dict(ENGINES))  # with the pins (#113)
+    batch_ids: Iterator[int] = field(default_factory=count)  # numbers for the batch JVMs (#114)
     cpu_budget: int | None = None  # visible cores per engine JVM
     memory_plan: memory.MemoryPlan = memory.NO_CAP  # the heap shares of the engine JVMs (#98)
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
@@ -899,6 +909,7 @@ def _attempt(
     found: list[stubs.Stub],
     heap_mb: int | None,
     flagged: int = 0,
+    batch: int | None = None,
 ) -> EngineAttempt:
     """The report entry of one engine run: its result, its stubs (#96), its memory (#98), its flags (#99)."""
     return EngineAttempt(
@@ -908,6 +919,7 @@ def _attempt(
         heap_mb=heap_mb,
         out_of_memory=res.out_of_memory or _has_oom(found),
         flagged=flagged,
+        batch=batch,
     )
 
 
@@ -1366,6 +1378,7 @@ def _decompile_batch(
         return [], [(a, t, r) for a, t, r, _, _ in members]
     name = ctx.chain[0]
     heap = ctx.memory_plan.heap_mb(1)  # a batch JVM takes one slot
+    batch_id = next(ctx.batch_ids)
     try:
         dest = _tmp_dir(ctx)
     except OSError:  # e.g. a full disk: each member gets its own try, and its own failure (#112)
@@ -1443,7 +1456,7 @@ def _decompile_batch(
     requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
     for i, (a, target, report, stems, _) in enumerate(members):
         member_stubs, flagged = counts.get(i, ([], 0))
-        report.attempts.append(_attempt(name, "batch", res, len(produced[i]), member_stubs, heap, flagged))
+        report.attempts.append(_attempt(name, "batch", res, len(produced[i]), member_stubs, heap, flagged, batch_id))
         if i not in trees:
             requeue.append((a, target, report))
             continue
@@ -1619,8 +1632,10 @@ def run(
     javac_path: Path | None = None
     tmp_root = Path(tempfile.mkdtemp(prefix="decaf-"))
     client = httpx.Client(follow_redirects=True, timeout=30)
-    total_cpus = settings.cpus or max(1, (os.cpu_count() or 1) - 1)  # auto: leave one core free
-    jobs = settings.jobs or min(4, os.cpu_count() or 1)
+    # The CPUs that decaf may use: its affinity, for example from taskset or the cpuset of a container (#114).
+    allowed = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    total_cpus = settings.cpus or max(1, allowed - 1)  # auto: leave one core free
+    jobs = settings.jobs or min(4, allowed)
     jobs = max(1, min(jobs, total_cpus))
     budget_mb, cap_mb = settings.memory_mb, 0
     if budget_mb is None:
@@ -1755,8 +1770,9 @@ def run(
                             w = _decompile_weight(a)
                             dec_weight += w
                             dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", w)
-                        # ready drains first: a waiting whale gets first claim on freed weight
-                        while ready_small and (dec_weight == 0 or dec_weight + 1 <= jobs):
+                        # ready drains first: a waiting whale gets first claim on freed weight,
+                        # so no small jar takes a freed slot while the whale waits for its second (#114)
+                        while ready_small and not ready and (dec_weight == 0 or dec_weight + 1 <= jobs):
                             batch = _form_batch(ready_small, fold=case_label is not None)
                             dec_weight += 1
                             if len(batch) == 1:
@@ -1795,6 +1811,10 @@ def run(
                                 if target is not None:
                                     if on_event is not None:
                                         on_event("queued", a.rel, "")
+                                    if on_warn is not None:  # also for a jar of a batch: its JVM has one share (#114)
+                                        text = _share_warning(a, target, ctx)
+                                        if text is not None:
+                                            on_warn(text)
                                     if (
                                         batch_runner is not None
                                         and not target.is_dir()
@@ -1805,10 +1825,6 @@ def run(
                                             (a, target, report, *_stems_and_claims(target))
                                         )
                                     else:
-                                        if on_warn is not None:
-                                            text = _share_warning(a, target, ctx)
-                                            if text is not None:
-                                                on_warn(text)
                                         heappush(ready, (-a.classes, next(seq), a, target, report))
                                     continue
                             reports.append(report)

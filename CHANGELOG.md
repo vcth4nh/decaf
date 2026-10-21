@@ -159,6 +159,21 @@ All notable changes to decaf are documented here.
   the peak memory of a JVM that stopped at start was the memory of decaf,
   because a forked child keeps the pages of decaf in `ru_maxrss`. Now such
   a peak is unknown.
+- The CPU budget and the scheduler ignored limits of the host (#114). The
+  default budget counted all the cores of the host, also when decaf could
+  use only some of them, for example under `taskset` or in a container with
+  a cpuset. Then each JVM got more threads than CPUs. Now the default counts
+  the CPUs of decaf's affinity. While a whale waited for its second free
+  slot, each freed slot went to a small jar, so the whale could wait until
+  no small jars were left. Now no small jar starts while a whale waits.
+- The memory notes had gaps (#114). A jar under 3000 classes, which goes
+  into a batch, got no heap estimate. CFR and Procyon run one JVM for each
+  class of a class folder, but the estimate used the size of the whole
+  folder, so it gave a false warning. Now each jar gets the estimate, and
+  for one JVM for each class, the estimate uses the largest class. One batch
+  JVM that ran out of heap counted as one attempt for each of its jars; now
+  it counts once. A very large `--memory` value gave a traceback; now it
+  gives an error.
 
 ### Security
 
