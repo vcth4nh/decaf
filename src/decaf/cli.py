@@ -57,6 +57,7 @@ class DefaultGroup(TyperGroup):
         arg0 = getattr(ctx, "_default_arg0", None)
         if arg0 is not None:
             rest = [arg0, *rest]
+            cmd_name = self.default_command  # the usage text names `run`, not the routed token
         return cmd_name, cmd, rest
 
 
@@ -95,8 +96,14 @@ def _emit(event: dict) -> None:
     """One ndjson line in one write: the lines of two threads never mix (#109)."""
     line = json.dumps(event) + "\n"
     with _NDJSON_LOCK:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+        try:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            if threading.current_thread() is threading.main_thread():
+                raise
+            # A fetch thread would fail its artifact with this error. The main
+            # thread gets the same error at its next line and stops the run.
 
 
 engines_app = typer.Typer(name="engines", help="Manage decompiler engines", no_args_is_help=True)

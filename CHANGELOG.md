@@ -174,6 +174,15 @@ All notable changes to decaf are documented here.
   JVM that ran out of heap counted as one attempt for each of its jars; now
   it counts once. A very large `--memory` value gave a traceback; now it
   gives an error.
+- A usage error of a command line without a command name, such as
+  `decaf -o out`, named the first token as the command:
+  `Usage: decaf -o [OPTIONS]` and `Try 'decaf -o -h' for help`. Now the
+  text names `decaf run`.
+- With `--format ndjson`, when the reader of the output stopped (for
+  example `| head`), a Maven warning of a fetch thread got the broken pipe,
+  and the error became the sources miss of its artifact. Now the fetch
+  thread drops that line, and its lookup continues. The main thread stops
+  the run at its next line, as before.
 
 ### Security
 
