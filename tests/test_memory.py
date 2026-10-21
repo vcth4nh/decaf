@@ -183,7 +183,7 @@ def test_heap_env_warnings():
         "_JAVA_OPTIONS": "-XX:MaxHeapSize=2g -XX:MaxRAM=8g",
         "PATH": "-Xmx1g",
     }
-    assert memory.heap_env_warnings(env) == [
+    assert memory.heap_env_warnings(env, 2048) == [
         "JAVA_TOOL_OPTIONS sets the heap (-Xmx4g); decaf's --memory heap takes precedence (--memory 0 keeps yours)",
         "JDK_JAVA_OPTIONS sets the heap (-XX:MaxRAMPercentage=50); decaf's --memory heap takes precedence"
         " (--memory 0 keeps yours)",
@@ -194,4 +194,41 @@ def test_heap_env_warnings():
 
 def test_heap_env_warnings_ignore_other_options():
     env = {"JAVA_TOOL_OPTIONS": "-Dfile.encoding=UTF-8", "_JAVA_OPTIONS": "-XX:MaxRAM=8g"}
-    assert memory.heap_env_warnings(env) == []
+    assert memory.heap_env_warnings(env, 2048) == []
+
+
+def test_heap_env_warnings_name_an_initial_heap_above_the_heap():
+    env = {"JAVA_TOOL_OPTIONS": "-Xms4g", "JDK_JAVA_OPTIONS": "-Xms1g", "_JAVA_OPTIONS": "-XX:InitialHeapSize=3g"}
+    assert memory.heap_env_warnings(env, 2048) == [
+        "JAVA_TOOL_OPTIONS sets the heap (-Xms4g); decaf's --memory heap takes precedence (--memory 0 keeps yours)",
+        "_JAVA_OPTIONS sets the heap (-XX:InitialHeapSize=3g) and overrides decaf's --memory shares:"
+        " the budget is not enforced",
+    ]
+
+
+_STDERR = "-XX:+DisplayVMOutputToStderr"
+
+
+@pytest.mark.parametrize(
+    "env, flags",
+    [
+        ({}, ["-Xmx2048m", _STDERR]),
+        ({"JAVA_TOOL_OPTIONS": "-Xms1g"}, ["-Xmx2048m", _STDERR]),  # below the heap: it stays
+        ({"JAVA_TOOL_OPTIONS": "-Dx=1 -Xms4g"}, ["-Xmx2048m", "-Xms2048m", _STDERR]),
+        ({"JDK_JAVA_OPTIONS": "-XX:InitialHeapSize=3221225472"}, ["-Xmx2048m", "-Xms2048m", _STDERR]),  # bytes
+        ({"JAVA_TOOL_OPTIONS": "-XX:MinHeapSize=2049m"}, ["-Xmx2048m", "-Xms2048m", _STDERR]),
+        ({"_JAVA_OPTIONS": "-Xms4g"}, []),  # it comes after the command line: no cap for this JVM
+        ({"_JAVA_OPTIONS": "-Xms2g"}, ["-Xmx2048m", _STDERR]),
+        ({"PATH": "-Xms4g"}, ["-Xmx2048m", _STDERR]),
+    ],
+)
+def test_heap_flags_keep_an_initial_heap_from_the_environment_below_the_cap(env, flags):
+    assert memory.heap_flags(2048, env) == flags
+
+
+def test_address_space_cap_is_half_the_limit(monkeypatch):
+    resource = pytest.importorskip("resource")
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (6_144_000_000, resource.RLIM_INFINITY))
+    assert memory.address_space_cap_mb() == 2929
+    monkeypatch.setattr(resource, "getrlimit", lambda which: (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+    assert memory.address_space_cap_mb() is None

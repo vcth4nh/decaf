@@ -40,8 +40,10 @@ All notable changes to decaf are documented here.
   would fall below 1 GiB). Each heap is its share less 300 MB plus 2% of the
   share for the JVM itself. With the default budget, no JVM gets more heap
   than the JVM default (25% of the RAM). Before, each JVM could take 25% of
-  the RAM, so four jobs could fill it. `--memory 0` restores the JVM default
-  (#98).
+  the RAM, so four jobs could fill it. An `-Xms` in `JAVA_TOOL_OPTIONS` or
+  `JDK_JAVA_OPTIONS` above a heap is lowered to it, and under `ulimit -v` each
+  heap is at most half the limit, so the JVMs still start. `--memory 0`
+  restores the JVM default (#98).
 
 ### Fixed
 

@@ -30,6 +30,11 @@ _UNIT_MB = {"k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024}
 
 _HEAP_FLAGS = ("-Xmx", "-XX:MaxHeapSize=", "-XX:MaxRAM=", "-XX:MaxRAMPercentage=", "-XX:MaxRAMFraction=")
 _OVERRIDE_FLAGS = ("-Xmx", "-XX:MaxHeapSize=")  # in _JAVA_OPTIONS these beat a command-line -Xmx
+_INITIAL_FLAGS = ("-Xms", "-XX:InitialHeapSize=", "-XX:MinHeapSize=")  # above the -Xmx, the JVM does not start
+_JVM_SIZE = re.compile(r"(\d+)([kmgt]?)", re.IGNORECASE)  # a JVM size: a bare number is bytes
+_JVM_UNIT_MB = {"": 1 / 2**20, "k": 1 / 1024, "m": 1, "g": 1024, "t": 1024 * 1024}
+_EARLY_VARS = ("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS")  # the JVM reads these before the command line
+_VM_ERRORS_TO_STDERR = "-XX:+DisplayVMOutputToStderr"  # start errors go to stdout, which decaf discards
 
 
 def parse_size(text: str) -> int:
@@ -128,6 +133,19 @@ def default_cap_mb() -> int | None:
     return int(ram * JVM_DEFAULT_SHARE) if ram else None
 
 
+def address_space_cap_mb() -> int | None:
+    """Half the address-space limit of this process (ulimit -v), as the JVM's own default; None = no limit.
+
+    A JVM with a larger -Xmx can fail at start; without an -Xmx, the JVM takes this heap itself.
+    """
+    if sys.platform == "win32":
+        return None
+    import resource
+
+    soft, _ = resource.getrlimit(resource.RLIMIT_AS)
+    return soft // 2 // 2**20 if soft > 0 and soft != resource.RLIM_INFINITY else None
+
+
 def heap_in(share_mb: int) -> int:
     """The -Xmx that keeps a JVM's RSS inside its share: the share less the overhead and the G1 tables."""
     return share_mb - OVERHEAD_MB - share_mb // G1_TABLES_DIV
@@ -188,17 +206,47 @@ def budget_line(mem: MemoryPlan, ram_unknown: bool = False) -> str:
     return text + ")"
 
 
-def heap_env_warnings(env: Mapping[str, str]) -> list[str]:
-    """Warnings for heap flags in the JVM option variables while decaf caps the heap."""
+def _initial_heap_mb(options: str) -> int:
+    """The largest initial heap that JVM options set, in MB; 0 when they set none."""
+    best = 0
+    for token in options.split():
+        for flag in _INITIAL_FLAGS:
+            m = _JVM_SIZE.fullmatch(token[len(flag) :]) if token.startswith(flag) else None
+            if m:
+                best = max(best, math.ceil(int(m.group(1)) * _JVM_UNIT_MB[m.group(2).lower()]))
+    return best
+
+
+def heap_flags(heap_mb: int, env: Mapping[str, str] | None = None) -> list[str]:
+    """The flags that cap one JVM's heap at heap_mb (#98) and still let it start.
+
+    An initial heap above heap_mb in JAVA_TOOL_OPTIONS or JDK_JAVA_OPTIONS loses to an -Xms of
+    heap_mb on the command line. One in _JAVA_OPTIONS beats the command line, so this JVM gets no
+    cap. The JVM writes its start errors to stdout, which decaf discards: the last flag sends
+    them to the stderr tail.
+    """
+    env = os.environ if env is None else env
+    if _initial_heap_mb(env.get("_JAVA_OPTIONS", "")) > heap_mb:
+        return []
+    early = max(_initial_heap_mb(env.get(var, "")) for var in _EARLY_VARS)
+    return [f"-Xmx{heap_mb}m", *([f"-Xms{heap_mb}m"] if early > heap_mb else []), _VM_ERRORS_TO_STDERR]
+
+
+def heap_env_warnings(env: Mapping[str, str], heap_mb: int) -> list[str]:
+    """Warnings for heap flags in the JVM option variables while decaf caps the heap at heap_mb or more."""
+
+    def heap_tokens(var: str, flags: tuple[str, ...]) -> list[str]:
+        return [t for t in env.get(var, "").split() if t.startswith(flags) or _initial_heap_mb(t) > heap_mb]
+
     lines = []
-    for var in ("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS"):
-        flags = [t for t in env.get(var, "").split() if t.startswith(_HEAP_FLAGS)]
+    for var in _EARLY_VARS:
+        flags = heap_tokens(var, _HEAP_FLAGS)
         if flags:
             lines.append(
                 f"{var} sets the heap ({' '.join(flags)}); "
                 "decaf's --memory heap takes precedence (--memory 0 keeps yours)"
             )
-    flags = [t for t in env.get("_JAVA_OPTIONS", "").split() if t.startswith(_OVERRIDE_FLAGS)]
+    flags = heap_tokens("_JAVA_OPTIONS", _OVERRIDE_FLAGS)
     if flags:
         lines.append(
             f"_JAVA_OPTIONS sets the heap ({' '.join(flags)}) and overrides decaf's "

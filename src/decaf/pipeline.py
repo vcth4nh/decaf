@@ -11,6 +11,7 @@ import threading
 import time
 import traceback
 import zipfile
+import zlib
 from collections import deque
 from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -440,17 +441,38 @@ def produced_stems(dest: Path) -> set[str]:
     }
 
 
+def _strip_container(rel: str) -> str:
+    """rel without its WEB-INF/classes/ or BOOT-INF/classes/ part."""
+    for marker in _CONTAINER_ROOTS:
+        idx = rel.find(marker)
+        if idx != -1:
+            return rel[idx + len(marker) :]
+    return rel
+
+
 def _held_key(rel: str) -> str:
     """A held file's key: normalize_java_rel's stem, but META-INF/versions/N/ stays (#96).
 
     Each version of a multi-release class is its own file, so neither may evict the other.
     """
-    for marker in _CONTAINER_ROOTS:
-        idx = rel.find(marker)
-        if idx != -1:
-            rel = rel[idx + len(marker) :]
-            break
+    rel = _strip_container(rel)
     return rel[: -len(PurePosixPath(rel).suffix)]
+
+
+def _copied_keys(source: Path) -> set[str]:
+    """The _held_keys of the classes that the source has at two places, e.g. the root and WEB-INF/classes."""
+    if source.is_dir():
+        names = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
+    else:
+        try:
+            with zipfile.ZipFile(source) as zf:
+                names = [n for n in zf.namelist() if n.endswith(".class")]
+        except (zipfile.BadZipFile, OSError):
+            return set()
+    places: dict[str, set[str]] = {}
+    for name in names:
+        places.setdefault(_held_key(name), set()).add(name)
+    return {key for key, found in places.items() if len(found) > 1}
 
 
 def _class_versions(source: Path) -> dict[str, int]:
@@ -474,8 +496,8 @@ def _class_versions(source: Path) -> dict[str, int]:
                     continue
                 with zf.open(name) as f:
                     keep(_held_key(name), check.class_major(f.read(8)))
-    except (zipfile.BadZipFile, OSError):
-        pass
+    except (zipfile.BadZipFile, OSError, zlib.error, NotImplementedError):
+        pass  # a damaged entry: the files after it get no version gate
     return out
 
 
@@ -495,8 +517,8 @@ def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
                 safe_extract_zip(path, dest, members=members)
                 root = dest / prefix.rstrip("/")
                 break
-    except (zipfile.BadZipFile, RuntimeError, OSError):
-        root = None
+    except (zipfile.BadZipFile, RuntimeError, OSError, zlib.error):
+        root = None  # kept as None: the other archives of the family do not try again
     with ctx.family_lock:
         return ctx.class_roots.setdefault(rel, root)
 
@@ -548,6 +570,11 @@ class _Held:
     written: set[str] = field(default_factory=set)  # keys of the files that went to the writer
     checks: dict[str, _HeldFile] = field(default_factory=dict)  # key -> the written file and its check result
     versions: dict[str, int] | None = None  # key -> class major version, read once
+    copies: set[str] | None = None  # the _copied_keys of the source, read once
+
+    def stems(self) -> set[str]:
+        """The class stems of the held files: a copy's key loses its container root (#107)."""
+        return {_strip_container(k) for k in self.files}
 
 
 def _check_trees(
@@ -599,6 +626,7 @@ def _check_trees(
 
 def _apply_hold(
     tree: Path,
+    source: Path,
     found: dict[str, stubs.Stub],
     results: dict[str, check.FileResult] | None,
     engine: str,
@@ -607,29 +635,36 @@ def _apply_hold(
 ) -> int:
     """Hold back the stubbed (#96) and flagged (#99) files of one output; returns the flagged count.
 
-    Files match by _held_key. A retry file replaces a held file only when it has no stub and
-    is not flagged; a held file without a stub (flagged only) also needs a retry file that
-    passes the check. The files of one output never replace or delete each other, and a
-    retry of a held class drops its copy of a variant that the writer already has.
+    Files match by _held_key; each copy of a class that the source has at two places keeps
+    its container root in its key, so no copy replaces or deletes the other. A retry file
+    replaces a held file only when it has no stub and is not flagged; a held file without a
+    stub (flagged only) also needs a retry file that passes the check, and after Ctrl-C no
+    retry file replaces a held file. The files of one output never replace or delete each
+    other, and a retry of a held class drops its copy of a variant that the writer already has.
     """
+    if held.copies is None:
+        held.copies = _copied_keys(source)
     flagged = 0
-    retried = set(held.files)  # held keys; a held class is retried when its key is an expected stem
+    retried = held.stems()  # held classes; one is retried when it is an expected stem
     held_now: set[str] = set()
     for p in sorted(tree.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
             continue
         rel = p.relative_to(tree).as_posix()
         key = _held_key(rel)
+        if key in held.copies:
+            key = rel[: -len(PurePosixPath(rel).suffix)]  # one key for each copy (#107)
         stub = found.get(rel)
         result = results.get(rel) if results is not None else None
         is_flagged = result is not None and result.status == "flagged"
         flagged += is_flagged
         if key in held_now:
-            continue  # a sibling with the same key (root and WEB-INF/classes): keep both
+            continue  # another file of this output with the same key: keep both
         if key in held.files:
-            if stub is None and not is_flagged and (
+            if stub is None and not is_flagged and not engines.PROCESSES.closed and (
                 held.files[key].stub is not None or result is None or result.passes
-            ):  # an unchecked file can replace a stub (a known loss), not a flagged file
+            ):  # an unchecked file can replace a stub (a known loss), not a flagged file; after
+                # Ctrl-C a retry file can be cut off, and the check did not run (#112)
                 old = held.files.pop(key)
                 (held.root / old.path).unlink(missing_ok=True)
                 held.written.add(key)
@@ -668,7 +703,7 @@ def _hold_output(
     found = stubs.scan(tree, engine)
     results = _check_trees([(tree, artifact, source, held)], ctx, heap_mb)
     flagged = _apply_hold(
-        tree, {s.path: s for s in found}, results[0] if results is not None else None, engine, held, ctx
+        tree, source, {s.path: s for s in found}, results[0] if results is not None else None, engine, held, ctx
     )
     return found, flagged
 
@@ -777,12 +812,12 @@ def _retry_missing_classes(
 ) -> None:
     """Retry missing and held classes down the chain; then write what stays held (#96, #99)."""
     heap = ctx.memory_plan.heap_mb(_decompile_weight(artifact))  # class retries run in their artifact's slot
-    missing = expected - produced - held.files.keys()
+    missing = expected - produced - held.stems()
     try:
         for name in chain:
             if engines.PROCESSES.closed:
                 break
-            retry = missing | (held.files.keys() & expected)  # a versioned key is no expected stem (#96)
+            retry = missing | (held.stems() & expected)  # a versioned key is no expected stem (#96)
             if not retry:
                 break
             retry_tree = _extract_failed_classes(source, retry, ctx)
@@ -805,7 +840,7 @@ def _retry_missing_classes(
                 report.java_files += java
                 report.collisions += collisions
                 produced |= produced_stems(dest)
-                missing = expected - produced - held.files.keys()
+                missing = expected - produced - held.stems()
     finally:
         _finish_held(artifact.rel, ctx, report, held)  # also when a retry raises: the held files are not lost
     report.missing_classes = len(missing)
@@ -1203,7 +1238,10 @@ def _decompile_batch(
         results = _check_trees([(trees[i], members[i][0], members[i][1], helds[i]) for i in order], ctx, heap)
         for n, i in enumerate(order):
             by_path = results[n] if results is not None else None
-            counts[i] = (list(found[i].values()), _apply_hold(trees[i], found[i], by_path, name, helds[i], ctx))
+            counts[i] = (
+                list(found[i].values()),
+                _apply_hold(trees[i], members[i][1], found[i], by_path, name, helds[i], ctx),
+            )
     except Exception:
         trees = {}  # split unusable; every member requeues and redoes solo (self-healing)
 
@@ -1388,6 +1426,9 @@ def run(
     if budget_mb is None:
         budget_mb = memory.default_budget_mb() or 0  # unknown RAM: no cap
         cap_mb = memory.default_cap_mb() or 0  # auto: no JVM gets more heap than the JVM default
+    as_cap = memory.address_space_cap_mb()
+    if as_cap:  # ulimit -v: a JVM with a larger -Xmx can fail at start (#114)
+        cap_mb = min(cap_mb, as_cap) if cap_mb else as_cap
     mem_plan = memory.plan(budget_mb, jobs, cap_mb)
     jobs = mem_plan.jobs  # fewer jobs when a share would fall below the heap floor (#98)
     cpu_budget = max(1, total_cpus // jobs)
@@ -1397,7 +1438,7 @@ def run(
         ram_unknown = settings.memory_mb is None and not budget_mb
         on_event("memory", "", memory.budget_line(mem_plan, ram_unknown=ram_unknown))
     if mem_plan.budget_mb and on_warn is not None:
-        for line in memory.heap_env_warnings(os.environ):
+        for line in memory.heap_env_warnings(os.environ, mem_plan.heap_mb(1)):
             on_warn(line)
     affinity_base: set[int] | None = None
     if hasattr(os, "sched_setaffinity"):
