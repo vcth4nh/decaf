@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import struct
 import sys
 import threading
 import time
@@ -2254,6 +2255,141 @@ def test_run_interrupt_during_a_retry_still_writes_the_held_file(fake_env, make_
     assert [s["engine"] for s in r.stubs] == ["vineflower"]
 
 
+def test_run_interrupt_keeps_the_held_file_over_an_unchecked_retry_file(fake_env, make_jar, tmp_path):
+    """A retry that Ctrl-C stops can leave a cut-off file with no stub: it replaces nothing (#112)."""
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    base = stub_engine({"vineflower": {"com/x/A"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = base(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "cfr":
+            (Path(dest) / "com/x/A.java").write_text("class A {\n    void m() {")  # cut off by the kill
+            engines.PROCESSES.kill_all()  # Ctrl-C lands while the retry runs
+        return res
+
+    try:
+        report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    finally:
+        engines.PROCESSES.reset()
+    r = report.artifacts[0]
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["engine"] for s in r.stubs] == ["vineflower"]
+
+
+def test_run_interrupt_keeps_a_flagged_file_over_an_unchecked_retry_file(fake_env, make_jar, tmp_path):
+    """After Ctrl-C the check does not run, so a retry file has no result: the flagged file stays (#112)."""
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = _flag_then_clean_engine(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "cfr":
+            engines.PROCESSES.kill_all()  # Ctrl-C lands while the retry runs
+        return res
+
+    try:
+        report = run(
+            Settings(input=input_dir, output=tmp_path / "out", maven=False),
+            runner=engine, checker=_marker_checker([]),
+        )
+    finally:
+        engines.PROCESSES.reset()
+    r = report.artifacts[0]
+    assert (tmp_path / "out/a.jar/com/x/A.java").read_text() == "// FLAG"
+    assert [f["engine"] for f in r.flagged] == ["vineflower"]
+
+
+def test_run_retry_of_one_copy_of_a_class_keeps_the_other_copy(fake_env, make_jar, tmp_path):
+    """A class at the root and in WEB-INF/classes: each copy is its own held file (#107)."""
+    input_dir = tmp_path / "in"
+    make_jar("app.war", {"com/w/W.class": b"r", "WEB-INF/classes/com/w/W.class": b"c"}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=stub_engine({"vineflower": {"com/w/W"}}),
+    )
+    r = report.artifacts[0]
+    out = tmp_path / "out/app.war"
+    assert (out / "com/w/W.java").read_text() == "// cfr\nclass X {}\n"
+    assert (out / "WEB-INF/classes/com/w/W.java").read_text() == "// vineflower\nclass X {}\n"
+    assert r.stubs == [] and not r.partial
+
+
+def test_run_lists_both_stubbed_copies_of_a_class(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    make_jar("app.war", {"com/w/W.class": b"r", "WEB-INF/classes/com/w/W.class": b"c"}, base=input_dir)
+    both = {"com/w/W", "WEB-INF/classes/com/w/W"}
+    every = {name: both for name in ("vineflower", "cfr", "fernflower", "procyon", "jd")}
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=stub_engine(every))
+    r = report.artifacts[0]
+    out = tmp_path / "out/app.war"
+    assert (out / "com/w/W.java").read_text() == STUB_TEXT["vineflower"]
+    assert (out / "WEB-INF/classes/com/w/W.java").read_text() == STUB_TEXT["vineflower"]
+    assert sorted(s["path"] for s in r.stubs) == ["WEB-INF/classes/com/w/W.java", "com/w/W.java"]
+
+
+def test_run_held_copies_in_two_container_roots_are_no_missing_class(fake_env, make_jar, tmp_path):
+    input_dir = tmp_path / "in"
+    entries = {"WEB-INF/classes/com/w/W.class": b"w", "BOOT-INF/classes/com/w/W.class": b"b"}
+    make_jar("app.war", entries, base=input_dir)
+    both = {"WEB-INF/classes/com/w/W", "BOOT-INF/classes/com/w/W"}
+    every = {name: both for name in ("vineflower", "cfr", "fernflower", "procyon", "jd")}
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=stub_engine(every))
+    r = report.artifacts[0]
+    assert r.missing_classes == 0 and len(r.stubs) == 2
+
+
+def test_run_package_path_retry_file_of_a_copied_class_is_the_root_copy(fake_env, make_jar, tmp_path):
+    """CFR writes the package path for both copies: that file cannot replace the WEB-INF copy (#107)."""
+    input_dir = tmp_path / "in"
+    make_jar("app.war", {"com/w/W.class": b"r", "WEB-INF/classes/com/w/W.class": b"c"}, base=input_dir)
+    base = stub_engine({"vineflower": {"WEB-INF/classes/com/w/W"}})
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if spec.name == "vineflower":
+            return base(spec, jar_path, target, dest, timeout, java=java)
+        out = Path(dest) / "com/w/W.java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f"// {spec.name}\nclass W {{}}\n")
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
+    r = report.artifacts[0]
+    out = tmp_path / "out/app.war"
+    assert (out / "com/w/W.java").read_text() == "// vineflower\nclass X {}\n"
+    assert (out / "WEB-INF/classes/com/w/W.java").read_text() == STUB_TEXT["vineflower"]
+    assert [s["path"] for s in r.stubs] == ["WEB-INF/classes/com/w/W.java"]
+
+
+def _damage_entry(archive: Path, name: str) -> None:
+    """Make one deflated entry unreadable: its data starts with an invalid block type."""
+    with zipfile.ZipFile(archive) as zf:
+        offset = zf.getinfo(name).header_offset
+    with open(archive, "r+b") as f:
+        f.seek(offset + 26)
+        name_len, extra_len = struct.unpack("<HH", f.read(4))
+        f.seek(offset + 30 + name_len + extra_len)
+        f.write(b"\xff")
+
+
+def test_run_damaged_class_entry_of_a_war_fails_none_of_its_libraries(fake_env, make_jar, tmp_path):
+    """The check reads class files of the war; an unreadable entry costs only the check (#109)."""
+    input_dir = tmp_path / "in"
+    dep = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    war = input_dir / "app.war"
+    war.parent.mkdir(parents=True)
+    with zipfile.ZipFile(war, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("WEB-INF/classes/com/w/W.class", b"\xca\xfe\xba\xbe" + bytes(200))
+        zf.writestr("WEB-INF/lib/dep.jar", dep.read_bytes())
+    _damage_entry(war, "WEB-INF/classes/com/w/W.class")
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False),
+        runner=perfect_engine, checker=_marker_checker([]),
+    )
+    outcomes = {a.rel: a.outcome for a in report.artifacts}
+    assert outcomes == {"app.war": "ok", "app.war!/WEB-INF/lib/dep.jar": "ok"}
+
+
 def test_run_stubbed_inner_class_file_is_written_without_a_retry(fake_env, make_jar, tmp_path):
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"com/x/A.class": b"a", "com/x/A$1.class": b"i"}, base=input_dir)
@@ -2428,6 +2564,26 @@ def test_run_auto_budget_uses_the_ram_and_caps_each_jvm(fake_env, make_jar, tmp_
     s = report.settings
     assert (s["memory_budget_mb"], s["heap_mb"], s["whale_heap_mb"], s["heap_cap_mb"]) == (10000, 2150, 3125, 3125)
     assert seen == [3125]  # the whale gets the cap, not its 4600 MB share: the JVM default of 1.10.0
+
+
+def test_run_address_space_limit_caps_each_heap(fake_env, make_jar, tmp_path, monkeypatch):
+    """Under ulimit -v, a JVM with an -Xmx above half the limit does not start (#114)."""
+    from decaf import memory
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    monkeypatch.setattr(memory, "address_space_cap_mb", lambda: 1000)
+    seen: list[int | None] = []
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, heap_mb=None):
+        seen.append(heap_mb)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1, memory_mb=8000),
+        runner=engine,
+    )
+    assert seen == [1000] and report.settings["heap_cap_mb"] == 1000
 
 
 def test_run_unknown_ram_means_no_cap(fake_env, make_jar, tmp_path, monkeypatch):

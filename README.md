@@ -127,7 +127,10 @@ and the heap of each engine attempt, the ending shows the largest peak and
 counts the attempts that ran out of heap, and `decaf report out --memory`
 lists the ten largest peaks. A heap flag in `JAVA_TOOL_OPTIONS` or
 `JDK_JAVA_OPTIONS` loses to decaf's `-Xmx`; one in `_JAVA_OPTIONS` overrides
-it, and decaf warns that the budget is then not enforced.
+it, and decaf warns that the budget is then not enforced. The same applies to
+an initial heap (`-Xms`) above a JVM's heap: decaf lowers it to the heap, or,
+from `_JAVA_OPTIONS`, gives that JVM no cap. Under an address-space limit
+(`ulimit -v`), each heap is at most half the limit, as the JVM's own default.
 
 ### Inspecting a report
 

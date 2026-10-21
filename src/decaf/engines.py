@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 import platformdirs
 
+from . import memory
 from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, safe_extract_zip
 
 JAVA_MIN = 11
@@ -381,7 +382,7 @@ def build_command(
     # engine's own thread pools (e.g. vineflower --thread-count), GC, and JIT.
     prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
     if heap_mb is not None:
-        prefix.append(f"-Xmx{heap_mb}m")  # this JVM's share of the memory budget (#98)
+        prefix += memory.heap_flags(heap_mb)  # this JVM's share of the memory budget (#98)
     if cds_dir is not None:
         prefix += [
             "-XX:+AutoCreateSharedArchive",
@@ -420,7 +421,7 @@ def build_batch_command(
         raise EngineError(f"engine {spec.name!r} cannot batch")
     prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
     if heap_mb is not None:
-        prefix.append(f"-Xmx{heap_mb}m")  # this JVM's share of the memory budget (#98)
+        prefix += memory.heap_flags(heap_mb)  # this JVM's share of the memory budget (#98)
     if cds_dir is not None:
         prefix += [
             "-XX:+AutoCreateSharedArchive",

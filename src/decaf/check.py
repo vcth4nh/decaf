@@ -11,7 +11,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import engines
+from . import engines, memory
 
 KINDS = ("parse", "name", "flow", "type", "other")
 RETRY_KINDS = frozenset({"parse", "name", "flow"})
@@ -277,7 +277,7 @@ def build_command(
     """The one place that builds the checker command."""
     cmd = [java, f"-XX:ActiveProcessorCount={threads}"]
     if heap_mb is not None:
-        cmd.append(f"-Xmx{heap_mb}m")  # the heap share of the engine JVM in the same slot (#98)
+        cmd += memory.heap_flags(heap_mb)  # the heap share of the engine JVM in the same slot (#98)
     if cds_dir is not None:
         cmd += [
             "-XX:+AutoCreateSharedArchive",

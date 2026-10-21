@@ -235,7 +235,10 @@ def test_build_command_heap_flag(tmp_path: Path):
     cmd = check.build_command(
         "java", inst, tmp_path / "j", tmp_path / "r", threads=3, cds_dir=tmp_path / "cds", heap_mb=2048
     )
-    assert cmd[:4] == ["java", "-XX:ActiveProcessorCount=3", "-Xmx2048m", "-XX:+AutoCreateSharedArchive"]
+    assert cmd[:5] == [
+        "java", "-XX:ActiveProcessorCount=3", "-Xmx2048m", "-XX:+DisplayVMOutputToStderr",
+        "-XX:+AutoCreateSharedArchive",
+    ]
 
 
 def test_run_check_maps_results_and_missing_lines(tmp_path: Path, monkeypatch):
