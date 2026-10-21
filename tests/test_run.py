@@ -442,6 +442,62 @@ def test_run_stops_when_the_java_version_is_unknown(monkeypatch, make_jar, tmp_p
         run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
 
 
+_PINS = {name: {"version": "9.9", "url": f"https://x.test/{name}.jar", "sha256": "c" * 64} for name in ("vineflower", "cfr")}
+
+
+def test_run_gives_the_runners_the_pinned_spec(fake_env, make_jar, tmp_path: Path):
+    """#113: the runners got the built-in spec, so a pinned engine got the CDS archive name of the built-in version."""
+    seen: set[tuple[str, str]] = set()
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        seen.add((spec.name, spec.version))
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name == "vineflower":
+            (Path(dest) / "com/x/B.java").unlink()  # B goes missing: a cfr class retry follows
+            res.java_files -= 1
+        return res
+
+    make_jar("app.jar", {"com/x/A.class": b"a", "com/x/B.class": b"b"}, base=tmp_path / "in")
+    run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, engine_overrides=_PINS), runner=engine)
+    assert seen == {("vineflower", "9.9"), ("cfr", "9.9")}
+
+
+def test_run_gives_the_batch_runner_the_pinned_spec(fake_env, make_jar, tmp_path: Path):
+    """The smalls wait behind the gated big jar and form one batch, as in test_run_batches_ready_smalls_into_one_jvm."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {**{f"com/big/C{i}.class": b"x" for i in range(900)}, "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()},
+        base=input_dir,
+    )
+    all_queued = threading.Event()
+    queued = [0]
+    seen: set[tuple[str, str]] = set()
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        seen.add((spec.name, spec.version))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1, engine_overrides=_PINS),
+        runner=gated_solo, batch_runner=batch, on_event=on_event,
+    )
+    assert seen == {("vineflower", "9.9")}
+
+
 def test_run_counts_failed_artifacts(fake_env, make_jar, tmp_path: Path):
     input_dir = tmp_path / "in"
     make_jar("good.jar", {"com/x/A.class": b"x"}, base=input_dir)
@@ -1409,6 +1465,33 @@ def test_run_passes_cds_dir_to_default_runner(monkeypatch, make_jar, tmp_path):
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
     run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, check=False))
     assert seen["cds"] == tmp_path / "cache" / "engines"
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="a read-only folder needs POSIX modes and no root")
+def test_run_turns_cds_off_when_the_engine_cache_is_read_only(monkeypatch, make_jar, tmp_path):
+    """#113: a JVM that cannot write its CDS archive exits with code 1 after its work, so each batch ran two times."""
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None, on_download=None: Path(f"/fake/{spec.name}.jar"),
+    )
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    seen = {}
+
+    def spy(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, cds_dir=None):
+        seen["cds"] = cds_dir
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    monkeypatch.setattr(engines, "run_engine", spy)
+    make_jar("a.jar", {"com/x/A.class": b"x"}, base=tmp_path / "in")
+    cache = tmp_path / "cache/engines"
+    cache.mkdir(parents=True)
+    cache.chmod(0o555)
+    try:
+        run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, check=False))
+    finally:
+        cache.chmod(0o755)
+    assert seen["cds"] is None
 
 
 def test_run_no_cds_below_java_19(monkeypatch, make_jar, tmp_path):

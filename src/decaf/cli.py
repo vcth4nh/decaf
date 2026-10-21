@@ -22,7 +22,7 @@ from rich.table import Column, Table
 from rich.text import Text
 from typer.core import TyperGroup
 
-from . import __version__, engines, memory
+from . import __version__, check, engines, memory
 from . import report_view, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
 from .pipeline import ArtifactReport, DecafError, Settings, run
@@ -166,6 +166,8 @@ def engines_fetch(
 
 
 def _tree_size(path: Path) -> tuple[int, int]:
+    if path.is_symlink():
+        return 1, path.lstat().st_size  # the link, not its target (#113)
     files = [p for p in path.rglob("*") if p.is_file()] if path.is_dir() else [path]
     return len(files), sum(p.stat().st_size for p in files)
 
@@ -181,14 +183,16 @@ def engines_clean(
     if not cache.is_dir():
         console.print("nothing to clean")
         return
-    keep = {f"{s.name}-{s.version}.jar" for s in specs.values()}
-    victims = [p for p in cache.iterdir() if not (stale and p.name in keep)]
+    # The CDS archives of the active pins and of the current checker are no superseded files (#113).
+    keep = {f"{s.name}-{s.version}{ext}" for s in specs.values() for ext in (".jar", ".jsa")}
+    checker = f"checker-{check.source_digest()}-"
+    victims = [p for p in cache.iterdir() if not (stale and (p.name in keep or p.name.startswith(checker)))]
     files = size = 0
     for p in victims:
         n, s = _tree_size(p)
         files += n
         size += s
-        shutil.rmtree(p) if p.is_dir() else p.unlink()
+        shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
     if not stale:
         shutil.rmtree(cache, ignore_errors=True)
     console.print(f"removed {files} files ({size / 1e6:.1f} MB)")

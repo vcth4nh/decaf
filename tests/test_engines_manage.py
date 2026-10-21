@@ -1,6 +1,7 @@
 import hashlib
 import io
 import re
+import sys
 import zipfile
 from pathlib import Path
 
@@ -221,6 +222,43 @@ def test_engines_clean_stale_keeps_override_version(tmp_path: Path, monkeypatch)
     result = runner.invoke(app, ["engines", "clean", "--stale", "--config", str(cfgf)])
     assert result.exit_code == 0
     assert sorted(p.name for p in cache.iterdir()) == ["cfr-9.9.jar"]
+
+
+def test_engines_clean_stale_keeps_the_cds_archives_of_the_active_pins(tmp_path: Path, monkeypatch):
+    """#113: --stale deleted the .jsa files of the active pins and of the current checker."""
+    import decaf.check as check
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    cache = tmp_path / "engines"
+    cache.mkdir(parents=True)
+    cfr = f"cfr-{ENGINES['cfr'].version}"
+    keep = [f"{cfr}.jar", f"{cfr}.jsa", f"checker-{check.source_digest()}-21.jsa"]
+    for name in [*keep, "cfr-0.001.jsa", "checker-000000000000-21.jsa"]:
+        (cache / name).write_bytes(b"x")
+    result = runner.invoke(app, ["engines", "clean", "--stale"])
+    assert result.exit_code == 0
+    assert sorted(p.name for p in cache.iterdir()) == sorted(keep)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlink needs extra rights on Windows")
+@pytest.mark.parametrize("args", [["--stale"], []])
+def test_engines_clean_removes_a_symlink_but_not_its_target(tmp_path: Path, monkeypatch, args):
+    """#113: a symlink to a folder in the cache gave a traceback."""
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    cache = tmp_path / "cache/engines"
+    cache.mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "keep.txt").write_bytes(b"x")
+    (target / "also.txt").write_bytes(b"y")  # the count is of the link, not of these files
+    (cache / "jd-extract").symlink_to(target, target_is_directory=True)
+    result = runner.invoke(app, ["engines", "clean", *args])
+    assert result.exit_code == 0, result.output
+    assert not (cache / "jd-extract").is_symlink() and (target / "keep.txt").is_file()
+    assert "removed 1 files" in ANSI.sub("", result.output)
 
 
 def test_engines_clean_removes_everything(tmp_path: Path, monkeypatch):

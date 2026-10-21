@@ -593,14 +593,51 @@ def test_run_engine_forwards_heap(tmp_path: Path, monkeypatch):
     assert seen["heap"] == 1700
 
 
+def _above_own_rss_mb() -> int:
+    """MB for a test child to touch: on Linux, a forked child starts with the pages of this process (#113)."""
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // 2**20 + 64
+    except OSError:
+        return 64
+
+
 def test_run_engine_measures_the_peak_rss(tmp_path: Path, monkeypatch):
-    script = "b = bytearray(64 * 1024 * 1024)\nfor i in range(0, len(b), 4096):\n    b[i] = 1\n"
+    mb = _above_own_rss_mb()
+    script = f"b = bytearray({mb} * 1024 * 1024)\nfor i in range(0, len(b), 4096):\n    b[i] = 1\n"
     # On Windows, the python.exe of a venv is a launcher that starts the interpreter as a child
     # process, and decaf measures the process that it starts: start the interpreter itself.
     monkeypatch.setattr(engines, "build_command", _fake_build(script, python=sys._base_executable))
     res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
     assert res.returncode == 0
-    assert res.peak_rss_mb is not None and 64 <= res.peak_rss_mb < 1024  # MB: a wrong ru_maxrss unit gives 65536+
+    assert res.peak_rss_mb is not None and mb <= res.peak_rss_mb < mb + 1024  # a wrong ru_maxrss unit gives ×1024
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the floor is for the fork of Linux")
+def test_a_child_below_the_rss_of_decaf_has_no_peak(tmp_path: Path, monkeypatch):
+    """#113: ru_maxrss of a forked child keeps the pages of decaf from before the exec."""
+    monkeypatch.setattr(engines, "build_command", _fake_build("pass", python=sys._base_executable))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
+    assert res.returncode == 0 and res.peak_rss_mb is None
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the floor is for the fork of Linux")
+def test_the_floor_allows_for_growth_of_decaf_before_the_fork(tmp_path: Path, monkeypatch):
+    """Other threads of decaf can allocate between the read of its RSS and the fork."""
+    rss = engines._own_rss()
+    monkeypatch.setattr(engines, "_own_rss", lambda: rss - (12 << 20))  # decaf grew by 12 MB
+    monkeypatch.setattr(engines, "build_command", _fake_build("pass", python=sys._base_executable))
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=60)
+    assert res.returncode == 0 and res.peak_rss_mb is None
+
+
+@pytest.mark.parametrize("text", ["Java heap space", "GC overhead limit exceeded"])
+def test_run_engine_flags_the_short_out_of_heap_text(tmp_path: Path, monkeypatch, text: str):
+    """#113: on a small heap, Procyon prints only the message of the OutOfMemoryError and exits with 255."""
+    script = f"import sys\nsys.stderr.write({text!r} + '\\n')\nsys.exit(255)\n"
+    monkeypatch.setattr(engines, "build_command", _fake_build(script))
+    res = run_engine(ENGINES["procyon"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=30)
+    assert res.returncode == 255 and res.out_of_memory is True
 
 
 def test_run_engine_keeps_the_exit_code(tmp_path: Path, monkeypatch):
@@ -622,9 +659,11 @@ def test_run_engine_flags_out_of_memory_in_the_full_stderr(tmp_path: Path, monke
 
 
 def test_run_engine_timeout_keeps_a_peak(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(engines, "build_command", _fake_build("import time; time.sleep(60)"))
+    mb = _above_own_rss_mb()
+    script = f"b = bytearray({mb} * 1024 * 1024)\nfor i in range(0, len(b), 4096):\n    b[i] = 1\nimport time\ntime.sleep(60)\n"
+    monkeypatch.setattr(engines, "build_command", _fake_build(script, python=sys._base_executable))
     start = time.monotonic()
-    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=1)
+    res = run_engine(ENGINES["cfr"], JAR, tmp_path / "in.jar", tmp_path / "out", timeout=3)
     assert res.timed_out is True
     assert isinstance(res.peak_rss_mb, int)
     assert time.monotonic() - start < 10
