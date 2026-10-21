@@ -463,17 +463,37 @@ def test_run_gives_the_runners_the_pinned_spec(fake_env, make_jar, tmp_path: Pat
 
 
 def test_run_gives_the_batch_runner_the_pinned_spec(fake_env, make_jar, tmp_path: Path):
+    """The smalls wait behind the gated big jar and form one batch, as in test_run_batches_ready_smalls_into_one_jvm."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {**{f"com/big/C{i}.class": b"x" for i in range(900)}, "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()},
+        base=input_dir,
+    )
+    all_queued = threading.Event()
+    queued = [0]
     seen: set[tuple[str, str]] = set()
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
 
     def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
         seen.add((spec.name, spec.version))
         return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
 
-    make_jar("a.jar", {"com/a/A.class": b"a"}, base=tmp_path / "in")
-    make_jar("b.jar", {"com/b/B.class": b"b"}, base=tmp_path / "in")
     run(
-        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, engine_overrides=_PINS, jobs=1, cpus=1),
-        runner=perfect_engine, batch_runner=batch,
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1, engine_overrides=_PINS),
+        runner=gated_solo, batch_runner=batch, on_event=on_event,
     )
     assert seen == {("vineflower", "9.9")}
 
