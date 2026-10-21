@@ -183,6 +183,13 @@ All notable changes to decaf are documented here.
   and the error became the sources miss of its artifact. Now the fetch
   thread drops that line, and its lookup continues. The main thread stops
   the run at its next line, as before.
+- An archive with two entries of one name, for example two
+  `WEB-INF/lib/a.jar` from Ant `duplicate="add"`, gave two equal rows for
+  one file. The scan line counted two nested archives, and decaf
+  decompiled the file two times. A damaged first entry
+  also failed the name when the last entry was good. Now the name gets one
+  row for the last entry, which Java reads, and a warning names the entry
+  when the entries are not the same.
 
 ### Security
 

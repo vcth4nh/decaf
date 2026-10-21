@@ -114,7 +114,7 @@ def scan_counted(root: Path) -> tuple[list[Artifact], dict[str, int]]:
             return Artifact(path, rel, ArtifactKind.CORRUPT)
         kind = _classify_names(names)
         if kind in (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR, ArtifactKind.RESOURCE_ONLY):
-            counts[rel] = len(find_nested_archives(names))
+            counts[rel] = len(set(find_nested_archives(names)))  # two entries of one name: one artifact
         return Artifact(path, rel, kind, _count_classes(names))
 
     if root.is_file():

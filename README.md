@@ -101,7 +101,9 @@ validate them, and colliding with the flags decaf manages itself (like CFR's
 
 Archive nesting is capped by `--max-depth` (default 1: jars inside a war or
 fat jar are processed, but not jars inside those). Deeper archives are listed
-in the report as skipped. Folder recursion is never limited.
+in the report as skipped. Folder recursion is never limited. When an
+archive has two entries with one name, decaf uses the last one, as Java
+does, and warns when the two are not the same.
 
 CPU use is budgeted. On Linux the budget is enforced with CPU affinity:
 decaf pins itself to the first `cpus` cores and every engine JVM inherits

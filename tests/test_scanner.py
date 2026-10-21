@@ -158,6 +158,22 @@ def test_scan_counted_resource_only_war_counted(make_jar, tmp_path: Path):
     assert counts == {"only-libs.war": 1}
 
 
+def test_scan_counted_counts_one_nested_archive_for_two_entries_of_one_name(make_jar, tmp_path: Path):
+    """Review low item: the pipeline gives two entries of one name one row, so the scan counts one."""
+    import warnings
+
+    inner = make_jar("dep.jar", {"com/d/D.class": b"d"}).read_bytes()
+    (tmp_path / "in").mkdir()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
+        with zipfile.ZipFile(tmp_path / "in/app.war", "w") as zf:
+            zf.writestr("WEB-INF/classes/W.class", b"w")
+            zf.writestr("WEB-INF/lib/dep.jar", inner)
+            zf.writestr("WEB-INF/lib/dep.jar", inner)
+    _, counts = scan_counted(tmp_path / "in")
+    assert counts == {"app.war": 1}
+
+
 def test_scan_counted_counts_sources_and_skips_corrupt(make_jar, tmp_path: Path):
     make_jar(
         "lib-sources.jar",
