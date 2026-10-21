@@ -51,7 +51,8 @@ def test_fold_joins_each_pair_that_the_file_system_joins(tmp_path: Path):
         d.mkdir()
         (d / f"x{a}").write_bytes(b"")
         rows.append((a, b, (d / f"x{b}").exists(), casefs.fold(a) == casefs.fold(b)))
-    warnings.warn(f"file system joins: {[(a, b) for a, b, joined, _ in rows if joined]}")
+    # CI 2026-10-21: APFS (macOS runner) joins all pairs but the three with \u0131 and \u0130, as NFD and
+    # full case folding do; NTFS (Windows runner) joins only A/a and the fullwidth A/a.
     assert [(a, b) for a, b, joined, folded in rows if joined and not folded] == [], rows
 
 
