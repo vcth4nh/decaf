@@ -244,6 +244,15 @@ no upstream sources: decaf decompiles it.
 | [Fernflower](https://github.com/JetBrains/intellij-community/tree/master/plugins/java-decompiler/engine) (JetBrains `java-decompiler-engine`) | 253.33813.25 | 21 | Apache-2.0 |
 | [JD-CLI](https://github.com/intoolswetrust/jd-cli) | 1.2.0 | 11 | GPL-3.0 |
 
+A multi-release jar can have more versions of a class under
+`META-INF/versions/N/`. Vineflower, Fernflower, and Procyon write only the
+base version of such a class, and decaf does not count the other versions as
+missing. CFR and JD also write the other versions: use `--engine cfr` or
+`--engine jd` to get them. With `--merge`, the merged tree keeps the base
+version, and the report lists each other version as a collision. A class that
+has no base version still goes to the output: when the first engine does not
+write it, the next engine decompiles the class of its lowest version folder.
+
 ### Managing engines
 
 ```bash

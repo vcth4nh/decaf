@@ -102,6 +102,17 @@ All notable changes to decaf are documented here.
   under its second name (`repo.maven.apache.org`) counted as one more
   repository, so decaf asked Central two times for each artifact. The README
   now also gives the config path for macOS and Windows (#115).
+- A class retry could write the wrong copy of a class (#107). The retry of
+  a class decompiles its inner classes again. The copy of such an inner
+  class could then replace the file of an earlier engine, and in merge mode
+  this gave a collision with itself. Now the file of the earlier engine
+  stays. A retry tree held a class and its `META-INF/versions/N` twin
+  together. Then Fernflower wrote the versioned body as the base class, and
+  Vineflower wrote no base class. Now a retry tree holds one version of
+  each class: the base class, or the class of the lowest version folder
+  when no base class exists. With `--merge`, a versioned twin that CFR or
+  JD writes replaced its base class. Now the base class wins. The README
+  now says which engines write the versioned classes.
 
 ### Security
 

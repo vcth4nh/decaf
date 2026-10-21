@@ -54,6 +54,15 @@ def test_merge_collision_lowest_key_wins_either_order(tmp_path: Path):
         assert (root / "src/com/x/A.java").read_text() == "// from a/x.jar\n"
 
 
+def test_merge_keeps_the_base_version_of_a_multi_release_class(tmp_path: Path):
+    """#107: CFR and JD also write META-INF/versions/N twins, and a merged tree has room for one."""
+    w = MergeWriter(tmp_path / "src")
+    t = tree(tmp_path / "t", {"META-INF/versions/11/com/x/A.java": "// v11", "com/x/A.java": "// base"})
+    java, collisions = w.add_tree(t, "mr.jar")
+    assert (tmp_path / "src/com/x/A.java").read_text() == "// base"
+    assert java == 2 and [c["path"] for c in collisions] == ["com/x/A.java"]
+
+
 def test_merge_skips_resources_and_normalizes(tmp_path: Path):
     w = MergeWriter(tmp_path / "src")
     t = tree(
