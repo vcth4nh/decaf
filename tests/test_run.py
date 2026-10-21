@@ -5,6 +5,7 @@ import struct
 import sys
 import threading
 import time
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -2755,6 +2756,64 @@ def test_run_damaged_nested_jar_fails_only_that_jar(fake_env, make_jar, make_dam
         "app.war!/WEB-INF/lib/bad.jar": ("failed", "unreadable archive"),
         "app.war!/WEB-INF/lib/good.jar": ("ok", None),
     }
+
+
+def _war_with_two_copies(path: Path, first: bytes, last: bytes) -> Path:
+    """A war with two entries WEB-INF/lib/a.jar, as Ant duplicate="add" writes them."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("WEB-INF/classes/com/w/W.class", b"w")
+            zf.writestr("WEB-INF/lib/a.jar", first)
+            zf.writestr("WEB-INF/lib/a.jar", last)
+    return path
+
+
+def test_run_gives_one_row_for_two_same_entries_of_one_name(fake_env, make_jar, tmp_path):
+    """Review low item: two entries of one name gave two equal rows for one file."""
+    lib = make_jar("a.jar", {"com/a/A.class": b"a"}).read_bytes()
+    _war_with_two_copies(tmp_path / "in/app.war", lib, lib)
+    warns: list[str] = []
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+                 runner=perfect_engine, on_warn=warns.append)
+    assert [a.rel for a in report.artifacts] == ["app.war", "app.war!/WEB-INF/lib/a.jar"]
+    assert report.totals["ok"] == 2
+    assert not [w for w in warns if "a.jar" in w]  # the copies are the same: nothing is lost
+
+
+def test_run_warns_when_two_entries_of_one_name_differ(fake_env, make_jar, tmp_path):
+    """Review low item, ask-box ruling "One row + warning": decaf decompiles the last copy,
+    as Java reads it, and a warning names the entry when the copies differ."""
+    first = make_jar("first/a.jar", {"com/a/A.class": b"a"}).read_bytes()
+    last = make_jar("last/a.jar", {"com/b/B.class": b"b"}).read_bytes()
+    _war_with_two_copies(tmp_path / "in/app.war", first, last)
+    warns: list[str] = []
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+                 runner=perfect_engine, on_warn=warns.append)
+    assert [a.rel for a in report.artifacts] == ["app.war", "app.war!/WEB-INF/lib/a.jar"]
+    assert (tmp_path / "out/app.war/WEB-INF/lib/a.jar/com/b/B.java").is_file()
+    assert not (tmp_path / "out/app.war/WEB-INF/lib/a.jar/com/a/A.java").exists()
+    assert [w for w in warns if "a.jar" in w] == [
+        "app.war!/WEB-INF/lib/a.jar: 2 entries with this name are not the same; decaf uses the last one, as Java does"
+    ]
+
+
+def test_run_uses_the_last_copy_when_an_earlier_copy_is_damaged(fake_env, make_jar, tmp_path):
+    """Review low item: a damaged first copy failed the name, also when the last copy was good."""
+    lib = make_jar("a.jar", {"com/a/A.class": b"a"}).read_bytes()
+    war = _war_with_two_copies(tmp_path / "in/app.war", lib, lib)
+    with zipfile.ZipFile(war) as zf:
+        offset = next(i.header_offset for i in zf.infolist() if i.filename == "WEB-INF/lib/a.jar")
+    with open(war, "r+b") as f:  # an invalid deflate block at the start of the first copy
+        f.seek(offset + 26)
+        name_len, extra_len = struct.unpack("<HH", f.read(4))
+        f.seek(offset + 30 + name_len + extra_len)
+        f.write(b"\xff")
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=perfect_engine)
+    outcomes = {a.rel: a.outcome for a in report.artifacts}
+    assert outcomes == {"app.war": "ok", "app.war!/WEB-INF/lib/a.jar": "ok"}
+    assert (tmp_path / "out/app.war/WEB-INF/lib/a.jar/com/a/A.java").is_file()
 
 
 def test_run_stubbed_inner_class_file_is_written_without_a_retry(fake_env, make_jar, tmp_path):

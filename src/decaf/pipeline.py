@@ -401,6 +401,7 @@ class Ctx:
     cds_dir: Path | None = None  # CDS archive directory for Java 19+
     on_stderr: Callable[[str], None] | None = None  # live engine-stderr sink (-v)
     on_event: Callable[[str, str, str], None] | None = None  # live progress events (scan/engines/fetch/queued/decompile/progress)
+    on_warn: Callable[[str], None] | None = None  # run warnings, also from the fetch threads
     case_insensitive: str | None = None  # roots that ignore case ("output directory", ...); None = case-sensitive run (#93)
     checker: Callable | None = None  # compile check (#99): check.run_check with bound args; None = off
     java_major: int = 0  # limits the class versions that the check accepts; 0 = no limit
@@ -1080,11 +1081,19 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
 def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     try:
         with zipfile.ZipFile(artifact.path) as zf:
-            names = find_nested_archives(zf.namelist())
+            infos = zf.infolist()
     except (zipfile.BadZipFile, OSError):
         return []
+    found = find_nested_archives(i.filename for i in infos)
+    names = list(dict.fromkeys(found))  # two entries of one name: one row, and the last one wins, as in Java
     if not names:
         return []
+    if len(names) < len(found) and ctx.on_warn is not None:
+        for name in names:
+            copies = [i for i in infos if i.filename == name]
+            if len({(i.CRC, i.file_size) for i in copies}) > 1:  # an earlier copy gets no output
+                ctx.on_warn(f"{artifact.rel}!/{name}: {len(copies)} entries with this name are not the same;"
+                            " decaf uses the last one, as Java does")
     if artifact.rel.count("!/") >= ctx.settings.max_depth:
         return [
             Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.BEYOND_DEPTH)
@@ -1108,11 +1117,11 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     unreadable = set(failed)
     for name in names:
         p = extract_dir / name
-        if name in unreadable:  # a damaged entry fails this archive, not its parent (#109)
-            nested.append(Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.CORRUPT))
-        elif p.is_file():
+        if p.is_file():  # also when an earlier entry of the name is damaged: the last one is on disk
             kind, classes = classify_counted(p)
             nested.append(Artifact(p, f"{artifact.rel}!/{name}", kind, classes))
+        elif name in unreadable:  # a damaged entry fails this archive, not its parent (#109)
+            nested.append(Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.CORRUPT))
     with ctx.family_lock:
         ctx.families[artifact.rel] = (
             artifact.path,
@@ -1727,6 +1736,7 @@ def run(
             cds_dir=cds_dir,
             on_stderr=on_stderr,
             on_event=on_event,
+            on_warn=on_warn,
             case_insensitive=case_label,
             checker=checker,
             java_major=java_major,
