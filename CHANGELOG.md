@@ -14,6 +14,16 @@ All notable changes to decaf are documented here.
   `$Gson$Types` and inner classes without their outer class. CFR and Procyon
   now also decompile these classes in class folders.
 
+### Security
+
+- Maven coordinates are now checked before decaf uses them in a cache file
+  name or a URL. Many coordinates come from the input archive
+  (`pom.properties`, the manifest, the file name). Before, such text could
+  make decaf write a sources jar outside its cache. Now a group, artifact, or
+  version with a character that Maven coordinates do not use (for example a
+  path separator or a control character) is not used, and the lookup goes on
+  as for an archive without these coordinates.
+
 ## [1.11.0] - 2026-10-21
 
 ### Added

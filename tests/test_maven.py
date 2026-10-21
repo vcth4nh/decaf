@@ -195,6 +195,15 @@ def test_gav_multi_pom_uses_filename_match(make_jar):
     assert gav_from_pom_properties(fat) is None
 
 
+def test_gav_from_pom_properties_needs_maven_coordinates(make_jar):
+    for pom in (
+        "groupId=../../x\nartifactId=lib\nversion=1.2\n",
+        "groupId=com.example\nartifactId=lib\nversion=${project.version}\n",
+    ):
+        jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": pom})
+        assert gav_from_pom_properties(jar) is None
+
+
 def test_gav_missing_or_corrupt(make_jar, tmp_path: Path):
     plain = make_jar("plain.jar", {"A.class": b"x"})
     assert gav_from_pom_properties(plain) is None
@@ -665,14 +674,30 @@ def test_verify_gav_respects_budget():
     assert len(calls) == 1
 
 
-def test_verify_gav_invalid_url_candidate_is_a_miss():
+def test_verify_gav_invalid_url_is_a_miss():
     def handler(request):
         return httpx.Response(200, text=SHA)
 
     with make_client(handler) as c:
-        repo, used = verify_gav(Gav("com.we\x01ird", "a", "1"), SHA, ["https://r.test/m2"], c)
+        repo, used = verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m\x012"], c)
     assert repo is None
     assert used == 1
+
+
+@pytest.mark.parametrize("parts", [
+    ("../x", "a", "1"), ("g", "a/b", "1"), ("g", "a", "1\\x"), ("g", "..", "1"), ("g", "a", "."),
+    ("g", "a", "1\n"), ("g", "a", "C:1"), ("", "a", "1"), ("g", "a", "${project.version}"),
+    ("g", "a b", "1"), ("g", "a", "%2e%2e"), ("com.we\x01ird", "a", "1"),
+])
+def test_gav_rejects_text_that_is_no_coordinate(parts):
+    with pytest.raises(ValueError):
+        Gav(*parts)
+
+
+def test_gav_accepts_maven_coordinates():
+    for parts in (("org.apache.commons", "commons-lang3", "3.12.0"), ("com.google.guava", "guava", "33.6.0-jre"),
+                  ("io.netty", "netty_tcnative", "2.0.0.Final+1")):
+        assert str(Gav(*parts)) == ":".join(parts)
 
 
 def _post_freeze_handler(sources_payload: bytes, probe_hits: set[str], sha: str):
@@ -814,6 +839,31 @@ def test_resolve_verdict_replay_verified_guess(make_jar, tmp_path: Path):
     assert calls["n"] == 0
     assert str(res2.gav) == "org.springframework:spring-jdbc:6.2.17"
     assert res2.resolved_by == "verified-guess" and res2.cached is True
+
+
+def test_resolve_skips_coordinates_that_name_other_paths(make_jar, tmp_path: Path):
+    """A verdict of an older decaf, or a manifest, can hold text that no Gav accepts."""
+    from decaf.verdicts import VerdictCache
+
+    manifest = "Manifest-Version: 1.0\nImplementation-Title: lib\nImplementation-Version: 1/../../escaped\n"
+    jar = make_jar("in/mystery.jar", {"A.class": b"x", "META-INF/MANIFEST.MF": manifest})
+    payload = make_jar("p.jar", {"A.java": "class A {}"}).read_bytes()
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    verdicts.record_sha1(sha1_of(jar), ("../escaped", "lib", "1"), "sha1-index")
+    paths: list[str] = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.host == "search.maven.org":
+            docs = [{"g": "g"}] if request.url.params["q"].startswith("a:") else []
+            return httpx.Response(200, json={"response": {"docs": docs}})
+        return httpx.Response(200, content=payload)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.gav is None and res.sources_jar is None
+    assert not [p for p in paths if "escaped" in p]
+    assert not list(tmp_path.glob("escaped*"))
 
 
 def test_resolve_negative_verdict_replay(make_jar, tmp_path: Path):
