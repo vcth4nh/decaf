@@ -393,6 +393,7 @@ class Ctx:
     input_group: list[Path] = field(default_factory=list)  # top-level classpath entries (#99)
     families: dict[str, tuple[Path, list[Path]]] = field(default_factory=dict)  # parent rel -> (path, nested archives)
     class_roots: dict[str, Path | None] = field(default_factory=dict)  # rel -> extracted WEB-INF/BOOT-INF classes
+    entry_names: dict[Path, frozenset[str]] = field(default_factory=dict)  # classpath entry -> its class names (#108)
     family_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -618,15 +619,15 @@ def _check_trees(
         return None
     limit = ctx.java_major + check.CLASS_VERSION_OFFSET if ctx.java_major else None
     results: list[dict[str, check.FileResult]] = []
-    sent: list[list[str]] = []
+    sent: list[tuple[dict[str, check.FileResult], list[str]]] = []  # for each job: its item's results, its files
     jobs: list[check.Job] = []
-    for n, (tree, artifact, source, held) in enumerate(items):
+    for tree, artifact, source, held in items:
         if held.versions is None:
             held.versions = _class_versions(source)
         if held.roots is None and source.is_dir():
             held.roots = _tree_roots(source)
         by_path: dict[str, check.FileResult] = {}
-        paths: list[str] = []
+        by_release: dict[int | None, list[str]] = {}
         for p in sorted(tree.rglob("*")):
             suffix = p.suffix.lower()
             if not p.is_file() or suffix not in SOURCE_SUFFIXES or p.name.lower() in _METADATA_SOURCES:
@@ -642,19 +643,68 @@ def _check_trees(
                     "newer class version", needs_java=major - check.CLASS_VERSION_OFFSET
                 )
                 continue
-            paths.append(rel)
+            # A file with errors gets a second try with the JDK API of the class's own Java version:
+            # old code may use removed APIs or names that newer Java restricts (#108).
+            release = None if major is None else max(8, major - check.CLASS_VERSION_OFFSET)
+            by_release.setdefault(release, []).append(rel)
         results.append(by_path)
-        sent.append(paths)
         classpath = _family_classpath(artifact, source, ctx, held.roots)
-        jobs.append(check.Job(str(n), tuple(classpath), tuple(tree / r for r in paths)))
-    if any(job.files for job in jobs):
+        own = [e for e in classpath if _own_entry(e, artifact, source, held, ctx)]
+        twice = _twice(own, [e for e in classpath if e not in own], ctx)
+        for release, paths in by_release.items():
+            sent.append((by_path, paths))
+            jobs.append(check.Job(str(len(jobs)), tuple(classpath), tuple(tree / r for r in paths), release, twice))
+    if jobs:
         answers = ctx.checker(
             jobs, timeout=ctx.settings.timeout, cpu_budget=ctx.cpu_budget,
             **({"heap_mb": heap_mb} if heap_mb is not None else {}),
         )
-        for by_path, paths, answer in zip(results, sent, answers):
+        for (by_path, paths), answer in zip(sent, answers):
             by_path.update(zip(paths, answer))
     return results
+
+
+def _own_entry(entry: Path, artifact: Artifact, source: Path, held: _Held, ctx: Ctx) -> bool:
+    """Is a classpath entry the artifact itself: its archive, its class root, or a folder of its class tree?"""
+    if entry == source or entry in (held.roots or []):
+        return True
+    if artifact.kind is ArtifactKind.CLASS_TREE:
+        return entry.is_dir() and (entry == artifact.path or artifact.path in entry.parents)
+    with ctx.family_lock:
+        return entry == ctx.class_roots.get(artifact.rel)
+
+
+def _entry_names(entry: Path, ctx: Ctx) -> frozenset[str]:
+    """The class names (p/A, p/A$B) of a classpath entry, read once (#108)."""
+    with ctx.family_lock:
+        hit = ctx.entry_names.get(entry)
+    if hit is not None:
+        return hit
+    if entry.is_dir():
+        names = frozenset(p.relative_to(entry).as_posix()[: -len(".class")] for p in entry.rglob("*.class"))
+    else:
+        try:
+            with zipfile.ZipFile(entry) as zf:
+                names = frozenset(_class_stem(n) for n in zf.namelist() if n.endswith(".class"))
+        except ZIP_ERRORS:
+            names = frozenset()
+    with ctx.family_lock:
+        return ctx.entry_names.setdefault(entry, names)
+
+
+def _twice(own: list[Path], others: list[Path], ctx: Ctx) -> Callable[[str], bool]:
+    """Is a dotted class name (p.A, p.A.B) in two or more entries, such as two versions of one library?
+
+    The entries of the artifact itself count as one (#108).
+    """
+
+    def twice(dotted: str) -> bool:
+        parts = dotted.split(".")
+        tops = ["/".join(parts[:k]) for k in range(1, len(parts) + 1)]
+        has = lambda e: any(t in _entry_names(e, ctx) for t in tops)  # noqa: E731
+        return any(has(e) for e in own) + sum(1 for e in others if has(e)) >= 2
+
+    return twice
 
 
 def _apply_hold(

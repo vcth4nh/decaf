@@ -74,8 +74,9 @@ def test_messages_stop_at_the_cap():
 
 @pytest.mark.parametrize("line", [
     "0\t0\tE\tA\tcompiler.err.doesnt.exist\t1\tpackage org.absent does not exist",
+    # an import can supply these names (the scope below has `import x.*;`)
     "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t2\tcannot find symbol   symbol:   class Thing   location: class Env",
-    "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t65\tcannot find symbol   symbol:   variable Binder   location: class a.B",
+    "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t65\tcannot find symbol   symbol:   variable Binder   location: class Env",
     "0\t0\tE\tA\tcompiler.err.cant.access\t1\tcannot access a.B   bad class file: /x/a/B.class"
     "     class file has wrong version 69.0, should be 65.0",
     "0\t0\tE\tA\tcompiler.err.package.not.visible\t3\tpackage sun.nio.ch is not visible",
@@ -83,7 +84,9 @@ def test_messages_stop_at_the_cap():
     "0\t0\tE\tA\tcompiler.err.not.def.access.class.intf.cant.access\t4\tX.Y is not public in X; cannot be accessed from outside package",
 ])
 def test_environment_errors_make_the_file_unchecked(line):
-    r = classify(raw(line, "0\t0\tE\tA\tcompiler.err.missing.ret.stmt\t9\tmissing return statement", "0\t0\tT\t5"), False)
+    scope = check.Scope(this="Env", on_demand=True)
+    r = classify(raw(line, "0\t0\tE\tA\tcompiler.err.missing.ret.stmt\t9\tmissing return statement", "0\t0\tT\t5"),
+                 False, scope=scope)
     assert (r.status, r.reason, r.messages) == ("unchecked", "absent classes", ())
 
 
@@ -93,7 +96,7 @@ def test_absent_classes_first_is_the_lowest_line_of_the_environment_errors():
         "0\t0\tE\tA\tcompiler.err.doesnt.exist\t12\tpackage org.b does not exist",
         "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t5\tcannot find symbol   symbol:   class Thing   location: class Env",
         "0\t0\tT\t5",
-    ), False)
+    ), False, scope=check.Scope(this="Env", imports=frozenset({"Thing"})))
     assert r == unchecked("absent classes", first="5: cannot find symbol: class Thing")
 
 
@@ -326,3 +329,105 @@ def test_find_javac_reads_a_property_dump_that_is_no_utf8(tmp_path: Path):
     java.write_bytes(b"#!/bin/sh\nprintf '    java.home = " + str(jdk).encode() + b"\\n    user.dir = /x\\377y\\n' >&2\n")
     java.chmod(0o755)
     assert check.find_javac(str(java)) == jdk / "bin/javac"
+
+
+def test_parse_error_flags_also_next_to_an_absent_class():
+    """#108: a parse error never depends on the classpath, e.g. CFR's `** GOTO lbl12`."""
+    r = classify(raw(
+        "0\t0\tE\tA\tcompiler.err.doesnt.exist\t1\tpackage org.absent does not exist",
+        "0\t0\tE\tP\tcompiler.err.illegal.start.of.expr\t9\tillegal start of expression",
+        "0\t0\tT\t5",
+    ), False)
+    assert (r.status, r.kinds, r.first) == ("flagged", ("other", "parse"), "9: illegal start of expression")
+
+
+@pytest.mark.parametrize("message, scope, absent", [
+    # an unqualified name: absent only when an import can supply it
+    ("symbol:   class Bar   location: class p.E", check.Scope(this="p.E"), False),
+    ("symbol:   class Bar   location: class p.E", check.Scope(this="p.E", imports=frozenset({"Bar"})), True),
+    ("symbol:   variable a   location: class p.E", check.Scope(this="p.E", imports=frozenset({"a"})), True),
+    ("symbol:   variable Bar   location: class p.E.In", check.Scope(this="p.E", on_demand=True), True),
+    ("symbol:   method g()   location: class p.E", check.Scope(this="p.E", on_demand=True), False),
+    ("symbol:   method g()   location: class p.E", check.Scope(this="p.E", imports=frozenset({"g"})), True),
+    # a member of another class: absent only when that class has two versions in the classpath
+    ("symbol:   method baz()   location: variable foo of type lib.Foo",
+     check.Scope(this="p.E", twice=lambda n: n == "lib.Foo"), True),
+    ("symbol:   method baz()   location: variable foo of type lib.Foo", check.Scope(this="p.E"), False),
+    ("symbol:   method baz()   location: variable o of type java.lang.Object", check.Scope(this="p.E"), False),
+    ("symbol:   class Out   location: class lib.Foo", check.Scope(this="p.E", twice=lambda n: True), True),
+    # a class of another package
+    ("symbol:   class Gone   location: package lib", check.Scope(this="p.E"), True),
+])
+def test_absent_name_rules(message, scope, absent):
+    line = f"0\t0\tE\tA\tcompiler.err.cant.resolve.location\t3\tcannot find symbol   {message}"
+    r = classify(raw(line, "0\t0\tT\t5"), False, scope=scope)
+    assert (r.status == "unchecked") is absent
+
+
+def test_scope_of_reads_the_package_the_imports_and_the_supertypes():
+    text = ("package p.q;\nimport a.B;\nimport static c.D.e;\nimport f.*;\n\n"
+            "class A extends x.Base<Map<String, B>> implements Run, java.io.Serializable {}\n")
+    got = check.scope_of(text, "A")
+    assert (got.this, got.imports, got.on_demand) == ("p.q.A", frozenset({"B", "e"}), True)
+    assert got.supertypes == frozenset({"Base", "Run", "Serializable"})
+    assert check.scope_of("class A {}", "A") == check.Scope(this="A")
+
+
+def test_an_absent_supertype_supplies_unqualified_names():
+    """javac reports an inherited member as absent when the supertype is absent."""
+    scope = check.Scope(this="E", imports=frozenset({"Base"}), supertypes=frozenset({"Base"}))
+    r = classify(raw(
+        "0\t0\tE\tA\tcompiler.err.doesnt.exist\t1\tpackage org.absent does not exist",
+        "0\t0\tE\tA\tcompiler.err.cant.resolve\t2\tcannot find symbol   symbol: class Base",
+        "0\t0\tE\tA\tcompiler.err.cant.resolve.location.args\t3\tcannot find symbol   symbol:   method inherited()"
+        "   location: class E",
+        "0\t0\tT\t5",
+    ), False, scope=scope)
+    assert r.reason == "absent classes"
+
+
+def test_a_member_of_an_own_class_with_an_absent_superclass_is_absent():
+    """javac cannot find an inherited member when the superclass of the receiver's class is absent."""
+    r = classify(raw(
+        "0\t0\tE\tA\tcompiler.err.cant.access\t18\tcannot access o.Tracker   class file for o.Tracker not found",
+        "0\t0\tE\tA\tcompiler.err.cant.resolve.location.args\t22\tcannot find symbol   symbol:   method close()"
+        "   location: variable tracker of type p.OwnTracker",
+        "0\t0\tT\t5",
+    ), False, scope=check.Scope(this="p.E"))
+    assert r.reason == "absent classes"
+
+
+def test_a_name_error_next_to_an_absent_class_flags_the_file():
+    """#108: an absent class must not hide an engine error such as Vineflower's renamed variable."""
+    scope = check.Scope(this="E", twice=lambda name: name == "lib.Foo")
+    r = classify(raw(
+        "0\t0\tE\tA\tcompiler.err.cant.resolve.location\t52\tcannot find symbol   symbol:   variable listx"
+        "   location: class E",
+        "0\t0\tE\tA\tcompiler.err.cant.resolve.location.args\t53\tcannot find symbol   symbol:   method add(int)"
+        "   location: variable list of type lib.Foo",
+        "0\t0\tT\t5",
+    ), False, scope=scope)
+    assert (r.status, r.first) == ("flagged", "52: cannot find symbol: variable listx")
+
+
+@pytest.mark.parametrize("code", [
+    "compiler.err.cant.ref.non.effectively.final.var",
+    "compiler.err.except.already.caught",
+    "compiler.err.var.might.be.assigned.in.loop",
+    "compiler.err.final.parameter.may.not.be.assigned",
+])
+def test_engine_flow_errors_get_a_retry(code):
+    r = classify(raw(f"0\t0\tE\tA\t{code}\t4\tx", "0\t0\tT\t5"), False)
+    assert (r.status, r.kinds) == ("flagged", ("flow",))
+
+
+def test_package_in_another_module_is_an_absent_class():
+    r = classify(raw("0\t0\tE\tA\tcompiler.err.package.in.other.module\t1\tpackage exists in another module: java.xml",
+                     "0\t0\tT\t5"), False)
+    assert r.reason == "absent classes"
+
+
+def test_write_jobs_writes_the_release(tmp_path: Path):
+    f = tmp_path / "jobs.bin"
+    write_jobs(f, [check.Job("0", (), (Path("/t/A.java"),), release=8)])
+    assert f.read_bytes() == b"job\x000\x00release\x008\x00src\x00/t/A.java\x00".replace(b"/", os.sep.encode())

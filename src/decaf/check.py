@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +33,7 @@ _ENV_CODES = frozenset({
     "compiler.err.cant.access",
     "compiler.err.package.not.visible",
     "compiler.err.error.reading.file",
+    "compiler.err.package.in.other.module",  # a jar with a package that a JDK module has (#108)
 })
 _ENV_PREFIXES = ("compiler.err.not.def.access.",)
 _RESOLVE = "compiler.err.cant.resolve"
@@ -42,6 +44,10 @@ _FLOW_CODES = frozenset({
     "compiler.err.var.might.already.be.assigned",
     "compiler.err.except.never.thrown.in.try",
     "compiler.err.unreachable.stmt",
+    "compiler.err.cant.ref.non.effectively.final.var",  # four more Flow-phase codes (#108)
+    "compiler.err.except.already.caught",
+    "compiler.err.var.might.be.assigned.in.loop",
+    "compiler.err.final.parameter.may.not.be.assigned",
 })
 _FLOW_PREFIXES = ("compiler.err.unreported.exception.",)
 _TYPE_CODES = frozenset({
@@ -54,6 +60,51 @@ _TYPE_CODES = frozenset({
 })
 _TYPE_PREFIXES = ("compiler.err.operator.cant.be.applied",)
 _SYMBOL = re.compile(r"symbol:\s+(\w+)\s+(\S+)")
+_LOCATION = re.compile(
+    r"location:\s+(?:(?:class|interface|enum|record)\s+([\w.$]+)"
+    r"|variable\s+\S+\s+of\s+type\s+([\w.$]+)|(package)\s)"
+)
+_IMPORT = re.compile(r"^[ \t]*import\s+(static\s+)?([\w.$]+?)(\.\*)?\s*;", re.MULTILINE)
+_PACKAGE = re.compile(r"^[ \t]*package\s+([\w.$]+)\s*;", re.MULTILINE)
+_SUPERTYPES = re.compile(r"\b(?:extends|implements)\s+([^{;()]+)")
+_GENERIC = re.compile(r"<[^<>]*>")
+
+
+@dataclass(frozen=True)
+class Scope:
+    """What can supply a name that a file does not define (#108).
+
+    this: the dotted name of the file's own class; imports: the simple names of its
+    single imports; on_demand: an import with *; supertypes: the simple names after
+    extends and implements (an absent supertype can supply any name); twice: is a
+    dotted class name in two or more classpath entries (two versions of one library)?
+    """
+
+    this: str = ""
+    imports: frozenset[str] = frozenset()
+    on_demand: bool = False
+    supertypes: frozenset[str] = frozenset()
+    twice: Callable[[str], bool] = field(default=lambda name: False, compare=False)
+
+
+def scope_of(text: str, stem: str, twice: Callable[[str], bool] | None = None) -> Scope:
+    """The Scope of a source file from its package and import declarations."""
+    package = _PACKAGE.search(text)
+    names: set[str] = set()
+    on_demand = False
+    for m in _IMPORT.finditer(text):
+        if m.group(3):
+            on_demand = True
+        else:
+            names.add(m.group(2).rsplit(".", 1)[-1])
+    this = f"{package.group(1)}.{stem}" if package else stem
+    supers: set[str] = set()
+    for m in _SUPERTYPES.finditer(text):
+        types = m.group(1)
+        while _GENERIC.search(types):
+            types = _GENERIC.sub("", types)
+        supers |= {t.strip().rsplit(".", 1)[-1] for t in re.split(r",|\bimplements\b|\bextends\b", types) if t.strip()}
+    return Scope(this, frozenset(names), on_demand, frozenset(supers), twice or Scope.twice)
 
 
 @dataclass(frozen=True)
@@ -63,6 +114,8 @@ class Job:
     id: str
     classpath: tuple[Path, ...]
     files: tuple[Path, ...]
+    release: int | None = None  # a file with errors gets a second try with javac --release <release> (#108)
+    twice: Callable[[str], bool] | None = field(default=None, compare=False)  # see Scope
 
 
 @dataclass(frozen=True)
@@ -111,14 +164,39 @@ def parse_results(text: str) -> dict[tuple[str, int], _Raw]:
     return out
 
 
-def _is_env(code: str, message: str) -> bool:
+def _symbol(message: str) -> tuple[str, str]:
+    """(kind, name) of a cannot-find-symbol message, e.g. ("method", "f"), or ("", "")."""
+    m = _SYMBOL.search(message)
+    return (m.group(1), m.group(2).split("(", 1)[0]) if m else ("", "")
+
+
+def _unqualified(message: str, scope: Scope) -> bool:
+    """Is a cannot-find-symbol message about a name in the scope of the file's own class?"""
+    loc = _LOCATION.search(message)
+    where = loc.group(1) or loc.group(2) if loc is not None else None
+    return where is None or where == scope.this or where.startswith(scope.this + ".")
+
+
+def _is_env(code: str, message: str, scope: Scope, inherits_absent: bool = False) -> bool:
     if code in _ENV_CODES or code.startswith(_ENV_PREFIXES):
         return True
-    if code.startswith(_RESOLVE):
-        m = _SYMBOL.search(message)
-        if m and (m.group(1) in _TYPE_SYMBOLS or (m.group(1) == "variable" and m.group(2)[:1].isupper())):
-            return True  # `Absent.call()` reports the absent class as "variable Absent"
-    return False
+    if not code.startswith(_RESOLVE):
+        return False
+    loc = _LOCATION.search(message)
+    if loc is not None and loc.group(3):
+        return True  # a class of another package: the package exists, but this class is absent
+    if not _unqualified(message, scope):
+        return scope.twice(loc.group(1) or loc.group(2))  # a member of a class with two versions in the classpath
+    # An unqualified name in the scope of the file: absent only when an import or an absent
+    # supertype can supply it (#108).
+    kind, name = _symbol(message)
+    if not kind:
+        return False
+    if inherits_absent:
+        return True
+    if kind == "method":
+        return name in scope.imports  # only a static import supplies a method
+    return (kind in _TYPE_SYMBOLS or kind == "variable") and (name in scope.imports or scope.on_demand)
 
 
 def _kind(phase: str, code: str) -> str:
@@ -145,10 +223,11 @@ def _line(error: tuple[str, str, int, str]) -> str:
     return f"{error[2]}: {_short(error[3])}"
 
 
-def classify(raw: _Raw | None, timed_out: bool, crash: str | None = None) -> FileResult:
+def classify(raw: _Raw | None, timed_out: bool, crash: str | None = None, scope: Scope = Scope()) -> FileResult:
     """Status of one file from its result lines (spec section 3).
 
     crash: the cause when the checker JVM stopped without a line for the file, e.g. its stderr (#108).
+    scope: what can supply an absent name; a parse error never depends on the classpath (#108).
     """
     if raw is not None and raw.crash is not None:
         return unchecked("javac crash", first=_short(raw.crash))
@@ -158,14 +237,23 @@ def classify(raw: _Raw | None, timed_out: bool, crash: str | None = None) -> Fil
     old = [e for e in errors if e[0] == "P" and e[1] in _OLD_SOURCE]
     if old:
         return unchecked("old source", first=_line(old[0]))
-    env = [e for e in errors if _is_env(e[1], e[3])]
-    if env:
+    inherits_absent = any(  # an absent supertype, or a class file that javac cannot find for a supertype
+        code == "compiler.err.cant.access" or (code.startswith(_RESOLVE) and _symbol(message)[1] in scope.supertypes)
+        for _, code, _, message in errors
+    )
+    env = [] if any(e[0] == "P" for e in errors) else [
+        e for e in errors if _is_env(e[1], e[3], scope, inherits_absent)
+    ]
+    retry = [e for e in errors if e not in env and _kind(e[0], e[1]) in RETRY_KINDS]
+    # An unqualified name that no import and no absent supertype can supply is an engine error,
+    # also next to absent classes (#108). A flow error or a member of another class is not: an
+    # absent catch type can cause the one, and an absent superclass of that class the other.
+    if env and not any(_kind(e[0], e[1]) == "name" and _unqualified(e[3], scope) for e in retry):
         return unchecked("absent classes", first=_line(env[0]))
     if not errors:
         return FileResult("clean")
     kinds = tuple(sorted({_kind(phase, code) for phase, code, _, _ in errors}))
     messages = tuple(_line(e) for e in errors[:MESSAGES_PER_FILE])
-    retry = [e for e in errors if _kind(e[0], e[1]) in RETRY_KINDS]
     if retry:
         return FileResult("flagged", kinds=kinds, errors=len(errors), first=_line(retry[0]), messages=messages)
     return FileResult("noted", kinds=kinds, errors=len(errors), first=messages[0], messages=messages)
@@ -176,6 +264,8 @@ def write_jobs(path: Path, jobs: list[Job]) -> None:
     tokens: list[str] = []
     for job in jobs:
         tokens += ["job", job.id]
+        if job.release is not None:
+            tokens += ["release", str(job.release)]
         for p in job.classpath:
             tokens += ["cp", str(p)]
         for f in job.files:
@@ -352,4 +442,17 @@ def run_check(
     raw = parse_results(text)
     lines = [line for line in tail.splitlines() if line.strip()]
     crash = _short(lines[-1]) if lines else f"checker exit code {returncode}"  # e.g. a JVM out of memory (#108)
-    return [[classify(raw.get((job.id, i)), timed_out, crash) for i in range(len(job.files))] for job in jobs]
+    return [[_classify_file(raw.get((job.id, i)), timed_out, crash, f, job) for i, f in enumerate(job.files)]
+            for job in jobs]
+
+
+def _classify_file(raw: _Raw | None, timed_out: bool, crash: str, path: Path, job: Job) -> FileResult:
+    """classify(), with the Scope of the file when one of its errors is an absent name."""
+    scope = Scope()
+    if raw is not None and any(code.startswith(_RESOLVE) for _, code, _, _ in raw.errors):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        scope = scope_of(text, path.stem, job.twice)
+    return classify(raw, timed_out, crash, scope)

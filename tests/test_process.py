@@ -1458,6 +1458,36 @@ def test_check_of_a_class_folder_uses_its_package_roots(tmp_path: Path):
     assert calls[0][0].classpath[:2] == (source, source / "build/classes/java/main")
 
 
+def test_check_jobs_carry_the_release_of_their_classes(make_jar, tmp_path: Path):
+    """#108: javac checks old code against the JDK API of its own Java version."""
+    from decaf.pipeline import _check_trees, _Held
+
+    jar = make_jar("app.jar", {"p/A.class": _class_header(52), "p/B.class": _class_header(61), "p/C.class": b"no header"})
+    tree = tmp_path / "out-tree"
+    (tree / "p").mkdir(parents=True)
+    for name in "ABC":
+        (tree / f"p/{name}.java").write_text(f"package p; class {name} {{}}")
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
+    _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None)
+    assert sorted((job.release or 0, [f.name for f in job.files]) for job in calls[0]) == [
+        (0, ["C.java"]), (8, ["A.java"]), (17, ["B.java"]),
+    ]
+
+
+def test_twice_finds_two_versions_of_one_library(make_jar, tmp_path: Path):
+    """#108: a member that one version of a class lacks is no engine error."""
+    from decaf.pipeline import _twice
+
+    own = make_jar("app.jar", {"p/A.class": b"a", "lib/Own.class": b"o"})
+    v1 = make_jar("lib-1.jar", {"lib/Foo.class": b"f", "lib/Foo$In.class": b"i", "lib/Own.class": b"o"})
+    v2 = make_jar("lib-2.jar", {"lib/Foo.class": b"g", "lib/Bar.class": b"b"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    twice = _twice([own], [v1, v2], ctx)
+    assert twice("lib.Foo") and twice("lib.Foo.In") and twice("lib.Own")
+    assert not twice("lib.Bar") and not twice("p.A") and not twice("java.lang.Object")
+
+
 def test_family_classpath_single_file_input_has_no_input_group(make_jar, tmp_path: Path):
     from decaf.pipeline import _family_classpath
 

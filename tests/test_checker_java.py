@@ -127,3 +127,41 @@ def test_results_survive_a_timeout(checker, tmp_path: Path):
                           java=java, install=install, tmp_root=tmp_path)
     statuses = [r.status if r.status != "unchecked" else r.reason for r in out[0]]
     assert "clean" in statuses and "timeout" in statuses
+
+
+def test_release_from_the_class_version_accepts_old_code(checker, tmp_path: Path):
+    """#108: Java 8 code may use APIs that newer JDKs removed, and names that newer Java restricts.
+
+    The release is only a second try: a Java 8 class of a library that a newer JDK built can use
+    newer APIs, and the second try must not change the first file manager for the next file.
+    """
+    java, _, install = checker
+    old = tmp_path / "Old.java"
+    old.write_text("class Old { String f(byte[] b) { return javax.xml.bind.DatatypeConverter.printHexBinary(b); } }\n"
+                   "class var { }\n")
+    new = tmp_path / "New.java"
+    new.write_text("class New { void f(Object o) { java.lang.ref.Reference.reachabilityFence(o); java.util.List.of(); } }\n")
+    run = lambda release: check.run_check([check.Job("0", (), (old, new), release)], timeout=120, cpu_budget=1,  # noqa: E731
+                                          java=java, install=install, tmp_root=tmp_path)[0]
+    assert [r.status for r in run(8)] == ["clean", "clean"]
+    assert [r.status != "clean" for r in run(None)] == [True, False]
+
+
+def test_cfr_goto_next_to_an_absent_package_is_flagged(checker, tmp_path: Path):
+    """#108: broken engine output must not hide as unchecked."""
+    java, _, install = checker
+    f = tmp_path / "Goto.java"
+    f.write_text("import org.absent.Thing;\nclass Goto { void f() {\n ** GOTO lbl12;\n } }\n")
+    r = check.run_check([check.Job("0", (), (f,))], timeout=120, cpu_budget=1, java=java, install=install,
+                        tmp_root=tmp_path)[0][0]
+    assert r.status == "flagged" and "parse" in r.kinds
+
+
+def test_absent_supertype_is_no_flag(checker, tmp_path: Path):
+    """javac reports inherited members as absent when the supertype is absent: unchecked, no retry."""
+    java, _, install = checker
+    f = tmp_path / "E.java"
+    f.write_text("import org.absent.Base;\nclass E extends Base {\n  void f() { inherited(); int v = field; }\n}\n")
+    r = check.run_check([check.Job("0", (), (f,))], timeout=120, cpu_budget=1, java=java, install=install,
+                        tmp_root=tmp_path)[0][0]
+    assert r.reason == "absent classes"
