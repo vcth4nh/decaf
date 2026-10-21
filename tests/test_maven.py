@@ -1711,6 +1711,30 @@ def test_download_abort_mid_backoff_gives_up_quietly(tmp_path: Path):
     assert not list(tmp_path.glob("*.part"))
 
 
+def test_download_stops_at_an_abort_in_the_middle_of_the_body(tmp_path: Path):
+    """Review S5: after Ctrl-C, a large download went on to its end, and the run waited for it."""
+    net = NetState()
+    log = ResolutionLog()
+    sent = {"n": 0}
+
+    def body():
+        for _ in range(20):
+            sent["n"] += 1
+            if sent["n"] == 2:
+                net.abort.set()  # Ctrl-C lands during the download
+            yield b"x" * 1024
+
+    def handler(request):
+        return httpx.Response(200, content=body())
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as exc:
+            maven._download(c, "https://r.test/m2/a-1-sources.jar", tmp_path / "a.jar", net, log)
+    assert exc.value.kind == "interrupted"
+    assert sent["n"] < 20
+    assert not (tmp_path / "a.jar").exists() and not list(tmp_path.glob("*.part"))
+
+
 def test_fetch_sources_on_state_fires_only_on_real_download(tmp_path: Path, make_jar):
     gav = Gav("com.example", "lib", "1.2")
     payload = make_jar("payload.jar", {"com/example/A.java": "class A {}"}).read_bytes()

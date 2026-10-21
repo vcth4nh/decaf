@@ -219,6 +219,17 @@ def test_install_failure_raises_check_error_and_cleans_up(tmp_path: Path, monkey
     assert not list(tmp_path.glob(".tmp-*"))
 
 
+def test_install_cleans_up_when_a_signal_stops_the_compile(tmp_path: Path, monkeypatch):
+    """Review S4: SIGTERM ends the run like Ctrl-C; the javac build left its temp folder."""
+    def interrupted(cmd, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(check.subprocess, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        check.install(Path("/jdk/bin/javac"), 21, root=tmp_path)
+    assert not list(tmp_path.glob(".tmp-*"))
+
+
 def test_install_os_error_raises_check_error(tmp_path: Path):
     root = tmp_path / "not-a-dir"
     root.write_text("x")  # the cache root cannot be made: the run must go on without the check

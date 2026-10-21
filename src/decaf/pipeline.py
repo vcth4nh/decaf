@@ -1256,7 +1256,8 @@ def _fetch_stage(
                 except Exception as exc:  # e.g. a read-only or full sources cache: the engines decompile (#111)
                     resolution = maven.Resolution(miss=f"sources lookup failed: {exc}")
             done = False
-            if resolution is not None and resolution.sources_jar is not None:
+            # After an abort, the report gets no row for this artifact, so no sources go out.
+            if resolution is not None and resolution.sources_jar is not None and not engines.PROCESSES.closed:
                 state("extracting")
                 tmp = _tmp_dir(ctx)
                 damaged = []
@@ -1670,79 +1671,80 @@ def run(
         except OSError as exc:
             where = getattr(exc, "filename", None) or settings.output
             raise DecafError(f"cannot write to {where}: {exc.strerror or exc}") from exc
-        artifacts = [_jvm_input(a, tmp_root) for a in artifacts]
-        input_group = (
-            [p for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)
-             for p in (_tree_roots(a.path) if a.kind is ArtifactKind.CLASS_TREE else [a.path])]
-            if settings.input.is_dir() else []
-        )
-        chain, engine_jars = _preflight_engines(
-            settings, java_major, client, on_event, on_warn=on_warn
-        )
-        if cds_dir is not None and not engines.cds_writable(cds_dir):
-            cds_dir = None  # a JVM that cannot write its CDS archive exits with code 1 (#113)
-        # The first events come after the last check that can end the run with DecafError,
-        # so such an error leaves the stdout of --format ndjson empty (#109).
-        if on_found is not None:
-            on_found(discovered)
-        if on_event is not None:
-            on_event(
-                "scan", "",
-                f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
-            )
-            ram_unknown = settings.memory_mb is None and not budget_mb
-            on_event("memory", "", memory.budget_line(mem_plan, ram_unknown=ram_unknown))
-        if mem_plan.budget_mb and on_warn is not None:
-            for line in memory.heap_env_warnings(os.environ, mem_plan.heap_mb(1)):
-                on_warn(line)
-        if settings.check and checker is None and default_runner:
-            # An injected runner without an injected checker has no check: fake engines write fake Java.
-            javac_path = check.find_javac(java_exe)
-            if javac_path is None:
-                if on_warn is not None:
-                    on_warn(f"compile check skipped: no javac found for {java_exe}")
-            else:
-                try:
-                    install_dir = check.install(javac_path, java_major)
-                except check.CheckError as exc:
-                    javac_path = None
-                    if on_warn is not None:
-                        on_warn(f"compile check skipped: {exc}")
-                else:
-                    checker = partial(
-                        check.run_check, java=java_exe, install=install_dir,
-                        tmp_root=tmp_root, cds_dir=cds_dir,
-                    )
-        writer: MergeWriter | MirrorWriter
-        if settings.mirror:
-            writer = MirrorWriter(settings.output, resources=settings.resources)
-        else:
-            writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None)
-        ctx = Ctx(
-            settings=settings,
-            writer=writer,
-            chain=chain,
-            engine_jars=engine_jars,
-            java=java_exe,
-            tmp_root=tmp_root,
-            client=client if settings.maven else None,
-            sources_cache=engines.cache_root() / "sources",
-            runner=runner,
-            resolver=resolver,
-            batch_runner=batch_runner,
-            specs=engines.active_specs(settings.engine_overrides),
-            cpu_budget=cpu_budget,
-            memory_plan=mem_plan,
-            cds_dir=cds_dir,
-            on_stderr=on_stderr,
-            on_event=on_event,
-            on_warn=on_warn,
-            case_insensitive=case_label,
-            checker=checker,
-            java_major=java_major,
-            input_group=input_group,
-        )
+        report_due, scheduling = True, False
         try:
+            artifacts = [_jvm_input(a, tmp_root) for a in artifacts]
+            input_group = (
+                [p for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)
+                 for p in (_tree_roots(a.path) if a.kind is ArtifactKind.CLASS_TREE else [a.path])]
+                if settings.input.is_dir() else []
+            )
+            chain, engine_jars = _preflight_engines(
+                settings, java_major, client, on_event, on_warn=on_warn
+            )
+            if cds_dir is not None and not engines.cds_writable(cds_dir):
+                cds_dir = None  # a JVM that cannot write its CDS archive exits with code 1 (#113)
+            # The first events come after the last check that can end the run with DecafError,
+            # so such an error leaves the stdout of --format ndjson empty (#109).
+            if on_found is not None:
+                on_found(discovered)
+            if on_event is not None:
+                on_event(
+                    "scan", "",
+                    f"{len(artifacts)} top-level + {sum(nested_counts.values())} nested",
+                )
+                ram_unknown = settings.memory_mb is None and not budget_mb
+                on_event("memory", "", memory.budget_line(mem_plan, ram_unknown=ram_unknown))
+            if mem_plan.budget_mb and on_warn is not None:
+                for line in memory.heap_env_warnings(os.environ, mem_plan.heap_mb(1)):
+                    on_warn(line)
+            if settings.check and checker is None and default_runner:
+                # An injected runner without an injected checker has no check: fake engines write fake Java.
+                javac_path = check.find_javac(java_exe)
+                if javac_path is None:
+                    if on_warn is not None:
+                        on_warn(f"compile check skipped: no javac found for {java_exe}")
+                else:
+                    try:
+                        install_dir = check.install(javac_path, java_major)
+                    except check.CheckError as exc:
+                        javac_path = None
+                        if on_warn is not None:
+                            on_warn(f"compile check skipped: {exc}")
+                    else:
+                        checker = partial(
+                            check.run_check, java=java_exe, install=install_dir,
+                            tmp_root=tmp_root, cds_dir=cds_dir,
+                        )
+            writer: MergeWriter | MirrorWriter
+            if settings.mirror:
+                writer = MirrorWriter(settings.output, resources=settings.resources)
+            else:
+                writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None)
+            ctx = Ctx(
+                settings=settings,
+                writer=writer,
+                chain=chain,
+                engine_jars=engine_jars,
+                java=java_exe,
+                tmp_root=tmp_root,
+                client=client if settings.maven else None,
+                sources_cache=engines.cache_root() / "sources",
+                runner=runner,
+                resolver=resolver,
+                batch_runner=batch_runner,
+                specs=engines.active_specs(settings.engine_overrides),
+                cpu_budget=cpu_budget,
+                memory_plan=mem_plan,
+                cds_dir=cds_dir,
+                on_stderr=on_stderr,
+                on_event=on_event,
+                on_warn=on_warn,
+                case_insensitive=case_label,
+                checker=checker,
+                java_major=java_major,
+                input_group=input_group,
+            )
             with (
                 ThreadPoolExecutor(max_workers=fetch_jobs) as fetch_pool,
                 ThreadPoolExecutor(max_workers=jobs) as dec_pool,
@@ -1756,6 +1758,7 @@ def run(
                 ready: list[tuple] = []  # (-classes, seq, artifact, target, report)
                 ready_small: deque = deque()  # batch-eligible: (artifact, target, report, stems, claims)
                 dec_weight = 0
+                scheduling = True  # from here, the handler below takes the first Ctrl-C
                 try:
                     while todo or fetch_futs or dec_futs or ready or ready_small:
                         # Admission gate: every fetch future is a potential decompile,
@@ -1780,9 +1783,12 @@ def run(
                             w = _decompile_weight(a)
                             dec_weight += w
                             dec_futs[dec_pool.submit(_decompile_stage, a, target, ctx, report)] = ("solo", w)
-                        # ready drains first: a waiting whale gets first claim on freed weight,
-                        # so no small jar takes a freed slot while the whale waits for its second (#114)
-                        while ready_small and not ready and (dec_weight == 0 or dec_weight + 1 <= jobs):
+                        # ready drains first: a waiting whale gets first claim on the weight that a
+                        # small job frees (#114). A whale that waits for a running whale cannot use
+                        # the free slot, so a small jar may.
+                        while ready_small and (dec_weight == 0 or dec_weight + 1 <= jobs) and not (
+                            ready and any(w == 1 for _, w in dec_futs.values())
+                        ):
                             batch = _form_batch(ready_small, fold=case_label is not None)
                             dec_weight += 1
                             if len(batch) == 1:
@@ -1803,9 +1809,9 @@ def run(
                                     done_reports, requeue = fut.result()
                                     for a2, t2, r2 in requeue:
                                         heappush(ready, (-a2.classes, next(seq), a2, t2, r2))
-                                    for r2 in done_reports:
-                                        reports.append(r2)
-                                        if on_done is not None:
+                                    reports.extend(done_reports)  # all rows first: on_done can fail
+                                    if on_done is not None:
+                                        for r2 in done_reports:
                                             on_done(r2)
                                     continue
                                 report = fut.result()
@@ -1843,12 +1849,34 @@ def run(
                 except BaseException as exc:  # Ctrl-C, SIGTERM (see cli), or an error such as a broken pipe
                     interrupted = True
                     aborted = not isinstance(exc, KeyboardInterrupt)
+                    ended = [f for f in [*fetch_futs, *dec_futs] if f.done()]  # before the kill
                     net.abort.set()  # wake fetch threads sleeping in retry backoff
                     engines.PROCESSES.kill_all()
                     for fut in [*fetch_futs, *dec_futs]:
                         fut.cancel()
+                    for fut in ended:  # a job that ended before the abort has its files out: keep its row
+                        if fut.exception() is not None:
+                            continue
+                        if fut in fetch_futs:
+                            report, _, target = fut.result()
+                            if target is None:
+                                reports.append(report)
+                        elif dec_futs[fut][0] == "batch":
+                            reports.extend(fut.result()[0])
+                        else:
+                            reports.append(fut.result())
                     if aborted:
                         raise  # after the report below
+        except DecafError:
+            report_due = False  # a setup error ends the run with exit 2, no events, and no report (#109)
+            raise
+        except KeyboardInterrupt:
+            interrupted = True  # Ctrl-C or SIGTERM before the scheduler, for example in the javac build
+            if scheduling:
+                raise  # a second Ctrl-C while the scheduler stops
+        except BaseException:
+            interrupted = aborted = True  # a callback error before the scheduler, for example a broken pipe
+            raise
         finally:
             # Write the report even if a second Ctrl-C lands during teardown,
             # so partial results survive.
@@ -1896,11 +1924,12 @@ def run(
                 started_at=started_wall.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 ended_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
-            settings.output.mkdir(parents=True, exist_ok=True)
-            report_path = settings.output / "decaf-report.json"
-            tmp_path_ = report_path.with_suffix(".json.tmp")
-            tmp_path_.write_text(run_report.to_json() + "\n")
-            os.replace(tmp_path_, report_path)
+            if report_due:
+                settings.output.mkdir(parents=True, exist_ok=True)
+                report_path = settings.output / "decaf-report.json"
+                tmp_path_ = report_path.with_suffix(".json.tmp")
+                tmp_path_.write_text(run_report.to_json() + "\n")
+                os.replace(tmp_path_, report_path)
     finally:
         client.close()
         shutil.rmtree(tmp_root, ignore_errors=True)

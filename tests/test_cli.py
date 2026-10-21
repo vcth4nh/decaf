@@ -102,13 +102,28 @@ def test_bad_config_exits_2(tmp_path: Path, make_jar):
     assert result.exit_code == 2
 
 
-@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "-inf"])
+@pytest.mark.parametrize("value", ["0", "-5", "nan", "inf", "-inf", "4294968", "1e10"])
 def test_timeout_must_be_a_finite_number_above_zero(tmp_path: Path, make_jar, value):
     """#113: such values fail every artifact, write invalid JSON, or leave the JVMs without a kill."""
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--timeout", value])
     assert result.exit_code == 2
     assert "--timeout: use a number of seconds above 0" in ANSI.sub("", result.output)
+
+
+def test_timeout_accepts_the_wait_limit_of_windows(tmp_path: Path, make_jar, monkeypatch):
+    """Review E3: Windows waits in 32-bit milliseconds, so a longer wait wraps around; the limit itself works."""
+    captured = {}
+
+    def fake_run(settings, **kw):
+        captured["timeout"] = settings.timeout
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"), "--timeout", "4294967"])
+    assert result.exit_code == 0, result.output
+    assert captured["timeout"] == 4294967
 
 
 def test_bad_repo_url_exits_2(tmp_path: Path, make_jar):
@@ -491,6 +506,26 @@ def test_sigterm_and_sighup_end_the_run_like_ctrl_c(name, tmp_path: Path, make_j
     assert result.exit_code == 130, result.output
     assert json.loads((tmp_path / "out/decaf-report.json").read_text())["status"] == "interrupted"
     assert signal.getsignal(sig) is prior
+
+
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_an_ignored_signal_stays_ignored(name):
+    """Review S2: nohup ignores SIGHUP; a run under nohup must not stop at a hangup."""
+    import signal
+
+    sig = getattr(signal, name, None)
+    if sig is None:
+        pytest.skip(f"no {name} on this platform")
+    prior = signal.signal(sig, signal.SIG_IGN)
+    old: dict = {}
+    try:
+        old = cli._end_like_ctrl_c()
+        assert signal.getsignal(sig) == signal.SIG_IGN
+        assert sig not in old
+    finally:
+        for other, handler in old.items():
+            signal.signal(other, handler)
+        signal.signal(sig, prior)
 
 
 def test_status_line_partial_glyph():

@@ -589,6 +589,9 @@ def run_process(
             timed_out = True
             _kill_group(proc)
             watch.wait(None)
+    except BaseException:  # for example a wait error: the JVM must not outlive its slot
+        _kill_group(proc)
+        raise
     finally:
         PROCESSES.unregister(proc)
     reader.join()

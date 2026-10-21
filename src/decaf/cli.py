@@ -262,11 +262,12 @@ def _end_like_ctrl_c() -> dict:
     return {
         sig: signal.signal(sig, interrupt)
         for sig in (getattr(signal, name, None) for name in ("SIGTERM", "SIGHUP"))
-        if sig is not None
+        if sig is not None and signal.getsignal(sig) != signal.SIG_IGN  # nohup: a hangup stays ignored
     }
 
 
 _STAGE_RANK = {"header": 0, "engines": 1, "fetch": 2, "decompile": 3}
+_MAX_TIMEOUT = 4294967  # seconds: about 49 days, the longest wait of Windows
 _HEARTBEAT_INTERVAL = 30.0
 
 
@@ -496,8 +497,10 @@ def main(
             raise _fail("--fresh-maven has no effect with --no-maven (remove one)")
         if engine_args and not no_fallback:
             raise _fail("engine options after -- apply to the primary engine only (add --no-fallback)")
-        if not (math.isfinite(timeout) and timeout > 0):  # other values fail each artifact, the report, or the kill (#113)
-            raise _fail("--timeout: use a number of seconds above 0")
+        # Other values fail each artifact, the report, or the kill (#113). Windows waits in 32-bit
+        # milliseconds, so above 4294967 s its wait wraps around; above about 9.2e9 s, a wait fails on Linux.
+        if not (math.isfinite(timeout) and 0 < timeout <= _MAX_TIMEOUT):
+            raise _fail(f"--timeout: use a number of seconds above 0 and at most {_MAX_TIMEOUT}")
         memory_mb: int | None = None  # None = auto: 80% of the RAM (#98)
         if memory_budget is not None:
             try:

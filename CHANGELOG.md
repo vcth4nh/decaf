@@ -16,12 +16,18 @@ All notable changes to decaf are documented here.
 - An error such as a broken pipe stopped a run, but the report said
   `completed` and the engine JVMs continued (#112). Now decaf kills the
   JVMs and writes the report with the new status `aborted` before it stops.
-  A full disk at the start of a batch now fails only the jars of that
-  batch. SIGTERM and SIGHUP now end a run like Ctrl-C: decaf writes the
-  report with the status `interrupted` and deletes its temp folder. After
-  Ctrl-C, decaf starts no new network request, and no file of a killed
-  engine goes to the output. The scheduler now waits with a timeout, so
-  Ctrl-C on Windows does not wait for the next engine to finish.
+  The report has a row for each job that ended before the stop, also for
+  each jar of a batch. A full disk at the start of a batch now fails only
+  the jars of that batch. SIGTERM and SIGHUP now end a run like Ctrl-C:
+  decaf writes the report with the status `interrupted` and deletes its
+  temp folder. A signal that the parent process ignores, for example SIGHUP
+  under `nohup`, stays ignored. An interrupt or an error before the first
+  job now also writes the report, for example in the javac build of the
+  compile check. This build now leaves no temp folder in the cache. After
+  Ctrl-C, decaf starts no new network request, and a sources download
+  stops. After that, no file of a killed engine and no Maven sources go to
+  the output. The scheduler now waits with a timeout, so Ctrl-C on Windows
+  does not wait for the next engine to finish.
 - A status line that stdout could not encode stopped the run, for example
   ✓ on a redirected Windows stdout, or a file name that is not UTF-8 on
   Linux (#109). Now such a character prints as an escape (`\udcff`), and
@@ -116,16 +122,18 @@ All notable changes to decaf are documented here.
 - A Fernflower run that the timeout stopped ended the fallback chain
   (#113). The cut-off archive of sources gave an error in the unpack, so no
   other engine ran. Now decaf deletes such an archive, and the next engine
-  runs. `--timeout` accepted 0, negative values, NaN, and infinity. These
-  values failed each artifact, wrote a report that is not valid JSON, or let
-  the JVMs run with no limit. Now `--timeout` must be a number of seconds
-  above 0. CFR and Procyon run one JVM for each class of a class folder, and
-  each JVM got the full timeout. Now the timeout is for the whole folder. An
-  input name that is not UTF-8, for example a Latin-1 name on Linux, failed
-  on all engines, because Java decodes a path as UTF-8. The compile check
-  could not read such a jar either, also on the class path of the other
-  inputs. Now such an input goes to the engines and to the check through a
-  link in the temp folder.
+  runs. `--timeout` accepted 0, negative values, NaN, infinity, and values
+  above the longest wait of the platform. These values failed each artifact,
+  wrote a report that is not valid JSON, gave a shorter limit, or let the
+  JVMs run with no limit. Now `--timeout` must be a number of seconds above
+  0 and at most 4294967 (about 49 days). When the wait for a JVM fails,
+  decaf now kills the JVM. CFR and Procyon run one JVM for each class of a
+  class folder, and each JVM got the full timeout. Now the timeout is for
+  the whole folder. An input name that is not UTF-8, for example a Latin-1
+  name on Linux, failed on all engines, because Java decodes a path as
+  UTF-8. The compile check could not read such a jar either, also on the
+  class path of the other inputs. Now such an input goes to the engines and
+  to the check through a link in the temp folder.
 - The engine setup failed with no message, or with a traceback (#113). A
   fallback engine that failed to download left the chain with no warning.
   An error of the engine cache, for example a read-only cache, gave a
@@ -165,7 +173,9 @@ All notable changes to decaf are documented here.
   a cpuset. Then each JVM got more threads than CPUs. Now the default counts
   the CPUs of decaf's affinity. While a whale waited for its second free
   slot, each freed slot went to a small jar, so the whale could wait until
-  no small jars were left. Now no small jar starts while a whale waits.
+  no small jars were left. Now the whale gets each slot that a small jar
+  frees. A small jar still takes a free slot when only whales run, because
+  the waiting whale needs the end of one of them.
 - The memory notes had gaps (#114). A jar under 3000 classes, which goes
   into a batch, got no heap estimate. CFR and Procyon run one JVM for each
   class of a class folder, but the estimate used the size of the whole

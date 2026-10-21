@@ -438,6 +438,9 @@ def install(javac: Path, java_major: int, root: Path | None = None) -> Path:
     except (OSError, subprocess.SubprocessError) as exc:
         shutil.rmtree(tmp, ignore_errors=True)
         raise CheckError(f"checker compile failed: {exc}") from exc
+    except BaseException:  # SIGTERM and Ctrl-C stop the build: no temp folder stays
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     if proc.returncode != 0 or not (tmp / "Checker.class").is_file():
         shutil.rmtree(tmp, ignore_errors=True)
         raise CheckError(f"checker compile failed: {(proc.stderr or proc.stdout).strip()[-300:]}")
