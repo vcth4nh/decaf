@@ -17,7 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from .scanner import SOURCE_SUFFIXES, safe_extract_zip
+from .scanner import SOURCE_SUFFIXES, ZIP_ERRORS, safe_extract_zip
 from .verdicts import VerdictCache
 
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
@@ -628,10 +628,11 @@ def _download(
     raise _exhausted(net, log, host, kind, "sources download")
 
 
-def extract_sources(sources_jar: Path, dest: Path) -> int:
+def extract_sources(sources_jar: Path, dest: Path, damaged: list[str] | None = None) -> int:
+    """Extract the source files; the names of entries that cannot be read go to damaged (#109)."""
     try:
-        return safe_extract_zip(sources_jar, dest, suffixes=SOURCE_SUFFIXES)
-    except (zipfile.BadZipFile, OSError):
+        return safe_extract_zip(sources_jar, dest, suffixes=SOURCE_SUFFIXES, failed=damaged)
+    except ZIP_ERRORS:
         return 0
 
 

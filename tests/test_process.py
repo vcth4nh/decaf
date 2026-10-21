@@ -872,6 +872,55 @@ def test_decompile_batch_attributes_module_info_to_sole_claimant(make_jar, tmp_p
     assert a.java_files == 2 and a.classes == 1 and a.missing_classes == 0
 
 
+def test_damaged_resource_entry_costs_only_that_resource(make_damaged_jar, tmp_path: Path):
+    """#109: resources must never taint the decompile outcome."""
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_damaged_jar("app.jar", {"com/x/A.class": b"a" * 50, "res/a.txt": "a" * 100, "res/b.txt": "b" * 100},
+                           damaged=("res/a.txt",))
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}),
+                   writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok"
+    assert (tmp_path / "out/app.jar/res/b.txt").is_file() and not (tmp_path / "out/app.jar/res/a.txt").exists()
+
+
+def test_damaged_class_entry_in_a_retry_stays_a_missing_class(make_damaged_jar, tmp_path: Path):
+    """#109: the archive run wrote A; a damaged B costs only B."""
+    jar = make_damaged_jar("app.jar", {"com/x/A.class": b"a" * 50, "com/x/B.class": b"b" * 50},
+                           damaged=("com/x/B.class",))
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.missing_classes) == ("ok", 1)
+    assert (tmp_path / "out/src/com/x/A.java").is_file()
+
+
+def test_damaged_entry_of_an_input_sources_jar_is_a_missing_file(make_damaged_jar, tmp_path: Path):
+    jar = make_damaged_jar("lib-sources.jar", {"com/x/A.java": "class A {}" * 10, "com/x/B.java": "class B {}" * 10},
+                           damaged=("com/x/A.java",))
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    report, _ = process_artifact(Artifact(jar, "lib-sources.jar", ArtifactKind.SOURCES_JAR), ctx)
+    assert (report.outcome, report.method, report.java_files, report.missing_classes) == ("ok", "extracted", 1, 1)
+    assert report.partial
+    assert (tmp_path / "out/src/com/x/B.java").is_file()
+
+
+def test_damaged_maven_sources_jar_falls_back_to_the_engines(make_jar, make_damaged_jar, tmp_path: Path):
+    """#109: part of the upstream sources is no complete output; the engines decompile."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
+    sources = make_damaged_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}" * 10, "com/x/B.java": "class B {}" * 10},
+                               damaged=("com/x/B.java",))
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}), resolver=resolver, maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method) == ("ok", "vineflower")
+    assert report.sources_miss == "sources jar for com.example:lib:1.2 has a damaged entry: com/x/B.java"
+
+
 def test_maven_hit_mirror_carries_original_resources(make_jar, tmp_path: Path):
     from decaf.pipeline import MirrorWriter
 

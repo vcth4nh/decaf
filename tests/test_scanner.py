@@ -1,6 +1,11 @@
+import errno
+import struct
+import zipfile
 from pathlib import Path
 
 import pytest
+
+import decaf.scanner as scanner
 
 from decaf.scanner import (
     Artifact,
@@ -200,3 +205,45 @@ def test_scan_counted_populates_artifact_classes(make_jar, tmp_path):
     assert by_rel["a.jar"].classes == 2
     assert by_rel["_classes"].kind is ArtifactKind.CLASS_TREE
     assert by_rel["_classes"].classes == 1
+
+
+def _bad_name_jar(path: Path) -> Path:
+    """A jar whose entry name has the UTF-8 flag but bytes that are no UTF-8."""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("a.class", b"x")
+    raw = bytearray(path.read_bytes())
+    cd = raw.rfind(b"PK\x01\x02")
+    raw[cd + 8:cd + 10] = struct.pack("<H", 0x800)
+    raw[cd + 46] = 0xFF
+    path.write_bytes(bytes(raw))
+    return path
+
+
+def test_scan_marks_an_archive_with_a_bad_entry_name_corrupt(make_jar, tmp_path: Path):
+    """#109: one bad entry name must not stop the scan of the other archives."""
+    (tmp_path / "in").mkdir()
+    _bad_name_jar(tmp_path / "in/bad.jar")
+    make_jar("good.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    artifacts, _ = scan_counted(tmp_path / "in")
+    assert [(a.rel, a.kind) for a in artifacts] == [("bad.jar", ArtifactKind.CORRUPT), ("good.jar", ArtifactKind.ARCHIVE)]
+
+
+def test_safe_extract_zip_skips_a_damaged_entry(make_damaged_jar, tmp_path: Path):
+    """#109: a damaged entry costs only that entry; its name goes to failed."""
+    jar = make_damaged_jar("d.jar", {"a.txt": "a" * 100, "b.txt": "b" * 100}, damaged=("a.txt",))
+    failed: list[str] = []
+    assert safe_extract_zip(jar, tmp_path / "out", failed=failed) == 1
+    assert failed == ["a.txt"]
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["b.txt"]
+
+
+def test_safe_extract_zip_raises_a_disk_error(make_jar, tmp_path: Path, monkeypatch):
+    """A full disk is no damage of the archive: the extraction stops."""
+    jar = make_jar("j.jar", {"a.txt": "a"})
+
+    def full(src, out):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(scanner.shutil, "copyfileobj", full)
+    with pytest.raises(OSError):
+        safe_extract_zip(jar, tmp_path / "out", failed=[])

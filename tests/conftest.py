@@ -1,4 +1,5 @@
 import shutil
+import struct
 import subprocess
 import zipfile
 from pathlib import Path
@@ -16,6 +17,29 @@ def make_jar(tmp_path: Path):
         with zipfile.ZipFile(path, "w") as zf:
             for name, content in entries.items():
                 zf.writestr(name, content)
+        return path
+
+    return _make
+
+
+@pytest.fixture
+def make_damaged_jar(tmp_path: Path):
+    """Build a deflated jar; the data of each `damaged` entry starts with an invalid deflate block."""
+
+    def _make(relname: str, entries: dict[str, bytes | str], damaged: tuple[str, ...], base: Path | None = None) -> Path:
+        path = (base or tmp_path) / relname
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, content in entries.items():
+                zf.writestr(name, content)
+        for name in damaged:
+            with zipfile.ZipFile(path) as zf:
+                offset = zf.getinfo(name).header_offset
+            with open(path, "r+b") as f:
+                f.seek(offset + 26)
+                name_len, extra_len = struct.unpack("<HH", f.read(4))
+                f.seek(offset + 30 + name_len + extra_len)
+                f.write(b"\xff")
         return path
 
     return _make
