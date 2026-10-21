@@ -76,6 +76,16 @@ All notable changes to decaf are documented here.
   checker classes now run from a jar, so the CDS archive of the checker
   works, and a property dump of `java` that is not UTF-8 no longer stops
   the run.
+- The compile check hid some engine errors and flagged some correct files
+  (#108). A parse error (for example CFR's `** GOTO`) now flags the file
+  also next to an absent class. An unqualified name now counts as absent
+  only when an import or an absent supertype can supply it. A missing
+  member of another class counts as absent only when that class has two
+  versions in the classpath. A file with errors gets a second try with
+  javac `--release` from its class-file version (at least 8). Thus old code
+  may use JDK APIs that newer Java removed, such as `javax.xml.bind`, and
+  names that newer Java restricts. Four more javac flow errors of engines
+  now get a retry.
 
 ### Security
 

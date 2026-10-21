@@ -5,6 +5,8 @@
 // Usage: java -cp <dir> Checker <jobs file> <result file> <threads>
 //
 // Jobs file: tokens that end with a NUL byte. "job" <id> starts a job,
+// "release" <n> gives a file with errors a second try with javac --release <n>
+// (from the class-file version: old code may use removed JDK APIs, #108),
 // "cp" <path> adds a classpath entry, and "src" <path> adds a source file
 // (indexes 0, 1, 2, ... in this order).
 //
@@ -28,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.lang.model.SourceVersion;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
@@ -43,6 +46,7 @@ public final class Checker {
 
     private static final class Job {
         final String id;
+        int release;  // 0: javac's own version
         final List<Path> classpath = new ArrayList<>();
         final List<String> sources = new ArrayList<>();
 
@@ -64,6 +68,13 @@ public final class Checker {
 
     private static void run(JavaCompiler compiler, Job job, int threads, Writer out) throws Exception {
         int n = job.sources.size();
+        List<String> second = null;  // the options of the second try, or null for no second try
+        if (job.release > 0 && supported(compiler, job.release) < supported(compiler, Integer.MAX_VALUE)) {
+            second = new ArrayList<>(OPTIONS);
+            second.add("--release");
+            second.add(String.valueOf(supported(compiler, job.release)));
+        }
+        List<String> secondOptions = second;
         boolean[] done = new boolean[n];
         String[] stop = {"no result"};
         List<FileSystem> opened = new ArrayList<>();
@@ -79,13 +90,18 @@ public final class Checker {
             List<Thread> workers = new ArrayList<>();
             for (int w = 0; w < Math.min(threads, n); w++) {
                 Thread t = new Thread(() -> {
-                    try (StandardJavaFileManager fm = compiler.getStandardFileManager(
-                            null, Locale.ROOT, StandardCharsets.UTF_8)) {
-                        fm.setLocationFromPaths(StandardLocation.CLASS_PATH, classpath);
-                        fm.setLocationFromPaths(StandardLocation.SOURCE_PATH, List.of());
-                        fm.setLocationFromPaths(StandardLocation.ANNOTATION_PROCESSOR_PATH, List.of());
+                    // The second try gets its own file manager: --release sets the platform classes of it.
+                    try (StandardJavaFileManager fm = open(compiler, classpath);
+                         StandardJavaFileManager old = secondOptions == null ? null : open(compiler, classpath)) {
                         for (int i; (i = next.getAndIncrement()) < n; ) {
-                            write(out, check(compiler, fm, job.id, i, job.sources.get(i)));
+                            String r = check(compiler, fm, OPTIONS, job.id, i, job.sources.get(i));
+                            if (old != null && failed(r)) {
+                                String r2 = check(compiler, old, secondOptions, job.id, i, job.sources.get(i));
+                                if (!failed(r2)) {
+                                    r = r2;
+                                }
+                            }
+                            write(out, r);
                             done[i] = true;
                         }
                     } catch (Throwable e) {
@@ -118,6 +134,31 @@ public final class Checker {
         }
     }
 
+    private static StandardJavaFileManager open(JavaCompiler compiler, List<Path> classpath) throws IOException {
+        StandardJavaFileManager fm = compiler.getStandardFileManager(null, Locale.ROOT, StandardCharsets.UTF_8);
+        fm.setLocationFromPaths(StandardLocation.CLASS_PATH, classpath);
+        fm.setLocationFromPaths(StandardLocation.SOURCE_PATH, List.of());
+        fm.setLocationFromPaths(StandardLocation.ANNOTATION_PROCESSOR_PATH, List.of());
+        return fm;
+    }
+
+    private static boolean failed(String result) {
+        return result.contains("\tE\t") || result.contains("\tX\t");
+    }
+
+    /** The release nearest to the wanted one that this javac supports (an old javac cannot do 25, a new one maybe not 8). */
+    private static int supported(JavaCompiler compiler, int wanted) {
+        int lo = Integer.MAX_VALUE;
+        int hi = 0;
+        for (SourceVersion v : compiler.getSourceVersions()) {
+            if (v.ordinal() >= 8) {
+                lo = Math.min(lo, v.ordinal());
+                hi = Math.max(hi, v.ordinal());
+            }
+        }
+        return Math.max(lo, Math.min(hi, wanted));
+    }
+
     /** The root of a jar's zip file system, or null when it cannot be opened (its classes count as absent). */
     private static Path root(Path jar, List<FileSystem> opened) {
         try {
@@ -145,6 +186,8 @@ public final class Checker {
             if (key.equals("job")) {
                 current = new Job(value);
                 jobs.add(current);
+            } else if (key.equals("release") && current != null) {
+                current.release = Integer.parseInt(value);
             } else if (key.equals("cp") && current != null) {
                 current.classpath.add(Path.of(value));
             } else if (key.equals("src") && current != null) {
@@ -156,7 +199,7 @@ public final class Checker {
         return jobs;
     }
 
-    private static String check(JavaCompiler compiler, StandardJavaFileManager fm,
+    private static String check(JavaCompiler compiler, StandardJavaFileManager fm, List<String> options,
                                 String job, int index, String source) {
         StringBuilder sb = new StringBuilder();
         String head = job + "\t" + index + "\t";
@@ -164,7 +207,7 @@ public final class Checker {
         long start = System.nanoTime();
         try {
             JavacTask task = (JavacTask) compiler.getTask(
-                null, fm, dc, OPTIONS, null, fm.getJavaFileObjects(source));
+                null, fm, dc, options, null, fm.getJavaFileObjects(source));
             task.parse();
             int parsed = dc.getDiagnostics().size();
             task.analyze();
