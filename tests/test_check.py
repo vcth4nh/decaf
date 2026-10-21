@@ -431,3 +431,77 @@ def test_write_jobs_writes_the_release(tmp_path: Path):
     f = tmp_path / "jobs.bin"
     write_jobs(f, [check.Job("0", (), (Path("/t/A.java"),), release=8)])
     assert f.read_bytes() == b"job\x000\x00release\x008\x00src\x00/t/A.java\x00".replace(b"/", os.sep.encode())
+
+
+UNREPORTED = ("0\t0\tE\tA\tcompiler.err.unreported.exception.need.to.catch.or.throw\t9\tunreported exception"
+              " java.io.IOException; must be caught or declared to be thrown")
+SAME_METHOD = "0\t0\tE\tA\tcompiler.err.already.defined\t12\tmethod get() is already defined in class p.A"
+
+
+def test_bytecode_only_errors_of_a_kotlin_groovy_or_scala_class_are_noted():
+    """#108: these languages throw undeclared checked exceptions and overload methods on the return type."""
+    r = classify(raw(UNREPORTED, SAME_METHOD, "0\t0\tT\t5"), False, non_java=True)
+    assert (r.status, r.kinds, r.errors) == ("noted", ("flow", "name"), 2)
+    assert r.first == "9: unreported exception java.io.IOException; must be caught or declared to be thrown"
+
+
+def test_bytecode_only_errors_of_a_java_class_are_flagged():
+    """Lombok's @SneakyThrows has no marker: the retries stop at the same first error instead (#108)."""
+    for line in (UNREPORTED, SAME_METHOD):
+        r = classify(raw(line, "0\t0\tT\t5"), False)
+        assert (r.status, r.bytecode_only) == ("flagged", True)
+    r = classify(raw(UNREPORTED, "0\t0\tE\tA\tcompiler.err.missing.ret.stmt\t3\tmissing return statement",
+                     "0\t0\tT\t5"), False)
+    assert (r.first, r.bytecode_only) == ("3: missing return statement", False)
+
+
+def test_other_errors_of_a_kotlin_groovy_or_scala_class_are_flagged():
+    r = classify(raw(
+        UNREPORTED,
+        "0\t0\tE\tA\tcompiler.err.already.defined\t14\tvariable x is already defined in method f()",
+        "0\t0\tT\t5",
+    ), False, non_java=True)
+    assert (r.status, r.first) == ("flagged", "14: variable x is already defined in method f()")
+
+
+def _class_with(name: str, interfaces: tuple[str, ...] = (), utf8: tuple[str, ...] = ()) -> bytes:
+    """A minimal class file with interfaces and more Utf8 constants, e.g. an annotation descriptor."""
+    pool, index = b"", {}
+    for i, n in enumerate((name, *interfaces)):
+        u = n.encode()
+        pool += b"\x01" + len(u).to_bytes(2, "big") + u + b"\x07" + (2 * i + 1).to_bytes(2, "big")
+        index[n] = 2 * i + 2
+    for s in utf8:
+        u = s.encode()
+        pool += b"\x01" + len(u).to_bytes(2, "big") + u
+    count = 2 * len(index) + len(utf8) + 1
+    body = b"\x00\x21" + index[name].to_bytes(2, "big") + b"\x00\x00" + len(interfaces).to_bytes(2, "big")
+    body += b"".join(index[n].to_bytes(2, "big") for n in interfaces) + bytes(6)
+    return b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + count.to_bytes(2, "big") + pool + body
+
+
+def test_non_java_reads_the_markers_of_kotlin_groovy_and_scala():
+    assert check.non_java(_class_with("p/K", utf8=("Lkotlin/Metadata;",)))
+    assert check.non_java(_class_with("p/S", utf8=("Lscala/reflect/ScalaSignature;",)))
+    assert check.non_java(_class_with("p/L", utf8=("Lscala/reflect/ScalaLongSignature;",)))
+    assert check.non_java(_class_with("p/G", interfaces=("java/io/Serializable", "groovy/lang/GroovyObject")))
+
+
+def test_non_java_is_false_for_java_classes_that_use_these_types():
+    assert not check.non_java(_class_with("p/A", interfaces=("java/io/Serializable",)))
+    assert not check.non_java(_class_with("p/J", utf8=("groovy/lang/GroovyObject", "()Lkotlin/Metadata;")))
+    assert not check.non_java(b"not a class")
+    assert not check.non_java(_class_with("p/G", interfaces=("groovy/lang/GroovyObject",))[:-12])
+
+
+def test_run_check_notes_bytecode_only_errors_of_the_non_java_files(tmp_path: Path, monkeypatch):
+    def fake_process(cmd, timeout, on_stderr_line=None):
+        Path(cmd[-2]).write_text("".join(
+            UNREPORTED.replace("0\t0\t", f"0\t{i}\t", 1) + f"\n0\t{i}\tT\t1\n" for i in range(2)))
+        return 0, False, "", None, False
+
+    monkeypatch.setattr(check.engines, "run_process", fake_process)
+    groovy, java = tmp_path / "G.java", tmp_path / "J.java"
+    jobs = [check.Job("0", (), (groovy, java), non_java=frozenset({groovy}))]
+    out = check.run_check(jobs, timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
+    assert [r.status for r in out[0]] == ["noted", "flagged"]

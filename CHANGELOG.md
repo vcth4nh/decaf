@@ -86,6 +86,16 @@ All notable changes to decaf are documented here.
   may use JDK APIs that newer Java removed, such as `javax.xml.bind`, and
   names that newer Java restricts. Four more javac flow errors of engines
   now get a retry.
+- The compile check flagged correct Kotlin, Groovy, and Scala code, and each
+  flagged class went through all the engines of the chain (#108). The
+  bytecode of these languages can throw undeclared checked exceptions and
+  can have two methods that differ only in their return type, but javac
+  rejects both in a source file. For a class with the Kotlin or Scala
+  annotation or the Groovy interface `GroovyObject`, the check now notes
+  these two errors and does not flag them. Other classes can have such
+  bytecode too, for example a Lombok class with `@SneakyThrows` or a class
+  that a tool generated. Their retries now stop when two engines in a row
+  give the same first error of these two kinds.
 
 ### Security
 

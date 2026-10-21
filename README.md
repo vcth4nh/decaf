@@ -176,10 +176,16 @@ After an engine writes a class, decaf compiles its source file alone with
 for example a variable that the engine renamed in its uses but not in its
 declaration. A class with a parse, name, or flow error goes to the next engine
 of the fallback chain, and the first version without such errors goes to the
-output. When all engines fail the check, the file of the first engine stays,
+output. When no version passes the check, the file of the first engine stays,
 the report lists it under `flagged`, and the artifact is partial (yellow `!`).
 Type errors, for example lost generic type arguments, do not cause a retry:
-the report lists such files under `noted`. For each flagged and noted file,
+the report lists such files under `noted`. Bytecode can throw undeclared
+checked exceptions and can have two methods that differ only in their return
+type, but javac rejects both in a source file. For a class with the Kotlin or
+Scala annotation or the Groovy interface `GroovyObject`, these two errors also
+go under `noted`. For other classes, for example a Lombok class with
+`@SneakyThrows`, the retries stop when two engines in a row give the same
+first error of these two kinds. For each flagged and noted file,
 the report gives the javac errors in line order (at most 100). It also lists
 the files that the check could not examine under `unchecked`, with the reason.
 `decaf report OUTPUT --artifact NAME` shows these lists.
