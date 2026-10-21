@@ -123,3 +123,47 @@ def test_cli_caps_and_measures_engine_memory_real(fixture_jar, tmp_path: Path):
         assert a["heap_mb"] == 1708  # one job: 2048 - 300 - 2048 // 50
         assert 0 < a["peak_rss_mb"] <= 2048  # inside the share
     assert report["totals"]["checked_files"] > 0 and report["totals"]["unchecked_files"] == 0  # the checker JVM too (#99)
+
+
+def test_batch_keeps_dollar_classes_real(engine_jars, tmp_path: Path):
+    """Vineflower writes $Util and an orphan inner class to files of their own; the batch split keeps them (#106)."""
+    import subprocess
+
+    from decaf import engines, pipeline
+    from decaf.scanner import Artifact, ArtifactKind
+
+    javac = shutil.which("javac")
+    if javac is None:
+        pytest.skip("javac not available")
+    sources = {
+        "p/$Util.java": "package p;\npublic class $Util { static class In {} }\n",
+        "p/Gone.java": "package p;\npublic class Gone { public static class In {} }\n",
+        "q/B.java": "package q;\npublic class B {}\n",
+    }
+    for rel, text in sources.items():
+        (tmp_path / "src" / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / rel).write_text(text)
+    classes = tmp_path / "classes"
+    subprocess.run([javac, "--release", "11", "-d", str(classes), *(str(tmp_path / "src" / r) for r in sources)], check=True)
+    (classes / "p/Gone.class").unlink()  # p/Gone$In is an orphan
+    members = []
+    for name, package in (("a.jar", "p/"), ("b.jar", "q/")):
+        jar = tmp_path / name
+        with zipfile.ZipFile(jar, "w") as zf:
+            for p in sorted(classes.rglob("*.class")):
+                if p.relative_to(classes).as_posix().startswith(package):
+                    zf.write(p, p.relative_to(classes).as_posix())
+        report = pipeline.ArtifactReport(rel=name, kind="archive", outcome="ok")
+        members.append((Artifact(jar, name, ArtifactKind.ARCHIVE, 1), jar, report, *pipeline._stems_and_claims(jar)))
+    (tmp_path / "tmp").mkdir()
+    ctx = pipeline.Ctx(
+        settings=pipeline.Settings(input=tmp_path, output=tmp_path / "out", check=False),
+        writer=pipeline.MirrorWriter(tmp_path / "out"), chain=["vineflower"],
+        engine_jars=engine_jars, java=find_java()[0], tmp_root=tmp_path / "tmp", client=None,
+        sources_cache=tmp_path / "s", runner=engines.run_engine, resolver=None,
+        batch_runner=engines.run_engine_batch,
+    )
+    done, requeue = pipeline._decompile_batch(members, ctx)
+    assert requeue == [] and [r.missing_classes for r in done] == [0, 0]
+    assert sorted(p.name for p in (tmp_path / "out/a.jar").rglob("*.java")) == ["$Util.java", "Gone$In.java"]
+    assert sorted(p.name for p in (tmp_path / "out/b.jar").rglob("*.java")) == ["B.java"]

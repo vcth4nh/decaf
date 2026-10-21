@@ -19,7 +19,7 @@ import httpx
 import platformdirs
 
 from . import memory
-from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, safe_extract_zip
+from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, outer_stem, safe_extract_zip
 
 JAVA_MIN = 11
 CDS_MIN_JAVA = 19  # -XX:+AutoCreateSharedArchive
@@ -593,9 +593,10 @@ def _run_per_class(
     tails: list[str] = []
     peak: int | None = None
     out_of_memory = False
-    for f in sorted(root.rglob("*.class")):
-        if "$" in f.name:
-            continue  # inner classes ride along with their outer class
+    files = {f.relative_to(root).as_posix()[: -len(".class")]: f for f in sorted(root.rglob("*.class"))}
+    for stem, f in files.items():
+        if outer_stem(stem, files) is not None:
+            continue  # inner classes ride along with their outer class (#106)
         r = _run_once(spec, jar_path, f, dest, timeout, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
                       heap_mb=heap_mb)
         returncode = returncode or r.returncode

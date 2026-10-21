@@ -10,10 +10,26 @@ from decaf.scanner import (
     classify_zip,
     copy_class_tree,
     find_nested_archives,
+    outer_stem,
     safe_extract_zip,
     scan_counted,
     scan_input,
 )
+
+
+def test_outer_stem_needs_the_outer_class_file():
+    """#106: a class is inner only when the class file of its outer name exists."""
+    stems = {
+        "p/A", "p/A$B", "p/A$B$C", "p/$Util", "p/$Util$In", "p/$Gson$Types", "p/$Gson$Types$Impl",
+        "p/Gone$In", "p/Gone$In$Deep", "q/A$B",
+    }
+    assert outer_stem("p/A$B", stems) == "p/A"
+    assert outer_stem("p/A$B$C", stems) == "p/A"  # the top-level class, not the nearest outer
+    assert outer_stem("p/$Util$In", stems) == "p/$Util"
+    assert outer_stem("p/$Gson$Types$Impl", stems) == "p/$Gson$Types"
+    assert outer_stem("p/Gone$In$Deep", stems) == "p/Gone$In"  # the inner class of an orphan
+    for top in ("p/A", "p/$Util", "p/$Gson$Types", "p/Gone$In", "q/A$B"):
+        assert outer_stem(top, stems) is None
 
 
 def test_classify_archive(make_jar):

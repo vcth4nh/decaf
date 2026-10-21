@@ -35,6 +35,7 @@ from .scanner import (
     classify_counted,
     copy_class_tree,
     find_nested_archives,
+    outer_stem,
     safe_extract_zip,
     scan_counted,
 )
@@ -99,7 +100,8 @@ def normalize_java_rel(rel: str) -> str:
 def _owner_index(stem: str, owners: dict[str, int]) -> int | None:
     """Batch attribution: which member owns a produced source stem.
 
-    Inner classes ride with their outer class (split on the first ``$``).
+    Every class stem of a member is a key, inner classes too (#106); a stem that
+    is no class stem rides with its part before the first ``$``.
     Shared by the post-batch split and the live watcher so they can't diverge.
     """
     i = owners.get(stem)
@@ -402,11 +404,12 @@ def _class_stem(entry: str) -> str:
 
 
 def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
-    """One pass over the class entries: (top-level class stems, metadata claims).
+    """One pass over the class entries: (top-level class stems, claims).
 
-    Claims are the module-info/package-info source rels this archive could
-    yield. They attribute batch output back to its member and keep claimants
-    from sharing a batch, but never join expectations (#75): metadata is
+    Claims are the other source rels this archive could yield: module-info/package-info,
+    and the inner classes, which an engine can also write to files of their own (#106).
+    They attribute batch output back to its member and keep claimants
+    from sharing a batch, but never join expectations (#75): such a file is
     copied when an engine emits it, exactly like a solo run — never retried.
     """
     if source.is_dir():
@@ -423,13 +426,14 @@ def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
         base = e.rsplit("/", 1)[-1]
         if base in ("module-info.class", "package-info.class"):
             claims.add(_class_stem(e))
-        elif "$" not in base:
+        else:
             stems.add(_class_stem(e))
-    return stems, claims
+    inner = {s for s in stems if outer_stem(s, stems) is not None}
+    return stems - inner, claims | inner
 
 
 def expected_class_stems(source: Path) -> set[str]:
-    """Top-level class names (no $-inner, no module/package-info) a decompile should yield."""
+    """Top-level class names (no inner class, no module/package-info) a decompile should yield."""
     return _stems_and_claims(source)[0]
 
 
@@ -484,15 +488,19 @@ def _class_versions(source: Path) -> dict[str, int]:
             out[key] = min(out.get(key, major), major)
 
     if source.is_dir():
-        for p in source.rglob("*.class"):
-            if "$" not in p.name:
+        paths = {p.relative_to(source).as_posix(): p for p in source.rglob("*.class")}
+        keys = {_held_key(n) for n in paths}
+        for name, p in paths.items():
+            if outer_stem(_held_key(name), keys) is None:
                 with open(p, "rb") as f:
-                    keep(_held_key(p.relative_to(source).as_posix()), check.class_major(f.read(8)))
+                    keep(_held_key(name), check.class_major(f.read(8)))
         return out
     try:
         with zipfile.ZipFile(source) as zf:
-            for name in zf.namelist():
-                if not name.endswith(".class") or "$" in name.rsplit("/", 1)[-1]:
+            names = [n for n in zf.namelist() if n.endswith(".class")]
+            keys = {_held_key(n) for n in names}
+            for name in names:
+                if outer_stem(_held_key(name), keys) is not None:
                     continue
                 with zf.open(name) as f:
                     keep(_held_key(name), check.class_major(f.read(8)))
@@ -604,7 +612,7 @@ def _check_trees(
                 by_path[rel] = check.unchecked("kotlin")
                 continue
             key = _held_key(rel)
-            major = held.versions.get(key) or held.versions.get(key.split("$", 1)[0])
+            major = held.versions.get(outer_stem(key, held.versions) or key)
             if limit is not None and major is not None and major > limit:
                 by_path[rel] = check.unchecked(
                     "newer class version", needs_java=major - check.CLASS_VERSION_OFFSET
@@ -769,26 +777,29 @@ def _attempt(
 
 
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
-    """Copy the .class files (plus their $-inners) for missing stems into a temp tree."""
+    """Copy the .class files (plus their inner classes) for missing stems into a temp tree."""
+    if source.is_dir():
+        names = [p.relative_to(source).as_posix() for p in sorted(source.rglob("*.class"))]
+    else:
+        with zipfile.ZipFile(source) as zf:
+            names = [n for n in zf.namelist() if n.endswith(".class")]
+    stems = {_class_stem(n) for n in names}
 
     def wanted(entry: str) -> bool:
         stem = _class_stem(entry)
-        return stem in missing or stem.split("$", 1)[0] in missing
+        return (outer_stem(stem, stems) or stem) in missing
 
     out = _tmp_dir(ctx)
     if source.is_dir():
         count = 0
-        for p in sorted(source.rglob("*.class")):
-            rel = p.relative_to(source).as_posix()
+        for rel in names:
             if wanted(rel):
                 target = out / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(p, target)
+                shutil.copyfile(source / rel, target)
                 count += 1
     else:
-        with zipfile.ZipFile(source) as zf:
-            names = [n for n in zf.namelist() if n.endswith(".class") and wanted(n)]
-        count = safe_extract_zip(source, out, members=names)
+        count = safe_extract_zip(source, out, members=[n for n in names if wanted(n)])
     return out if count else None
 
 
@@ -1170,7 +1181,7 @@ def _decompile_batch(
     """Stage 2 for a batch: one primary-engine JVM over several small jars.
 
     Returns (completed reports, members to requeue for solo processing).
-    Members' expected-stem and metadata-claim sets are disjoint (enforced at
+    Members' expected-stem and claim sets are disjoint (enforced at
     formation), so every produced source file belongs to exactly one member.
     """
     if engines.PROCESSES.closed:

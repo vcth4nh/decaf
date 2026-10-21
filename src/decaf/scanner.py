@@ -67,6 +67,21 @@ def classify_zip(path: Path) -> ArtifactKind:
     return classify_counted(path)[0]
 
 
+def outer_stem(stem: str, stems: Collection[str]) -> str | None:
+    """The top-level class that an inner class rides with; None for a top-level class (#106).
+
+    A class is inner only when the class file of an outer name exists: p/A$B$C rides with
+    p/A, or with p/A$B when p/A is absent. A $ alone does not make a class inner: the
+    engines write p/$Util and an orphan p/Gone$In to files of their own.
+    """
+    i = stem.find("$", stem.rfind("/") + 2)  # a $ at the start of the simple name cuts no outer name
+    while i != -1:
+        if stem[:i] in stems:
+            return stem[:i]
+        i = stem.find("$", i + 1)
+    return None
+
+
 def find_nested_archives(names: Iterable[str]) -> list[str]:
     return [
         n

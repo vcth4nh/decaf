@@ -191,6 +191,23 @@ def test_run_engine_dir_target_iterates_for_non_native(tmp_path: Path, monkeypat
     assert res.returncode == 0
 
 
+def test_run_per_class_runs_top_level_dollar_classes(tmp_path: Path, monkeypatch):
+    """#106: only a class whose outer class file exists rides with it."""
+    tree = tmp_path / "classes"
+    (tree / "com/x").mkdir(parents=True)
+    for name in ("A", "A$1", "$Util", "$Util$In", "Gone$In", "Gone$In$1"):
+        (tree / f"com/x/{name}.class").write_bytes(b"c")
+    seen: list[str] = []
+
+    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
+        seen.append(Path(target).name)
+        return [sys.executable, "-c", "pass"]
+
+    monkeypatch.setattr(engines, "build_command", _b)
+    run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=30)
+    assert sorted(seen) == ["$Util.class", "A.class", "Gone$In.class"]
+
+
 def test_run_engine_spawns_with_pdeathsig_hook(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(engines, "build_command", _fake_build("pass"))
     seen = {}

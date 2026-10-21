@@ -4,6 +4,16 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- A batch of jars lost the classes that have `$` in the simple name, or gave
+  them to another jar of the batch, and the report still showed ✓ with
+  `missing_classes: 0` (#106). For guice-5.1.0, a batch wrote 243 of its 275
+  files. A class is now an inner class only when the class file of its outer
+  class exists. Thus decaf now counts and retries classes such as
+  `$Gson$Types` and inner classes without their outer class. CFR and Procyon
+  now also decompile these classes in class folders.
+
 ## [1.11.0] - 2026-10-21
 
 ### Added
