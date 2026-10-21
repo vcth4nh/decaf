@@ -213,7 +213,7 @@ class MergeWriter:
                 continue
             java += 1
             rel = normalize_java_rel(p.relative_to(tree).as_posix())
-            key = rel.casefold() if self._case_insensitive else rel
+            key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
             with self._lock:
@@ -1576,7 +1576,7 @@ def _form_batch(ready_small: deque, *, fold: bool = False) -> list:
     while ready_small and len(batch) < _BATCH_MAX_JARS:
         item = ready_small.popleft()
         a, _, _, stems, claims = item
-        footprint = {s.casefold() for s in stems | claims} if fold else stems | claims
+        footprint = {casefs.fold(s) for s in stems | claims} if fold else stems | claims
         if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (footprint & taken)):
             kept.append(item)
             continue

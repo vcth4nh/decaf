@@ -253,6 +253,15 @@ def test_merge_case_insensitive_records_case_clash_lowest_key_wins(tmp_path: Pat
         assert (root / "src/p/A.java").read_text() == "class A {}"
 
 
+def test_merge_case_insensitive_joins_two_normal_forms(tmp_path: Path):
+    """Review low item: on APFS, \u00e9 (NFC) and e + U+0301 (NFD) are one file, so the merge records a clash."""
+    w = MergeWriter(tmp_path / "src", case_insensitive=True)
+    _, c1 = w.add_tree(tree(tmp_path / "t1", {"p/Caf\u00e9.java": "class A {}"}), "a/x.jar")
+    _, c2 = w.add_tree(tree(tmp_path / "t2", {"p/Cafe\u0301.java": "class B {}"}), "b/y.jar")
+    assert c1 == []
+    assert [(c["kept"], c["dropped"]) for c in c2] == [("a/x.jar", "b/y.jar")]
+
+
 def test_merge_flag_off_keeps_exact_keys(tmp_path: Path):
     if casefs.is_case_insensitive(tmp_path):
         pytest.skip("needs a case-sensitive tmp to hold both names")

@@ -1339,6 +1339,22 @@ def test_form_batch_folds_case_when_tree_ignores_case():
     assert [stems for _, _, _, stems, _ in batch] == [{"p/A"}, {"p/a"}, {"q/Z"}]
 
 
+def test_form_batch_folds_two_normal_forms_when_tree_ignores_case():
+    """Review low item: on APFS, stems that differ only by the normal form share one file."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    from decaf.pipeline import _form_batch
+
+    def member(stems):
+        return (SimpleNamespace(classes=1), None, None, stems, set())
+
+    q = deque([member({"p/Caf\u00e9"}), member({"p/Cafe\u0301"})])
+    batch = _form_batch(q, fold=True)
+    assert [stems for _, _, _, stems, _ in batch] == [{"p/Caf\u00e9"}]
+    assert [stems for _, _, _, stems, _ in q] == [{"p/Cafe\u0301"}]
+
+
 def test_partial_predicate_and_totals():
     from dataclasses import replace
 
