@@ -6,7 +6,8 @@
 //
 // Jobs file: tokens that end with a NUL byte. "job" <id> starts a job,
 // "release" <n> gives a file with errors a second try with javac --release <n>
-// (from the class-file version: old code may use removed JDK APIs, #108),
+// (from the class-file version: old code may use removed JDK APIs, #108) when
+// the JDK version can cause an error: a JDK name, or a name that newer Java restricts,
 // "cp" <path> adds a classpath entry, and "src" <path> adds a source file
 // (indexes 0, 1, 2, ... in this order).
 //
@@ -17,19 +18,23 @@
 //   <job> <index> T <milliseconds>                   the file is done
 //
 // A jar goes on the classpath as the root of its zip file system: javac then
-// reads it as a folder and follows no Class-Path manifest of an input jar.
+// reads it as a folder and follows no Class-Path manifest of an input jar. A
+// multi-release jar shows the classes for the Java that runs the checker.
 import com.sun.source.util.JavacTask;
 import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystem;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.ProviderNotFoundException;
+import java.nio.file.spi.FileSystemProvider;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 import javax.lang.model.SourceVersion;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
@@ -43,6 +48,13 @@ public final class Checker {
     private static final List<String> OPTIONS = List.of(
         "-proc:none", "-implicit:none", "-nowarn", "-Xlint:none",
         "-Xmaxerrs", "100000", "-XDshould-stop.ifError=FLOW");
+    // Java 11 knows only the old name of the property.
+    private static final Map<String, String> RUNTIME_VIEW = Map.of("releaseVersion", "runtime", "multi-release", "runtime");
+    // The JDK has only these javax packages (not, for example, javax.servlet), and Java 9 and later added none.
+    private static final Pattern JDK_NAME = Pattern.compile(
+        "\\b(?:(?:java|jdk|sun|com\\.sun|org\\.w3c|org\\.xml|org\\.omg|org\\.ietf)\\.|javax\\.(?:accessibility"
+        + "|activation|activity|annotation|crypto|imageio|jws|lang|management|naming|net|print|rmi|script|security"
+        + "|smartcardio|sound|sql|swing|tools|transaction|xml)\\b)");
 
     private static final class Job {
         final String id;
@@ -95,7 +107,7 @@ public final class Checker {
                          StandardJavaFileManager old = secondOptions == null ? null : open(compiler, classpath)) {
                         for (int i; (i = next.getAndIncrement()) < n; ) {
                             String r = check(compiler, fm, OPTIONS, job.id, i, job.sources.get(i));
-                            if (old != null && failed(r)) {
+                            if (old != null && byVersion(r)) {
                                 String r2 = check(compiler, old, secondOptions, job.id, i, job.sources.get(i));
                                 if (!failed(r2)) {
                                     r = r2;
@@ -146,6 +158,25 @@ public final class Checker {
         return result.contains("\tE\t") || result.contains("\tX\t");
     }
 
+    /** Can the JDK version cause the errors of a result, so that the second try can change it? */
+    static boolean byVersion(String result) {
+        for (String line : result.split("\n")) {
+            String[] f = line.split("\t", 7);
+            if (f.length > 2 && f[2].equals("X")) {
+                return true;  // javac threw: the second try has a file manager of its own
+            }
+            if (f.length == 7 && f[2].equals("E")) {
+                if (f[4].contains(".restricted.") || f[4].contains("underscore") || f[4].contains("yield")) {
+                    return true;  // var, record, yield, and _ are names that newer Java restricts
+                }
+                if (!f[4].startsWith("compiler.err.unreported.exception") && JDK_NAME.matcher(f[6]).find()) {
+                    return true;  // an unreported JDK exception comes from the code, not from the JDK version
+                }
+            }
+        }
+        return false;
+    }
+
     /** The release nearest to the wanted one that this javac supports (an old javac cannot do 25, a new one maybe not 8). */
     private static int supported(JavaCompiler compiler, int wanted) {
         int lo = Integer.MAX_VALUE;
@@ -162,12 +193,22 @@ public final class Checker {
     /** The root of a jar's zip file system, or null when it cannot be opened (its classes count as absent). */
     private static Path root(Path jar, List<FileSystem> opened) {
         try {
-            FileSystem fs = FileSystems.newFileSystem(jar, (ClassLoader) null);
+            FileSystem fs = zip().newFileSystem(jar, RUNTIME_VIEW);
             opened.add(fs);
             return fs.getPath("/");
         } catch (Throwable e) {
             return null;
         }
+    }
+
+    /** The provider of zip file systems: FileSystems.newFileSystem takes the properties only from Java 13. */
+    private static FileSystemProvider zip() {
+        for (FileSystemProvider p : FileSystemProvider.installedProviders()) {
+            if (p.getScheme().equalsIgnoreCase("jar")) {
+                return p;
+            }
+        }
+        throw new ProviderNotFoundException("jar");
     }
 
     private static synchronized void write(Writer out, String text) throws IOException {

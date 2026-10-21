@@ -330,6 +330,17 @@ def test_run_check_gives_the_crash_text(tmp_path: Path, monkeypatch):
     assert out == [[unchecked("javac crash", first='Exception in thread "main" java.lang.OutOfMemoryError: Java heap space')]]
 
 
+def test_run_check_gives_the_exception_line_of_a_stack_trace(tmp_path: Path, monkeypatch):
+    """Review C7: after an exception in the main thread of the checker, the last line of stderr is a stack frame."""
+    cause = 'Exception in thread "main" java.nio.file.FileSystemException: /r/results.tsv: No space left on device'
+    tail = cause + "\n\tat java.base/sun.nio.fs.UnixException.translateToIOException(UnixException.java:100)\n" \
+        "\tat Checker.main(Checker.java:62)\n"
+    monkeypatch.setattr(check.engines, "run_process", lambda cmd, timeout: (1, False, tail, None, False))
+    out = check.run_check([check.Job("0", (), (tmp_path / "A.java",))], timeout=5, cpu_budget=1,
+                          java="java", install=tmp_path, tmp_root=tmp_path)
+    assert out == [[unchecked("javac crash", first=cause)]]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="a shell script stands in for java")
 def test_find_javac_reads_a_property_dump_that_is_no_utf8(tmp_path: Path):
     """#108: a property value in another encoding must not stop the run."""

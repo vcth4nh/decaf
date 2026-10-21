@@ -1414,6 +1414,29 @@ def test_class_versions_reads_top_level_majors(make_jar, tmp_path: Path):
     assert _class_versions(folder) == expected
 
 
+@pytest.mark.parametrize("as_folder", [False, True])
+def test_class_versions_skip_a_class_entry_above_the_size_limit(make_jar, tmp_path: Path, monkeypatch, as_folder):
+    """Review C5: decaf reads no larger class entry into its memory."""
+    import decaf.pipeline as pipeline
+
+    small, big = _class_header(52), _class_header(61) + bytes(100)
+    source, _ = _classes(make_jar, tmp_path, {"p/A.class": small, "p/B.class": big}, as_folder)
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(small))
+    assert pipeline._class_versions(source) == ({"p/A": 52}, set())
+
+
+def test_tree_roots_skip_a_class_file_above_the_size_limit(tmp_path: Path, monkeypatch):
+    import decaf.pipeline as pipeline
+    from test_check import _class_file
+
+    source = tmp_path / "copy"
+    for rel, data in (("out/p/A.class", _class_file("p/A")), ("other/q/B.class", _class_file("q/B") + bytes(100))):
+        (source / rel).parent.mkdir(parents=True, exist_ok=True)
+        (source / rel).write_bytes(data)
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(_class_file("p/A")))
+    assert pipeline._tree_roots(source) == [source / "out"]
+
+
 def test_family_classpath_war_and_nested_jar(make_jar, tmp_path: Path):
     from decaf.pipeline import _family_classpath
 

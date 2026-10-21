@@ -1,3 +1,5 @@
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -251,3 +253,55 @@ def test_non_java_reads_the_source_file_of_a_class_file_of_javac(checker, tmp_pa
     assert not check.non_java(data)  # the constant "G.groovy" is no SourceFile
     assert data.count(b"\x01\x00\x06G.java") == 1
     assert check.non_java(data.replace(b"\x01\x00\x06G.java", b"\x01\x00\x08G.groovy"))
+
+
+def test_a_multi_release_jar_shows_its_versioned_classes(checker, tmp_path: Path):
+    """Review C4: javac saw only the base classes of a multi-release jar on the classpath."""
+    import zipfile
+
+    java, javac, install = checker
+    base = _compile(javac, tmp_path / "base", {"p/Util.java": "package p; public class Util { public static int f() { return 0; } }"})
+    text = "package p; public class Util { public static int f() { return Impl11.g(); } }"
+    v11 = _compile(javac, tmp_path / "v11", {"p/Util.java": text, "p/Impl11.java": "package p; class Impl11 { static int g() { return 11; } }"})
+    jar = tmp_path / "mr.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\nMulti-Release: true\n")
+        zf.write(base / "p/Util.class", "p/Util.class")
+        for name in ("Util", "Impl11"):
+            zf.write(v11 / f"p/{name}.class", f"META-INF/versions/11/p/{name}.class")
+    (tmp_path / "Util.java").write_text(text)
+    r = check.run_check([check.Job("0", (jar,), (tmp_path / "Util.java",))], timeout=120, cpu_budget=1,
+                        java=java, install=install, tmp_root=tmp_path)[0][0]
+    assert r.status == "clean", r
+
+
+def test_only_an_error_that_the_jdk_version_can_cause_gets_the_second_try(checker, tmp_path: Path):
+    """Review C9: the second try cost a third more checker time, and for the other errors it changed no result."""
+    java, javac, install = checker
+    (tmp_path / "Gate.java").write_text(
+        "public class Gate {\n  public static void main(String[] args) {\n    for (String r : args) {\n"
+        "      System.out.println(Checker.byVersion(r.replace('|', '\\t').replace('~', '\\n')));\n    }\n  }\n}\n")
+    jar = install / check.JAR
+    subprocess.run([str(javac), "-cp", str(jar), "-d", str(tmp_path), str(tmp_path / "Gate.java")], check=True)
+    cases = {
+        "0|0|E|A|compiler.err.doesnt.exist|1|package javax.xml.bind does not exist": True,
+        "0|0|E|A|compiler.err.doesnt.exist|1|package javax.activation does not exist": True,
+        "0|0|E|A|compiler.err.doesnt.exist|1|package javax.servlet.http does not exist": False,  # no JDK package
+        "0|0|E|A|compiler.err.cant.resolve.location.args|3|cannot find symbol symbol: method stop(java.lang.Throwable)"
+        " location: class java.lang.Thread": True,
+        "0|0|E|P|compiler.err.restricted.type.not.allowed|2|'var' not allowed here": True,
+        "0|0|E|P|compiler.err.underscore.as.identifier|2|as of release 9, '_' is a keyword": True,
+        "0|0|E|P|compiler.err.invalid.yield|5|invalid use of a restricted identifier 'yield'": True,
+        "0|0|X|java.lang.AssertionError": True,
+        "0|0|E|A|compiler.err.missing.ret.stmt|4|missing return statement~0|0|E|A|compiler.err.cant.apply.symbol|7|"
+        "method f in class p.A cannot be applied to given types; required: java.util.List": True,
+        "0|0|E|A|compiler.err.cant.resolve.location|6|cannot find symbol symbol: variable var2 location: class p.I"
+        "~0|0|T|12": False,
+        "0|0|E|A|compiler.err.missing.ret.stmt|4|missing return statement": False,
+        "0|0|E|A|compiler.err.unreported.exception.need.to.catch.or.throw|9|unreported exception java.lang.Throwable;"
+        " must be caught or declared to be thrown": False,
+        "0|0|E|A|compiler.err.cant.resolve.location|6|cannot find symbol symbol: class javaxy location: class p.I": False,
+    }
+    out = subprocess.run([java, "-cp", os.pathsep.join([str(jar), str(tmp_path)]), "Gate", *cases],
+                         capture_output=True, text=True, check=True)
+    assert out.stdout.split() == [str(v).lower() for v in cases.values()]

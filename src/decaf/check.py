@@ -160,7 +160,8 @@ class Job:
     id: str
     classpath: tuple[Path, ...]
     files: tuple[Path, ...]
-    release: int | None = None  # a file with errors gets a second try with javac --release <release> (#108)
+    # A file with an error that the JDK version can cause gets a second try with javac --release <release> (#108).
+    release: int | None = None
     twice: Callable[[str], bool] | None = field(default=None, compare=False)  # see Scope
     non_java: frozenset[Path] = frozenset()  # the files of Kotlin, Groovy, and Scala classes (#108)
     # For the files with an absent name: the Scope.same_package of each file.
@@ -616,7 +617,9 @@ def run_check(
         text = ""
     raw = parse_results(text)
     lines = [line for line in tail.splitlines() if line.strip()]
-    crash = _short(lines[-1]) if lines else f"checker exit code {returncode}"  # e.g. a JVM out of memory (#108)
+    # The cause of an exception in the main thread comes before its stack frames.
+    cause = next((line for line in lines if line.startswith("Exception in thread")), lines[-1] if lines else None)
+    crash = _short(cause) if cause is not None else f"checker exit code {returncode}"  # e.g. a JVM out of memory (#108)
     out: list[list[FileResult]] = []
     for job in jobs:
         found = [raw.get((job.id, i)) for i in range(len(job.files))]

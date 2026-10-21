@@ -406,6 +406,7 @@ class Ctx:
     checker: Callable | None = None  # compile check (#99): check.run_check with bound args; None = off
     java_major: int = 0  # limits the class versions that the check accepts; 0 = no limit
     input_group: list[Path] = field(default_factory=list)  # top-level classpath entries (#99)
+    tree_roots: dict[Path, list[Path]] = field(default_factory=dict)  # the _tree_roots of each class-folder input
     families: dict[str, tuple[Path, list[Path]]] = field(default_factory=dict)  # parent rel -> (path, nested archives)
     class_roots: dict[str, Path | None] = field(default_factory=dict)  # rel -> extracted WEB-INF/BOOT-INF classes
     entry_names: dict[Path, frozenset[str]] = field(default_factory=dict)  # classpath entry -> its class names (#108)
@@ -518,13 +519,24 @@ def _copied_keys(source: Path) -> set[str]:
     return {key for key, found in places.items() if len(found) > 1}
 
 
+_CLASS_FILE_MAX = 16 << 20  # bytes: decaf reads no larger entry as a class file
+
+
+def _bounded(f) -> bytes | None:
+    """The content of an open class file, or None when it is larger than _CLASS_FILE_MAX."""
+    data = f.read(_CLASS_FILE_MAX + 1)
+    return data if len(data) <= _CLASS_FILE_MAX else None
+
+
 def _class_versions(source: Path) -> tuple[dict[str, int], set[str]]:
     """Lowest class-file major version of each top-level class file, by _held_key (#99),
     and the keys of the classes from Kotlin, Groovy, or Scala (#108)."""
     out: dict[str, int] = {}
     non_java: set[str] = set()
 
-    def keep(key: str, data: bytes) -> None:
+    def keep(key: str, data: bytes | None) -> None:
+        if data is None:
+            return
         major = check.class_major(data[:8])
         if major is not None:
             out[key] = min(out.get(key, major), major)
@@ -537,7 +549,7 @@ def _class_versions(source: Path) -> tuple[dict[str, int], set[str]]:
         for name, p in paths.items():
             if outer_stem(_held_key(name), keys) is None:
                 with open(p, "rb") as f:
-                    keep(_held_key(name), f.read())
+                    keep(_held_key(name), _bounded(f))
         return out, non_java
     try:
         with zipfile.ZipFile(source) as zf:
@@ -548,15 +560,12 @@ def _class_versions(source: Path) -> tuple[dict[str, int], set[str]]:
                     continue
                 try:
                     with zf.open(name) as f:
-                        keep(_held_key(name), f.read())
+                        keep(_held_key(name), _bounded(f))
                 except ZIP_ERRORS:
                     continue  # a damaged entry: only its file gets no version gate (#109)
     except ZIP_ERRORS:
         pass
     return out, non_java
-
-
-_CLASS_FILE_MAX = 16 << 20  # bytes: decaf reads no larger entry as a class file
 
 
 def _family_entries(source: Path) -> dict[str, list[str]]:
@@ -585,19 +594,23 @@ def _read_classes(source: Path, names: Collection[str]) -> Iterator[tuple[str, b
     if source.is_dir():
         for name in names:
             try:
-                if (source / name).stat().st_size <= _CLASS_FILE_MAX:
-                    yield name, (source / name).read_bytes()
+                with open(source / name, "rb") as f:
+                    data = _bounded(f)
             except OSError:
                 continue
+            if data is not None:
+                yield name, data
         return
     try:
         with zipfile.ZipFile(source) as zf:
             for name in names:
                 try:
-                    if zf.getinfo(name).file_size <= _CLASS_FILE_MAX:
-                        yield name, zf.read(name)
+                    with zf.open(name) as f:
+                        data = _bounded(f)
                 except (KeyError, *ZIP_ERRORS):
                     continue
+                if data is not None:
+                    yield name, data
     except ZIP_ERRORS:
         return
 
@@ -658,9 +671,11 @@ def _tree_roots(source: Path) -> list[Path]:
     roots: set[Path] = set()
     for p in source.rglob("*.class"):
         try:
-            name = check.class_name(p.read_bytes())
+            with open(p, "rb") as f:
+                data = _bounded(f)
         except OSError:
             continue
+        name = check.class_name(data) if data is not None else None
         rel = p.relative_to(source).as_posix()[: -len(".class")]
         if name and (rel == name or rel.endswith("/" + name)):
             roots.add(source / rel[: len(rel) - len(name)])
@@ -741,7 +756,8 @@ def _check_trees(
         if held.versions is None:
             held.versions, held.non_java = _class_versions(source)
         if held.roots is None and source.is_dir():
-            held.roots = _tree_roots(source)
+            roots = ctx.tree_roots.get(artifact.path)  # read in run(): the copy of the folder has the same folders
+            held.roots = [source / r.relative_to(artifact.path) for r in roots] if roots else _tree_roots(source)
         by_path: dict[str, check.FileResult] = {}
         by_release: dict[int | None, list[str]] = {}
         non_java: set[str] = set()
@@ -761,8 +777,8 @@ def _check_trees(
                     "newer class version", needs_java=major - check.CLASS_VERSION_OFFSET
                 )
                 continue
-            # A file with errors gets a second try with the JDK API of the class's own Java version:
-            # old code may use removed APIs or names that newer Java restricts (#108).
+            # A file with an error that the JDK version can cause gets a second try with the JDK API of the
+            # class's own Java version: old code may use removed APIs or names that newer Java restricts (#108).
             release = None if major is None else max(8, major - check.CLASS_VERSION_OFFSET)
             by_release.setdefault(release, []).append(rel)
             if top in held.non_java:
@@ -1750,11 +1766,6 @@ def run(
         report_due, scheduling = True, False
         try:
             artifacts = [_jvm_input(a, tmp_root) for a in artifacts]
-            input_group = (
-                [p for a in artifacts if a.kind in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE)
-                 for p in (_tree_roots(a.path) if a.kind is ArtifactKind.CLASS_TREE else [a.path])]
-                if settings.input.is_dir() else []
-            )
             chain, engine_jars = _preflight_engines(
                 settings, java_major, client, on_event, on_warn=on_warn
             )
@@ -1792,6 +1803,16 @@ def run(
                             check.run_check, java=java_exe, install=install_dir,
                             tmp_root=tmp_root, cds_dir=cds_dir,
                         )
+            # Only the check reads the input group, and the package roots of a class folder read each class file.
+            input_group: list[Path] = []
+            tree_roots: dict[Path, list[Path]] = {}
+            if checker is not None and settings.input.is_dir():
+                for a in artifacts:
+                    if a.kind is ArtifactKind.CLASS_TREE:
+                        tree_roots[a.path] = _tree_roots(a.path)
+                        input_group += tree_roots[a.path]
+                    elif a.kind is ArtifactKind.ARCHIVE:
+                        input_group.append(a.path)
             writer: MergeWriter | MirrorWriter
             if settings.mirror:
                 writer = MirrorWriter(settings.output, resources=settings.resources)
@@ -1820,6 +1841,7 @@ def run(
                 checker=checker,
                 java_major=java_major,
                 input_group=input_group,
+                tree_roots=tree_roots,
             )
             with (
                 ThreadPoolExecutor(max_workers=fetch_jobs) as fetch_pool,
