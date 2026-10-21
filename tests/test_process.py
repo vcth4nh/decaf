@@ -815,6 +815,22 @@ def test_form_batch_defers_dollar_class_overlap(make_jar):
     assert [m[0].rel for m in q] == ["b.jar", "d.jar"]
 
 
+def test_form_batch_defers_an_orphan_inner_class_and_its_outer_class(make_jar):
+    """Review A2: one engine JVM put the orphan q/Foo$Bar of a.jar into the file of q/Foo of b.jar."""
+    from collections import deque
+
+    from decaf.pipeline import _form_batch
+
+    for outer, fold in (("q/Foo", False), ("q/FOO", True)):
+        q = deque([
+            _member(make_jar, "a.jar", {"q/Foo$Bar.class": b"1", "q/Other.class": b"2"}),  # no q/Foo in a.jar
+            _member(make_jar, "b.jar", {f"{outer}.class": b"3"}),
+            _member(make_jar, "c.jar", {"q/Baz.class": b"4"}),
+        ])
+        assert [m[0].rel for m in _form_batch(q, fold=fold)] == ["a.jar", "c.jar"]
+        assert [m[0].rel for m in q] == ["b.jar"]
+
+
 def test_class_level_retry_takes_dollar_classes(make_jar, tmp_path: Path):
     """#106: a missing $ class is a missing class; its retry tree has its inner classes."""
     jar = make_jar("app.jar", {

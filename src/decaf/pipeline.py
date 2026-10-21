@@ -200,7 +200,7 @@ class MergeWriter:
         self.root = src_root
         self._lock = threading.Lock()
         self._case_insensitive = case_insensitive
-        self._index: dict[str, tuple[str, str, str]] = {}  # key -> (sort_key, sha256, rel)
+        self._index: dict[str, tuple[tuple[str, bool], str, str]] = {}  # key -> (rank, sha256, rel)
 
     def add_tree(self, tree: Path, sort_key: str) -> tuple[int, list[dict]]:
         java = 0
@@ -212,31 +212,34 @@ class MergeWriter:
             if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
                 continue
             java += 1
-            rel = normalize_java_rel(p.relative_to(tree).as_posix())
+            raw = p.relative_to(tree).as_posix()
+            # A held or retried base class can come in a later tree than its twin: of one sort key, the base wins.
+            rank = (sort_key, _strip_container(raw).startswith("META-INF/versions/"))
+            rel = normalize_java_rel(raw)
             key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
             with self._lock:
                 existing = self._index.get(key)
                 if existing is None:
-                    self._index[key] = (sort_key, digest, rel)
+                    self._index[key] = (rank, digest, rel)
                     target = self.root / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
                 elif existing[1] == digest:
                     pass  # identical duplicate
-                elif sort_key < existing[0]:
-                    entry = {"path": rel, "kept": sort_key, "dropped": existing[0]}
+                elif rank < existing[0]:
+                    entry = {"path": rel, "kept": sort_key, "dropped": existing[0][0]}
                     if existing[2] != rel:
                         entry["dropped_path"] = existing[2]
                         (self.root / existing[2]).unlink(missing_ok=True)
                     collisions.append(entry)
-                    self._index[key] = (sort_key, digest, rel)
+                    self._index[key] = (rank, digest, rel)
                     target = self.root / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
                 else:
-                    entry = {"path": existing[2], "kept": existing[0], "dropped": sort_key}
+                    entry = {"path": existing[2], "kept": existing[0][0], "dropped": sort_key}
                     if existing[2] != rel:
                         entry["dropped_path"] = rel
                     collisions.append(entry)
@@ -1278,7 +1281,7 @@ def _fetch_stage(
         if ctx.case_insensitive and artifact.kind in _CASE_CHECKED_KINDS:
             groups = casefs.case_groups(_output_stems(artifact))
             if groups:
-                if artifact.kind is ArtifactKind.ARCHIVE:
+                if artifact.kind in (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR):
                     nested = _discover_nested(artifact, ctx)  # nested jars get their own check
                 unit = "source files" if artifact.kind is ArtifactKind.SOURCES_JAR else "classes"
                 report.outcome = "failed"
@@ -1655,9 +1658,12 @@ def _preflight_engines(
 
 
 def _form_batch(ready_small: deque, *, fold: bool = False) -> list:
-    """Greedy prefix of ready smalls with disjoint stems and claims, bounded by the caps.
+    """Greedy prefix of ready smalls with disjoint footprints, bounded by the caps.
 
-    Skipped members (stem/claim overlap / class cap) stay queued in order for
+    A footprint has the class stems, the claims, and the outer names of the orphan inner classes:
+    an engine puts an orphan into the file of its outer class when one JVM reads both.
+
+    Skipped members (footprint overlap / class cap) stay queued in order for
     the next batch. Always takes at least one member, so the queue drains.
     ``fold`` compares footprints case-folded: on a case-insensitive tree, stems
     that differ only by case would share one file in the batch dest (#93).
@@ -1669,7 +1675,9 @@ def _form_batch(ready_small: deque, *, fold: bool = False) -> list:
     while ready_small and len(batch) < _BATCH_MAX_JARS:
         item = ready_small.popleft()
         a, _, _, stems, claims = item
-        footprint = {casefs.fold(s) for s in stems | claims} if fold else stems | claims
+        outers = {s[:i] for s in stems for i in range(s.rfind("/") + 2, len(s)) if s[i] == "$"}
+        footprint = stems | claims | outers
+        footprint = {casefs.fold(s) for s in footprint} if fold else footprint
         if batch and (total_classes + a.classes > _BATCH_MAX_CLASSES or (footprint & taken)):
             kept.append(item)
             continue

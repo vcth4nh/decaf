@@ -2527,24 +2527,25 @@ def test_run_refuses_case_colliding_class_tree(fake_env, tmp_path: Path, monkeyp
     assert art.attempts == []
 
 
-def test_run_refused_war_still_processes_nested_jars(fake_env, make_jar, tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize(
+    "entries, clash",
+    [
+        ({"WEB-INF/classes/p/a.class": b"a", "WEB-INF/classes/p/A.class": b"A"}, "2 classes differ only by case (p/A vs p/a)"),
+        # Review A3: a war with source entries and no class entries is a sources jar.
+        ({"x/a.java": "class a {}", "x/A.java": "class A {}"}, "2 source files differ only by case (x/A.java vs x/a.java)"),
+    ],
+    ids=["classes", "sources"],
+)
+def test_run_refused_war_still_processes_nested_jars(fake_env, make_jar, tmp_path: Path, monkeypatch, entries, clash):
     monkeypatch.setattr(casefs, "is_case_insensitive", lambda d: True)
     input_dir = tmp_path / "in"
     inner = make_jar("dep.jar", {"com/d/D.class": b"d"})
-    make_jar(
-        "app.war",
-        {
-            "WEB-INF/classes/p/a.class": b"a",
-            "WEB-INF/classes/p/A.class": b"A",
-            "WEB-INF/lib/dep.jar": inner.read_bytes(),
-        },
-        base=input_dir,
-    )
+    make_jar("app.war", {**entries, "WEB-INF/lib/dep.jar": inner.read_bytes()}, base=input_dir)
     out = tmp_path / "out"
     report = run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
     by_rel = {a.rel: a for a in report.artifacts}
     assert by_rel["app.war"].outcome == "failed"
-    assert by_rel["app.war"].failure.startswith("case collision: 2 classes differ only by case (p/A vs p/a)")
+    assert by_rel["app.war"].failure.startswith(f"case collision: {clash}")
     assert by_rel["app.war!/WEB-INF/lib/dep.jar"].outcome == "ok"
     assert (out / "app.war/WEB-INF/lib/dep.jar/com/d/D.java").is_file()
 
@@ -3178,21 +3179,43 @@ def test_run_warns_when_two_entries_of_one_name_differ(fake_env, make_jar, tmp_p
     ]
 
 
-def test_run_uses_the_last_copy_when_an_earlier_copy_is_damaged(fake_env, make_jar, tmp_path):
-    """Review low item: a damaged first copy failed the name, also when the last copy was good."""
-    lib = make_jar("a.jar", {"com/a/A.class": b"a"}).read_bytes()
-    war = _war_with_two_copies(tmp_path / "in/app.war", lib, lib)
-    with zipfile.ZipFile(war) as zf:
-        offset = next(i.header_offset for i in zf.infolist() if i.filename == "WEB-INF/lib/a.jar")
-    with open(war, "r+b") as f:  # an invalid deflate block at the start of the first copy
+def _damage_first_copy(archive: Path, name: str) -> None:
+    """An invalid deflate block at the start of the first entry of the name."""
+    with zipfile.ZipFile(archive) as zf:
+        offset = next(i.header_offset for i in zf.infolist() if i.filename == name)
+    with open(archive, "r+b") as f:
         f.seek(offset + 26)
         name_len, extra_len = struct.unpack("<HH", f.read(4))
         f.seek(offset + 30 + name_len + extra_len)
         f.write(b"\xff")
+
+
+def test_run_uses_the_last_copy_when_an_earlier_copy_is_damaged(fake_env, make_jar, tmp_path):
+    """Review low item: a damaged first copy failed the name, also when the last copy was good."""
+    lib = make_jar("a.jar", {"com/a/A.class": b"a"}).read_bytes()
+    war = _war_with_two_copies(tmp_path / "in/app.war", lib, lib)
+    _damage_first_copy(war, "WEB-INF/lib/a.jar")
     report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=perfect_engine)
     outcomes = {a.rel: a.outcome for a in report.artifacts}
     assert outcomes == {"app.war": "ok", "app.war!/WEB-INF/lib/a.jar": "ok"}
     assert (tmp_path / "out/app.war/WEB-INF/lib/a.jar/com/a/A.java").is_file()
+
+
+def test_run_uses_the_last_copy_of_a_source_entry_when_an_earlier_copy_is_damaged(fake_env, tmp_path):
+    """Review A4: a damaged first copy made the good last copy a missing file, so the sources jar was partial."""
+    jar = tmp_path / "in/lib-sources.jar"
+    jar.parent.mkdir(parents=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # zipfile warns about the duplicate name
+        with zipfile.ZipFile(jar, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("x/A.java", "class A { /* first */ }")
+            zf.writestr("x/A.java", "class A { /* last */ }")
+            zf.writestr("x/B.java", "class B {}")
+    _damage_first_copy(jar, "x/A.java")
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=perfect_engine)
+    (art,) = report.artifacts
+    assert (art.outcome, art.method, art.java_files, art.missing_classes, art.partial) == ("ok", "extracted", 2, 0, False)
+    assert (tmp_path / "out/lib-sources.jar/x/A.java").read_text() == "class A { /* last */ }"
 
 
 def test_run_stubbed_inner_class_file_is_written_without_a_retry(fake_env, make_jar, tmp_path):
@@ -3233,6 +3256,18 @@ def test_run_multi_release_stubs_keep_both_versions(fake_env, make_jar, tmp_path
     assert (out / "META-INF/versions/9/p/A.java").read_text() == STUB_TEXT["vineflower"]
     assert [s["path"] for s in r.stubs] == ["META-INF/versions/9/p/A.java"]
     assert [(a.engine, a.stubbed) for a in r.attempts] == [("vineflower", 2), ("cfr", 0)]
+
+
+def test_run_merge_keeps_the_retried_base_class_over_its_versioned_twin(fake_env, make_jar, tmp_path):
+    """Review A1: with --merge, a held base class came from a later tree, and its twin from CFR won."""
+    input_dir = tmp_path / "in"
+    make_jar("mr.jar", {"p/A.class": b"a", "META-INF/versions/11/p/A.class": b"a11"}, base=input_dir)
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, engine="cfr"),
+                 runner=stub_engine({"cfr": {"p/A"}}))
+    r = report.artifacts[0]
+    assert [(a.engine, a.level) for a in r.attempts] == [("cfr", "archive"), ("vineflower", "class")]
+    assert (tmp_path / "out/src/p/A.java").read_text() == "// vineflower\nclass X {}\n"
+    assert [c["path"] for c in r.collisions] == ["p/A.java"]  # the twin, as for one tree
 
 
 def test_run_multi_release_versioned_stub_is_not_retried(fake_env, make_jar, tmp_path):
