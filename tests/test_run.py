@@ -315,8 +315,9 @@ def test_run_requires_java(monkeypatch, make_jar, tmp_path: Path):
 def test_run_primary_engine_needs_newer_java(monkeypatch, make_jar, tmp_path: Path):
     monkeypatch.setattr(engines, "find_java", lambda: ("java", 11))
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
-    with pytest.raises(DecafError, match="needs Java 17"):
+    with pytest.raises(DecafError, match="needs Java 17") as err:
         run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+    assert "--engine" in str(err.value) and "decaf engines list" in str(err.value)  # the hint (#113)
 
 
 def test_run_drops_fallback_engine_too_new_for_runtime(monkeypatch, make_jar, tmp_path: Path):
@@ -355,6 +356,89 @@ def test_run_primary_download_failure_is_fatal(monkeypatch, make_jar, tmp_path: 
     monkeypatch.setattr(engines, "ensure_engine", failing_ensure)
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     with pytest.raises(DecafError, match="vineflower: download failed"):
+        run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+
+
+def test_run_warns_about_fallback_engines_that_fail_to_download(monkeypatch, make_jar, tmp_path: Path):
+    """#113: a fallback engine that failed to download left the chain with no word, and a cache error gave a traceback."""
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+
+    def ensure(spec, client, cache_dir=None):
+        if spec.name == "procyon":
+            raise engines.EngineError("procyon: download failed: boom")
+        if spec.name == "jd":
+            raise PermissionError(13, "Permission denied", "/cache/engines/jd-1.2.0.jar")
+        return Path(f"/fake/{spec.name}.jar")
+
+    monkeypatch.setattr(engines, "ensure_engine", ensure)
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    warns: list[str] = []
+    report = run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine, on_warn=warns.append,
+    )
+    assert report.settings["chain"] == ["vineflower", "cfr", "fernflower"]
+    assert (
+        "fallback chain: skipped procyon (download failed: boom), jd (Permission denied: /cache/engines/jd-1.2.0.jar)"
+        in warns
+    )
+
+
+def test_run_primary_engine_cache_error_is_a_clean_error(monkeypatch, make_jar, tmp_path: Path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+
+    def ensure(spec, client, cache_dir=None):
+        raise PermissionError(13, "Permission denied", "/cache/engines")
+
+    monkeypatch.setattr(engines, "ensure_engine", ensure)
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    with pytest.raises(DecafError, match="^vineflower: Permission denied: /cache/engines$"):
+        run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
+
+
+def _engine_jar(path: Path, java: int) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("e/Main.class", b"\xca\xfe\xba\xbe\x00\x00" + (java + 44).to_bytes(2, "big"))
+    return path
+
+
+def test_run_skips_a_pinned_fallback_that_needs_a_newer_java(monkeypatch, make_jar, tmp_path: Path):
+    """#113: the newest Fernflower needs Java 25, but its built-in spec says 21."""
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None: _engine_jar(tmp_path / "jars" / f"{spec.name}.jar",
+                                                         25 if spec.name == "fernflower" else 17),
+    )
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    warns: list[str] = []
+    report = run(
+        Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False),
+        runner=perfect_engine, on_warn=warns.append,
+    )
+    assert report.settings["chain"] == ["vineflower", "cfr", "procyon", "jd"]
+    assert "fallback chain: skipped fernflower (needs Java 25+, found 21)" in warns
+
+
+def test_run_stops_with_a_hint_when_the_primary_jar_needs_a_newer_java(monkeypatch, make_jar, tmp_path: Path):
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    monkeypatch.setattr(
+        engines, "ensure_engine",
+        lambda spec, client, cache_dir=None: _engine_jar(tmp_path / "jars" / f"{spec.name}.jar", 25),
+    )
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    with pytest.raises(DecafError) as err:
+        run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False, engine="cfr"))
+    assert str(err.value).startswith("engine cfr needs Java 25+, found Java 21")
+    assert "--engine" in str(err.value) and "decaf engines list" in str(err.value)
+
+
+def test_run_stops_when_the_java_version_is_unknown(monkeypatch, make_jar, tmp_path: Path):
+    """#113: java -version gave no version (no answer, or a text that decaf cannot read)."""
+    monkeypatch.setattr(engines, "find_java", lambda: ("/opt/java/bin/java", 0))
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    with pytest.raises(DecafError, match="cannot read the Java version of /opt/java/bin/java"):
         run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False))
 
 

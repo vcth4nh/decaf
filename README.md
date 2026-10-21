@@ -35,8 +35,9 @@ into a source tree that mirrors your input, or one merged package tree with
 ## Requirements
 
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
-- Java 11+ on PATH (Java 21+ enables all five engines; Vineflower needs 17+,
-  Fernflower 21+)
+- Java on PATH that can run the engines that you use. `decaf engines list`
+  shows the Java that each engine needs. When the Java is too old for the
+  primary engine, the run stops and gives a hint.
 - A JDK (with `javac`) for the compile check. With a JRE only, decaf runs
   without the check and prints one note.
 - Linux, macOS, or Windows (the CPU budget is hard-enforced on Linux,
@@ -270,6 +271,11 @@ in your config file — note that rewriting drops hand-written comments there.
 Every later run verifies the cached jar against that pin, exactly like the
 built-in ones. Like folders named `engines`, `cache`, or `report`, a folder literally
 named `run` needs an explicit path (`decaf ./run`).
+
+A new pin can need a newer Java than the old one. `engines list` and each run
+read the Java that a cached engine jar needs from its class files. A fallback
+engine that needs a newer Java is skipped with a warning, and `update` warns
+when the java on PATH is too old for the new pin.
 
 ## Development
 

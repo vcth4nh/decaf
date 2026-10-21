@@ -1,5 +1,7 @@
 import hashlib
+import io
 import re
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -94,6 +96,32 @@ def test_engines_list_shows_pins_cache_and_java(tmp_path: Path, monkeypatch):
     assert "no" in _row(plain, "cfr")            # not cached
     assert "needs 21+" in _row(plain, "fernflower")  # java 17 too old
     assert str(tmp_path / "engines") in plain    # cache dir footer
+
+
+def _jar_bytes(java: int) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("e/Main.class", b"\xca\xfe\xba\xbe\x00\x00" + (java + 44).to_bytes(2, "big"))
+    return buf.getvalue()
+
+
+def test_engines_list_reads_the_java_need_of_a_cached_jar(tmp_path: Path, monkeypatch):
+    """#113: the newest Fernflower needs Java 25, but its built-in spec says 21."""
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    data = _jar_bytes(25)
+    (tmp_path / "engines").mkdir()
+    (tmp_path / "engines/fernflower-261.1.jar").write_bytes(data)
+    cfgf = tmp_path / "c.toml"
+    cfgf.write_text(
+        '[engines.fernflower]\nversion = "261.1"\nurl = "https://x.test/ff.jar"\n'
+        f'sha256 = "{hashlib.sha256(data).hexdigest()}"\n'
+    )
+    result = runner.invoke(app, ["engines", "list", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    assert "needs 25+" in _row(ANSI.sub("", result.output), "fernflower")
 
 
 def test_engines_list_without_java(tmp_path: Path, monkeypatch):
@@ -237,6 +265,29 @@ def test_update_writes_pins_and_reports(tmp_path: Path, monkeypatch):
     assert f"cfr {ENGINES['cfr'].version} → 9.9" in plain
     assert "already at latest" in plain  # the four None engines
     assert load_config(cfgf).engine_overrides["cfr"]["version"] == "9.9"
+
+
+def test_update_warns_when_the_new_pin_needs_a_newer_java(tmp_path: Path, monkeypatch):
+    """#113: `engines update` pinned a Fernflower that needs Java 25 and said only ok."""
+    import decaf.engines as engines
+    import decaf.update as upd
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    monkeypatch.setattr(engines, "find_java", lambda: ("java", 21))
+    (tmp_path / "engines").mkdir()
+    (tmp_path / "engines/fernflower-9.9.jar").write_bytes(_jar_bytes(25))
+    cfgf = tmp_path / "config.toml"
+    cfgf.write_text("")
+
+    def fake_update(spec, client, cache_dir, version=None, warn=None):
+        return _fake_result("fernflower", spec.version) if spec.name == "fernflower" else None
+
+    monkeypatch.setattr(upd, "update_engine", fake_update)
+    result = runner.invoke(app, ["engines", "update", "--config", str(cfgf)])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "fernflower 9.9 needs Java 25+, and the java on PATH is Java 21" in plain
+    assert load_config(cfgf).engine_overrides["fernflower"]["version"] == "9.9"  # pinned all the same
 
 
 def test_update_failure_keeps_config_and_exits_1(tmp_path: Path, monkeypatch):

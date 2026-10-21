@@ -10,8 +10,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -139,52 +141,80 @@ def ensure_engine(
 
     if on_download is not None:
         on_download()
-    part = jar.with_suffix(".part")
-    fetch_to(client, spec.url, part, spec.name)
+    # Temp names of this process only: two runs can download one engine at the same time (#113).
+    fd, name = tempfile.mkstemp(dir=cache, prefix=f"{spec.name}-", suffix=".part")
+    os.close(fd)
+    part = Path(name)
+    try:
+        fetch_to(client, spec.url, part, spec.name)
 
-    expected = spec.download_sha256 or spec.sha256
-    got = _sha256(part)
-    if got != expected:
-        part.unlink()
-        raise EngineError(
-            f"{spec.name}: checksum mismatch for {spec.url}: expected {expected}, got {got}"
-        )
-
-    if spec.archive_member:
-        extract_dir = cache / f"{spec.name}-extract"
-        shutil.rmtree(extract_dir, ignore_errors=True)
-        found = safe_extract_zip(part, extract_dir, members=[spec.archive_member])
-        part.unlink()
-        member = extract_dir / spec.archive_member
-        if found != 1 or _sha256(member) != spec.sha256:
-            shutil.rmtree(extract_dir, ignore_errors=True)
+        expected = spec.download_sha256 or spec.sha256
+        got = _sha256(part)
+        if got != expected:
             raise EngineError(
-                f"{spec.name}: member {spec.archive_member!r} missing or checksum mismatch"
+                f"{spec.name}: checksum mismatch for {spec.url}: expected {expected}, got {got}"
             )
-        member.replace(jar)
-        shutil.rmtree(extract_dir, ignore_errors=True)
-    else:
-        part.replace(jar)
+
+        if spec.archive_member:
+            extract_dir = Path(tempfile.mkdtemp(dir=cache, prefix=f"{spec.name}-extract-"))
+            try:
+                found = safe_extract_zip(part, extract_dir, members=[spec.archive_member])
+                member = extract_dir / spec.archive_member
+                if found != 1 or _sha256(member) != spec.sha256:
+                    raise EngineError(
+                        f"{spec.name}: member {spec.archive_member!r} missing or checksum mismatch"
+                    )
+                member.replace(jar)
+            finally:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+        else:
+            part.replace(jar)
+    finally:
+        part.unlink(missing_ok=True)
     return jar
 
 
 def parse_java_major(text: str) -> int | None:
-    m = re.search(r'version "([0-9][0-9._]*)"', text)
+    m = re.search(r'version "(\d+)(?:\.(\d+))?', text)  # also "26-ea" and "17-internal" (#113)
     if not m:
         return None
-    parts = m.group(1).split(".")
-    if parts[0] == "1" and len(parts) > 1:  # "1.8.0_392" style
-        return int(parts[1])
-    return int(parts[0])
+    if m.group(1) == "1" and m.group(2):  # "1.8.0_392" style
+        return int(m.group(2))
+    return int(m.group(1))
 
 
 def find_java() -> tuple[str, int] | None:
     exe = shutil.which("java")
     if not exe:
         return None
-    proc = subprocess.run([exe, "-version"], capture_output=True, text=True)
+    try:
+        proc = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return (exe, 0)  # no answer: the version is unknown (#113)
     major = parse_java_major(proc.stderr or proc.stdout or "")
     return (exe, major or 0)
+
+
+def required_java(spec: EngineSpec, jar: Path) -> int:
+    """The Java that an engine jar needs: its newest class file, and at least spec.min_java (#113).
+
+    A pin can need a newer Java than the built-in spec says. A class of META-INF/versions/N
+    loads only on Java N+, and module-info only on Java 9+, so they do not count.
+    """
+    newest = 0
+    try:
+        with zipfile.ZipFile(jar) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if not name.endswith(".class") or name.startswith("META-INF/versions/") or name.endswith("module-info.class"):
+                    continue
+                with zf.open(info) as f:
+                    head = f.read(8)
+                if head[:4] == b"\xca\xfe\xba\xbe":
+                    newest = max(newest, int.from_bytes(head[6:8], "big"))
+    except ZIP_ERRORS:
+        pass  # an unreadable jar: the spec gives the need
+    return max(spec.min_java, newest - 44)
 
 
 NATIVE_DIR_ENGINES = {"vineflower", "fernflower", "jd"}
