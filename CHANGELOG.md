@@ -38,6 +38,14 @@ All notable changes to decaf are documented here.
   split long paths. Now each line stays whole.
 - `decaf report` showed a traceback for a file that is not a JSON object or
   not UTF-8. Now it shows an error and exits with code 2.
+- One damaged entry stopped more than that entry (#109). An entry name that
+  is not UTF-8 stopped the whole scan; now its archive fails as
+  `unreadable archive`. A damaged resource or class entry failed its
+  artifact, and a damaged library failed its war with all the other
+  libraries. Now decaf skips only the damaged entry: a damaged library fails
+  alone, a damaged class stays a missing class, and a damaged source entry
+  is a missing file. A Maven sources jar with a damaged entry now goes to
+  the engines.
 
 ### Security
 

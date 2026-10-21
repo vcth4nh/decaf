@@ -11,7 +11,6 @@ import threading
 import time
 import traceback
 import zipfile
-import zlib
 from collections import deque
 from collections.abc import Callable, Collection
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -32,6 +31,7 @@ from .scanner import (
     Artifact,
     ArtifactKind,
     SOURCE_SUFFIXES,
+    ZIP_ERRORS,
     classify_counted,
     copy_class_tree,
     find_nested_archives,
@@ -270,7 +270,7 @@ class MirrorWriter:
             # entries make the count approximate. Resources must never taint
             # the artifact's decompile outcome.
             return safe_extract_zip(archive, self.dest_for(rel), members=names), 0
-        except (zipfile.BadZipFile, RuntimeError, OSError):
+        except ZIP_ERRORS:
             return 0, 0
 
     def add_blob(self, zip_path: Path, member: str, rel: str) -> tuple[int, int]:
@@ -282,7 +282,7 @@ class MirrorWriter:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with open(target, "wb") as out:
                     shutil.copyfileobj(src, out)
-        except (KeyError, zipfile.BadZipFile, OSError):
+        except (KeyError, *ZIP_ERRORS):
             target.unlink(missing_ok=True)
             return 0, 0
         return 1, 0
@@ -503,10 +503,13 @@ def _class_versions(source: Path) -> dict[str, int]:
             for name in names:
                 if outer_stem(_held_key(name), keys) is not None:
                     continue
-                with zf.open(name) as f:
-                    keep(_held_key(name), check.class_major(f.read(8)))
-    except (zipfile.BadZipFile, OSError, zlib.error, NotImplementedError):
-        pass  # a damaged entry: the files after it get no version gate
+                try:
+                    with zf.open(name) as f:
+                        keep(_held_key(name), check.class_major(f.read(8)))
+                except ZIP_ERRORS:
+                    continue  # a damaged entry: only its file gets no version gate (#109)
+    except ZIP_ERRORS:
+        pass
     return out
 
 
@@ -526,7 +529,7 @@ def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
                 safe_extract_zip(path, dest, members=members)
                 root = dest / prefix.rstrip("/")
                 break
-    except (zipfile.BadZipFile, RuntimeError, OSError, zlib.error):
+    except ZIP_ERRORS:
         root = None  # kept as None: the other archives of the family do not try again
     with ctx.family_lock:
         return ctx.class_roots.setdefault(rel, root)
@@ -935,10 +938,14 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
             ]
             names = [n for n in names if n not in clashing]
     extract_dir = _tmp_dir(ctx)
-    safe_extract_zip(artifact.path, extract_dir, members=names)
+    failed: list[str] = []
+    safe_extract_zip(artifact.path, extract_dir, members=names, failed=failed)
+    unreadable = set(failed)
     for name in names:
         p = extract_dir / name
-        if p.is_file():
+        if name in unreadable:  # a damaged entry fails this archive, not its parent (#109)
+            nested.append(Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.CORRUPT))
+        elif p.is_file():
             kind, classes = classify_counted(p)
             nested.append(Artifact(p, f"{artifact.rel}!/{name}", kind, classes))
     with ctx.family_lock:
@@ -1035,10 +1042,12 @@ def _fetch_stage(
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             state("extracting")
             tmp = _tmp_dir(ctx)
-            extract_sources(artifact.path, tmp)
+            damaged: list[str] = []
+            extract_sources(artifact.path, tmp, damaged)
             java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
             report.java_files = java
             report.collisions = collisions
+            report.missing_classes = len(damaged)  # a source entry that cannot be read is a missing file (#109)
             state("copying resources")
             copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
             report.resources_copied += copied
@@ -1071,7 +1080,8 @@ def _fetch_stage(
             if resolution is not None and resolution.sources_jar is not None:
                 state("extracting")
                 tmp = _tmp_dir(ctx)
-                if extract_sources(resolution.sources_jar, tmp) > 0:
+                damaged = []
+                if extract_sources(resolution.sources_jar, tmp, damaged) > 0 and not damaged:
                     java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
                     report.method = "maven"
                     report.repo = resolution.repo
@@ -1080,6 +1090,8 @@ def _fetch_stage(
                     report.java_files = java
                     report.collisions = collisions
                     done = True
+                elif damaged:  # a part of the sources is no complete output: the engines decompile (#109)
+                    resolution.miss = f"sources jar for {resolution.gav} has a damaged entry: {damaged[0]}"
                 else:
                     resolution.miss = f"sources jar for {resolution.gav} contained no .java/.kt files"
             if resolution is not None:

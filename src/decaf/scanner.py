@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import zipfile
+import zlib
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -11,6 +12,15 @@ from pathlib import Path, PurePosixPath
 
 ARCHIVE_EXTS = {".jar", ".war", ".ear", ".aar"}
 SOURCE_SUFFIXES = (".java", ".kt")  # source files: input classification and engine output
+
+try:
+    from lzma import LZMAError
+except ImportError:  # a Python without lzma: zipfile raises RuntimeError for an LZMA entry
+    LZMAError = RuntimeError
+
+# What zipfile raises for an archive or an entry that it cannot read: damaged data, an unknown
+# method, encryption, a UTF-8 entry name that is no UTF-8, or a bzip2 stream (OSError) (#109).
+ZIP_ERRORS = (zipfile.BadZipFile, zlib.error, LZMAError, EOFError, NotImplementedError, RuntimeError, OSError, ValueError)
 
 
 class ScanError(Exception):
@@ -39,7 +49,7 @@ def _read_names(path: Path) -> list[str] | None:
     try:
         with zipfile.ZipFile(path) as zf:
             return zf.namelist()
-    except (zipfile.BadZipFile, OSError):
+    except ZIP_ERRORS:
         return None
 
 
@@ -138,8 +148,13 @@ def safe_extract_zip(
     *,
     suffixes: tuple[str, ...] | None = None,
     members: Collection[str] | None = None,
+    failed: list[str] | None = None,
 ) -> int:
-    """Extract files from a zip, refusing paths that escape dest. Returns count."""
+    """Extract files from a zip, refusing paths that escape dest. Returns count.
+
+    An entry that cannot be read is skipped, and its name goes to failed (#109).
+    A disk error, for example a full disk, still raises.
+    """
     count = 0
     dest.mkdir(parents=True, exist_ok=True)
     resolved_dest = dest.resolve()
@@ -160,8 +175,16 @@ def safe_extract_zip(
             if not ok:
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, open(target, "wb") as out:
-                shutil.copyfileobj(src, out)
+            try:
+                with zf.open(info) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+            except ZIP_ERRORS as exc:
+                if isinstance(exc, OSError) and exc.errno is not None:
+                    raise  # the disk, not the entry
+                target.unlink(missing_ok=True)
+                if failed is not None:
+                    failed.append(name)
+                continue
             count += 1
     return count
 

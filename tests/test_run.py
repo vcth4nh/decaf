@@ -2465,6 +2465,22 @@ def test_run_damaged_class_entry_of_a_war_fails_none_of_its_libraries(fake_env, 
     assert outcomes == {"app.war": "ok", "app.war!/WEB-INF/lib/dep.jar": "ok"}
 
 
+def test_run_damaged_nested_jar_fails_only_that_jar(fake_env, make_jar, make_damaged_jar, tmp_path):
+    """#109: a war with one damaged library keeps its other libraries."""
+    good = make_jar("good.jar", {"com/g/G.class": b"g"})
+    bad = make_jar("bad.jar", {"com/b/B.class": b"b"})
+    make_damaged_jar("app.war", {"WEB-INF/classes/com/w/W.class": b"w" * 50,
+                                 "WEB-INF/lib/good.jar": good.read_bytes(), "WEB-INF/lib/bad.jar": bad.read_bytes()},
+                     damaged=("WEB-INF/lib/bad.jar",), base=tmp_path / "in")
+    report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=perfect_engine)
+    outcomes = {a.rel: (a.outcome, a.failure) for a in report.artifacts}
+    assert outcomes == {
+        "app.war": ("ok", None),
+        "app.war!/WEB-INF/lib/bad.jar": ("failed", "unreadable archive"),
+        "app.war!/WEB-INF/lib/good.jar": ("ok", None),
+    }
+
+
 def test_run_stubbed_inner_class_file_is_written_without_a_retry(fake_env, make_jar, tmp_path):
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"com/x/A.class": b"a", "com/x/A$1.class": b"i"}, base=input_dir)
