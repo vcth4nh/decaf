@@ -890,9 +890,9 @@ def test_status_line_of_a_name_that_is_no_utf8(tmp_path: Path, make_jar, monkeyp
 
 
 def test_usage_error_with_markup_in_the_path(tmp_path: Path):
-    result = runner.invoke(app, [str(tmp_path / "in[/x]"), "-o", str(tmp_path / "out")])
+    result = runner.invoke(app, [str(tmp_path / "in[bold]x"), "-o", str(tmp_path / "out")])
     assert result.exit_code == 2
-    assert "in[/x] does not exist" in ANSI.sub("", result.output)
+    assert "in[bold]x does not exist" in ANSI.sub("", result.output)
 
 
 def test_machine_formats_keep_the_notes_on_stderr(tmp_path: Path, make_jar, monkeypatch):
