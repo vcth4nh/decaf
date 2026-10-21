@@ -10,17 +10,29 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import unicodedata
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 
 
+def fold(name: str) -> str:
+    """The key of a name on a case-insensitive tree: names with one key can share one file.
+
+    The key joins at least the names that NTFS, APFS, or ext4 casefold join: NFD for the
+    normal forms (APFS and ext4 ignore them), then full case folding. It also joins some
+    names that NTFS keeps apart, for example ß and ss: decaf then refuses names that NTFS
+    could keep, but no file overwrites another.
+    """
+    return unicodedata.normalize("NFD", name).casefold()  # the casefold of an NFD name stays NFD
+
+
 def case_groups(names: Iterable[str]) -> list[list[str]]:
     """Names that would share one path on a case-insensitive tree, grouped and sorted."""
     by_fold: dict[str, set[str]] = defaultdict(set)
     for name in names:
-        by_fold[name.casefold()].add(name)
+        by_fold[fold(name)].add(name)
     return [sorted(group) for _, group in sorted(by_fold.items()) if len(group) > 1]
 
 

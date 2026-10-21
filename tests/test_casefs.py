@@ -18,6 +18,43 @@ def test_case_groups_mixed_case_and_dirs():
     assert casefs.case_groups(names) == [["p/A", "p/a"], ["P/b", "p/B"]]
 
 
+def test_case_groups_join_two_normal_forms():
+    """Review low item: APFS ignores the normal form, so \u00e9 (NFC) and e + U+0301 (NFD) are one file there."""
+    names = ["p/Caf\u00e9", "p/Cafe\u0301", "p/Cafe"]
+    assert casefs.case_groups(names) == [sorted(["p/Caf\u00e9", "p/Cafe\u0301"])]
+
+
+def test_fold_uses_full_case_folding():
+    """ext4 casefold joins \u00df and ss, and the Kelvin sign and k: the key must join them too."""
+    assert casefs.fold("Stra\u00dfe") == casefs.fold("STRASSE")
+    assert casefs.fold("\u212a") == casefs.fold("k")
+    assert casefs.fold("\u1f84") == casefs.fold("\u1f80\u0301")  # NFD before the folding: two forms of one letter
+
+
+# Pairs that a case-insensitive file system can join: case, normal forms, and special case rules.
+_PAIRS = [
+    ("A", "a"), ("\u00e9", "e\u0301"), ("\u00c5", "a\u030a"), ("\u212b", "\u00e5"), ("\u00df", "ss"),
+    ("\u00df", "\u1e9e"), ("\u212a", "k"), ("\u0131", "i"), ("\u0131", "I"), ("\u0130", "i"),
+    ("\u017f", "s"), ("\u03c2", "\u03c3"), ("\u00b5", "\u03bc"), ("\u01c5", "\u01c6"), ("\ufb01", "fi"),
+    ("\uff21", "\uff41"), ("\U00010400", "\U00010428"),
+]
+
+
+def test_fold_joins_each_pair_that_the_file_system_joins(tmp_path: Path):
+    """Ask-box ruling "Safe key": two names that share one file get one key, so no file overwrites
+    another. The CI runners check NTFS (Windows) and APFS (macOS)."""
+    if not casefs.is_case_insensitive(tmp_path):
+        pytest.skip("needs a case-insensitive tmp")
+    rows = []
+    for i, (a, b) in enumerate(_PAIRS):
+        d = tmp_path / str(i)
+        d.mkdir()
+        (d / f"x{a}").write_bytes(b"")
+        rows.append((a, b, (d / f"x{b}").exists(), casefs.fold(a) == casefs.fold(b)))
+    warnings.warn(f"file system joins: {[(a, b) for a, b, joined, _ in rows if joined]}")
+    assert [(a, b) for a, b, joined, folded in rows if joined and not folded] == [], rows
+
+
 def test_probe_matches_independent_check(tmp_path: Path):
     (tmp_path / "x").write_bytes(b"")
     expected = (tmp_path / "X").exists()  # True on NTFS/APFS/casefold, False on ext4

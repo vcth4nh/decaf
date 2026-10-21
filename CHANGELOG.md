@@ -190,6 +190,13 @@ All notable changes to decaf are documented here.
   also failed the name when the last entry was good. Now the name gets one
   row for the last entry, which Java reads, and a warning names the entry
   when the entries are not the same.
+- On a case-insensitive output, decaf found the names that share one file
+  with `str.casefold`. APFS and ext4 casefold also ignore the Unicode normal
+  form, so decaf missed two names such as `é` (NFC) and `e` + U+0301 (NFD),
+  and one file overwrote the other. Now the key is NFD, then full case
+  folding, and it joins at least the names that NTFS, APFS, or ext4 casefold
+  join. The key also joins some names that NTFS keeps apart, for example
+  `ß` and `ss`: decaf refuses them, but no file overwrites another.
 
 ### Security
 
