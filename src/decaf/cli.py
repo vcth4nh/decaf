@@ -25,7 +25,7 @@ from typer.core import TyperGroup
 from . import __version__, check, engines, memory
 from . import report_view, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
-from .pipeline import ArtifactReport, DecafError, Settings, run
+from .pipeline import ArtifactReport, DecafError, Settings, _engine_failure, run
 from .report_view import _status_line, marks, plain, safe
 from .scanner import ScanError
 
@@ -126,10 +126,15 @@ def engines_list(
     cfg, specs = _active_specs_from(config)
     found = engines.find_java()
     table = Table("ENGINE", "PIN", "CACHED", "JAVA")
+    errors: list[str] = []
     for name in engines.ENGINE_ORDER:
         spec = specs[name]
         pin = spec.version + ("†" if name in cfg.engine_overrides else "")
-        cached = "yes" if engines.cache_status(spec) else "no"
+        try:
+            cached = "yes" if engines.cache_status(spec) else "no"
+        except OSError as exc:  # e.g. an unreadable jar (#113)
+            cached = "error"
+            errors.append(f"{name}: {_engine_failure(name, exc)}")
         jar = engines.cache_root() / "engines" / f"{name}-{spec.version}.jar"
         need = engines.required_java(spec, jar)  # a pin can need a newer Java than its spec (#113)
         if found is None:
@@ -140,6 +145,8 @@ def engines_list(
             java = f"needs {need}+"
         table.add_row(name, pin, cached, java)
     console.print(table)
+    for text in errors:
+        console.print(f"[red]{marks(console)[1]}[/] {safe(text)}")
     if cfg.engine_overrides:
         console.print("[dim]† pinned in config[/]")
     console.print(f"[dim]cache: {engines.cache_root() / 'engines'}[/]")
@@ -159,21 +166,29 @@ def engines_fetch(
     with httpx.Client() as client:
         for name in wanted:
             spec = specs[name]
-            if engines.cache_status(spec):
-                console.print(f"[green]{ok}[/] {name} {safe(spec.version)} already cached")
-                continue
             try:
+                if engines.cache_status(spec):
+                    console.print(f"[green]{ok}[/] {name} {safe(spec.version)} already cached")
+                    continue
                 engines.ensure_engine(spec, client)
-            except engines.EngineError as exc:
-                console.print(f"[red]{bad}[/] {safe(exc)}")
+            except (engines.EngineError, OSError) as exc:  # e.g. a read-only engine cache (#113)
+                console.print(f"[red]{bad}[/] {safe(f'{name}: {_engine_failure(name, exc)}')}")
                 failed = True
                 continue
             console.print(f"[green]{ok}[/] {name} {safe(spec.version)} downloaded")
     raise typer.Exit(code=1 if failed else 0)
 
 
+_MOUNT_POINT = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT: the reparse tag of a Windows junction
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or a Windows junction (Path.is_junction comes only with Python 3.12)."""
+    return path.is_symlink() or getattr(path.lstat(), "st_reparse_tag", 0) == _MOUNT_POINT
+
+
 def _tree_size(path: Path) -> tuple[int, int]:
-    if path.is_symlink():
+    if _is_link(path):
         return 1, path.lstat().st_size  # the link, not its target (#113)
     files = [p for p in path.rglob("*") if p.is_file()] if path.is_dir() else [path]
     return len(files), sum(p.stat().st_size for p in files)
@@ -199,7 +214,7 @@ def engines_clean(
         n, s = _tree_size(p)
         files += n
         size += s
-        shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
+        shutil.rmtree(p) if p.is_dir() and not _is_link(p) else p.unlink()  # unlink removes a junction too
     if not stale:
         shutil.rmtree(cache, ignore_errors=True)
     console.print(f"removed {files} files ({size / 1e6:.1f} MB)")
@@ -714,8 +729,8 @@ def engines_update(
                     spec, client, engines.cache_root() / "engines", version=version,
                     warn=lambda msg: console.print(f"[yellow]{msg}[/]"),
                 )
-            except engines.EngineError as exc:
-                console.print(f"[red]{bad}[/] {safe(exc)}")
+            except (engines.EngineError, OSError) as exc:  # e.g. a read-only engine cache (#113)
+                console.print(f"[red]{bad}[/] {safe(f'{name}: {_engine_failure(name, exc)}')}")
                 failed = True
                 continue
             if res is None:

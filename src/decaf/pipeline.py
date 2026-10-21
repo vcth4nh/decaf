@@ -423,20 +423,21 @@ def _tmp_dir(ctx: Ctx) -> Path:
 def _jvm_input(artifact: Artifact, tmp_root: Path) -> Artifact:
     """The input with a path that a JVM can open (#113).
 
-    Java decodes the bytes of a path as UTF-8, so a name with other bytes, for example a Latin-1
-    name, reaches an engine or javac as other characters. Such an input gets a link in the temp
-    root, and Python reads the same file through it. Where the link fails, the path stays.
+    Java decodes the bytes of a path with the codec of the locale: UTF-8, or ASCII under LC_ALL=C.
+    Thus a path that is not ASCII, for example a Latin-1 name, can reach an engine or javac as
+    other characters. Such an input gets a link in the temp root, and Python reads the same file
+    through it. The link keeps an ASCII file name: the Maven lookup reads it, and a Maven file name
+    is ASCII. Where the link fails, the path stays.
     """
     if artifact.kind not in (ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE):
         return artifact  # only Python reads the other kinds
-    try:
-        str(artifact.path).encode("utf-8")
+    path = artifact.path.absolute()
+    if str(path).isascii():
         return artifact
-    except UnicodeEncodeError:
-        pass
-    link = Path(tempfile.mkdtemp(dir=tmp_root)) / ("input" + artifact.path.suffix)
+    name = path.name if path.name.isascii() else "input" + (path.suffix if path.suffix.isascii() else "")
+    link = Path(tempfile.mkdtemp(dir=tmp_root)) / name
     try:
-        os.symlink(artifact.path.absolute(), link, target_is_directory=artifact.kind is ArtifactKind.CLASS_TREE)
+        os.symlink(path, link, target_is_directory=artifact.kind is ArtifactKind.CLASS_TREE)
     except OSError:
         return artifact
     return replace(artifact, path=link)

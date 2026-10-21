@@ -6,6 +6,7 @@ import ctypes
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -127,6 +128,20 @@ def fetch_to(client: httpx.Client, url: str, dest: Path, label: str) -> None:
         raise EngineError(f"{label}: download failed: {exc}") from exc
 
 
+def new_part(folder: Path, prefix: str) -> Path:
+    """A new empty file for a download of this process only (#113).
+
+    Its mode follows the umask, so each user that can read the cache can read the jar (mkstemp gives 0600).
+    """
+    while True:
+        part = folder / f"{prefix}{secrets.token_hex(8)}.part"
+        try:
+            part.open("xb").close()
+        except FileExistsError:
+            continue
+        return part
+
+
 def ensure_engine(
     spec: EngineSpec,
     client: httpx.Client,
@@ -142,9 +157,7 @@ def ensure_engine(
     if on_download is not None:
         on_download()
     # Temp names of this process only: two runs can download one engine at the same time (#113).
-    fd, name = tempfile.mkstemp(dir=cache, prefix=f"{spec.name}-", suffix=".part")
-    os.close(fd)
-    part = Path(name)
+    part = new_part(cache, f"{spec.name}-")
     try:
         fetch_to(client, spec.url, part, spec.name)
 
@@ -374,8 +387,8 @@ class _PeakWatch:
     PeakWorkingSetSize after the exit.
 
     On Linux, a forked child starts with the pages of decaf, and ru_maxrss keeps them after
-    the exec. A peak that is not above them (floor) is unknown, for example the peak of a JVM
-    that stops at start (#113).
+    the exec. A peak that is not above them (floor) is unknown: the peak of a JVM that stops
+    at start, and also the peak of some small JVMs that run normally (#113).
     """
 
     def __init__(self, proc: subprocess.Popen, floor: int = 0) -> None:
@@ -440,7 +453,8 @@ def build_command(
     heap_mb: int | None = None,
 ) -> list[str]:
     # Absolute paths: a relative name that starts with "-" would reach the engine as an option (#113).
-    t, d, jar = os.path.abspath(target), os.path.abspath(dest), str(jar_path)
+    # Path.absolute keeps "..": the kernel resolves it after a symlink, so abspath can give another file.
+    t, d, jar = str(target.absolute()), str(dest.absolute()), str(jar_path)
     # ActiveProcessorCount caps the JVM's visible cores, which sizes the
     # engine's own thread pools (e.g. vineflower --thread-count), GC, and JIT.
     prefix = [java] if not cpu_budget else [java, f"-XX:ActiveProcessorCount={cpu_budget}"]
@@ -490,7 +504,7 @@ def build_batch_command(
             "-XX:+AutoCreateSharedArchive",
             f"-XX:SharedArchiveFile={cds_dir / f'{spec.name}-{spec.version}.jsa'}",
         ]
-    t, d = [os.path.abspath(p) for p in targets], os.path.abspath(dest)  # see build_command (#113)
+    t, d = [str(p.absolute()) for p in targets], str(dest.absolute())  # see build_command (#113)
     if spec.name == "vineflower":
         return [*prefix, "-jar", str(jar_path), *engine_args, *t, d]
     if spec.name == "cfr":
@@ -688,6 +702,8 @@ def _unpack_emitted_archives(dest: Path) -> None:
     for arch in list(dest.glob("*.jar")) + list(dest.glob("*.zip")):
         try:
             safe_extract_zip(arch, dest)
-        except ZIP_ERRORS:
-            pass  # cut off by a timeout: the next engine of the chain gets its try (#113)
+        except ZIP_ERRORS as exc:
+            if isinstance(exc, OSError) and exc.errno is not None:
+                raise  # the disk, not the archive, for example a full disk
+            # cut off by a timeout: the next engine of the chain gets its try (#113)
         arch.unlink()

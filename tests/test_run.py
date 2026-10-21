@@ -3750,6 +3750,49 @@ def test_run_gives_the_jvms_paths_they_can_open_for_an_input_folder_that_is_not_
     assert {jar.resolve(), input_dir.resolve()} <= set(classpath.values())
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlink needs extra rights on Windows")
+@pytest.mark.parametrize("relative", [False, True], ids=["folder-name", "working-folder"])
+def test_run_gives_the_jvms_ascii_paths_for_an_input_that_is_not_ascii(fake_env, make_jar, tmp_path, monkeypatch,
+                                                                       relative):
+    """Review S7: under LC_ALL=C, Java decodes a path as ASCII, so a UTF-8 name such as café failed.
+
+    Review S6: the link keeps an ASCII file name, because the Maven lookup reads it. A JVM gets the
+    absolute path, so a relative ASCII input in a folder such as café needs a link too.
+    """
+    if relative:
+        (tmp_path / "café").mkdir()
+        monkeypatch.chdir(tmp_path / "café")
+        input_dir = Path("libs")
+    else:
+        input_dir = tmp_path / "lib.é"  # also the suffix of the folder is no ASCII
+    jar = make_jar("mylib-1.2.3.jar", {"com/x/A.class": b"a"}, base=input_dir)
+    (input_dir / "p").mkdir()
+    (input_dir / "p/C.class").write_bytes(b"c")
+    targets: dict[Path, Path] = {}  # path -> the file it opens, read while the run's links exist
+    classpath: dict[Path, Path] = {}
+    names: list[str] = []
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        targets[Path(target)] = Path(target).resolve()
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def checker(jobs, *, timeout, cpu_budget):
+        classpath.update((p, p.resolve()) for job in jobs for p in job.classpath)
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        names.append(Path(jar_path).name)
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out"), runner=engine, checker=checker, resolver=resolver)
+    assert [r.outcome for r in report.artifacts] == ["ok", "ok"]
+    assert [p for p in [*targets, *classpath] if not str(p.absolute()).isascii()] == []
+    assert jar.resolve() in targets.values()
+    assert {jar.resolve(), input_dir.resolve()} <= set(classpath.values())
+    assert names == ["mylib-1.2.3.jar"]  # the file-name hints of the Maven lookup
+    assert jar.is_file()  # the run deletes the links, not the input
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="macOS and Windows file names are Unicode")
 def test_run_keeps_the_input_path_when_the_link_fails(fake_env, make_jar, tmp_path, monkeypatch):
     jar = make_jar(os.fsdecode(b"caf\xe9.jar"), {"com/x/A.class": b"a"}, base=tmp_path / "in")

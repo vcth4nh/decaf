@@ -133,25 +133,31 @@ All notable changes to decaf are documented here.
 - A Fernflower run that the timeout stopped ended the fallback chain
   (#113). The cut-off archive of sources gave an error in the unpack, so no
   other engine ran. Now decaf deletes such an archive, and the next engine
-  runs. `--timeout` accepted 0, negative values, NaN, infinity, and values
+  runs. A full disk in the unpack still fails the artifact. `--timeout`
+  accepted 0, negative values, NaN, infinity, and values
   above the longest wait of the platform. These values failed each artifact,
   wrote a report that is not valid JSON, gave a shorter limit, or let the
   JVMs run with no limit. Now `--timeout` must be a number of seconds above
   0 and at most 4294967 (about 49 days). When the wait for a JVM fails,
   decaf now kills the JVM. CFR and Procyon run one JVM for each class of a
   class folder, and each JVM got the full timeout. Now the timeout is for
-  the whole folder. An input name that is not UTF-8, for example a Latin-1
-  name on Linux, failed on all engines, because Java decodes a path as
-  UTF-8. The compile check could not read such a jar either, also on the
-  class path of the other inputs. Now such an input goes to the engines and
-  to the check through a link in the temp folder.
+  the whole folder. An input path that is not ASCII could fail on all
+  engines, because Java decodes a path with the codec of the locale: UTF-8,
+  or ASCII under `LC_ALL=C`. Examples are a Latin-1 name on Linux, and
+  `café.jar` under `LC_ALL=C`. The compile check could not read such a jar
+  either, also on the class path of the other inputs. Now such an input goes
+  to the engines and to the check through a link in the temp folder. The
+  link keeps an ASCII file name, so the Maven lookup keeps the hints of the
+  file name.
 - The engine setup failed with no message, or with a traceback (#113). A
   fallback engine that failed to download left the chain with no warning.
   An error of the engine cache, for example a read-only cache, gave a
   traceback and exit code 1. Now the warning `fallback chain: skipped ...`
   gives the cause for a fallback engine, and for the primary engine the run
-  stops with the cause (exit code 2). Two runs that downloaded one engine at
-  the same time used the same temp files; now each download has its own.
+  stops with the cause (exit code 2). `decaf engines fetch`, `list`, and
+  `update` now also give the cause. Two runs that downloaded one engine at
+  the same time used the same temp files; now each download has its own,
+  also in `decaf engines update`.
 - Some Java versions stopped each run (#113). An early-access Java such as
   `26-ea` counted as Java 0. Now decaf reads such versions. A `java -version`
   that gives no answer in 30 s, or no version that decaf can read, now stops
@@ -170,14 +176,15 @@ All notable changes to decaf are documented here.
   cannot write to the cache. A pinned engine got the CDS archive name of the
   built-in version, and `engines clean --stale` deleted the CDS archives of
   the active pins and of the compile check. Now the archive name has the
-  version of the pin, and `--stale` keeps these archives. A symlink in the
-  engine cache stopped `engines clean` with a traceback. Now decaf deletes
-  the link and keeps its target. On a small heap, Procyon prints only
+  version of the pin, and `--stale` keeps these archives. A symlink or a
+  Windows junction in the engine cache stopped `engines clean` with a
+  traceback. Now decaf deletes the link and keeps its target. On a small heap, Procyon prints only
   `Java heap space`, so the report did not count the out-of-heap failure.
   Now decaf also finds this text and `GC overhead limit exceeded`. On Linux,
   the peak memory of a JVM that stopped at start was the memory of decaf,
-  because a forked child keeps the pages of decaf in `ru_maxrss`. Now such
-  a peak is unknown.
+  because a forked child keeps the pages of decaf in `ru_maxrss`. Now a peak
+  that is not more than the memory of decaf plus 16 MB is unknown. This rule
+  also hides the peak of some small JVMs that ran normally.
 - The CPU budget and the scheduler ignored limits of the host (#114). The
   default budget counted all the cores of the host, also when decaf could
   use only some of them, for example under `taskset` or in a container with
