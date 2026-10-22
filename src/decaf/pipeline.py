@@ -251,16 +251,27 @@ class MergeWriter:
     def add_blob(self, zip_path: Path, member: str, rel: str) -> tuple[int, int]:
         return 0, 1
 
+    def nest(self, rel: str, parent: str) -> None:
+        """The merged tree has no folder for each archive."""
+
 
 class MirrorWriter:
-    """Copies each artifact's source files under out_root/<rel with '!' removed>."""
+    """Copies each artifact's source files under out_root/<its folder> (see nest)."""
 
     def __init__(self, out_root: Path, resources: bool = True) -> None:
         self.root = out_root
         self.resources = resources
+        self._folders: dict[str, str] = {}  # nested rel -> its folder under root
+
+    def nest(self, rel: str, parent: str) -> None:
+        """A nested archive gets the folder of its container plus its entry name; a top-level one keeps its rel.
+
+        A name keeps its "!": a folder name can end with "!", and an entry name can hold "!/".
+        """
+        self._folders[rel] = f"{self._folders.get(parent, parent)}/{rel.removeprefix(f'{parent}!/')}"
 
     def dest_for(self, rel: str) -> Path:
-        return self.root / rel.replace("!", "")
+        return self.root / self._folders.get(rel, rel)
 
     def add_tree(self, tree: Path, rel: str) -> tuple[int, list[dict]]:
         dest = self.dest_for(rel)
@@ -1979,6 +1990,7 @@ def run(
                                 open_count[a.rel] = 1 + len(nested)
                                 for n in nested:
                                     parent_of[n.rel] = a.rel
+                                    writer.nest(n.rel, a.rel)  # before any write of the nested archive
                                     heappush(todo, (-n.classes, next(seq), n))
                                 delta = len(nested) - nested_counts.pop(a.rel, 0)
                                 discovered += delta

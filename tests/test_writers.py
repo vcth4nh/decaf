@@ -99,11 +99,20 @@ def test_merge_skips_resources_and_normalizes(tmp_path: Path):
 def test_mirror_writer_copies_sources_only(tmp_path: Path):
     w = MirrorWriter(tmp_path / "out")
     t = tree(tmp_path / "t", {"com/x/A.java": "class A {}", "res.properties": "k=v"})
+    w.nest("libs/app.war!/WEB-INF/lib/dep.jar", "libs/app.war")
     java, collisions = w.add_tree(t, "libs/app.war!/WEB-INF/lib/dep.jar")
     assert (java, collisions) == (1, [])
     dest = tmp_path / "out/libs/app.war/WEB-INF/lib/dep.jar"
     assert (dest / "com/x/A.java").is_file()
     assert not (dest / "res.properties").exists()  # engine strays never land
+
+
+def test_mirror_writer_puts_a_nested_archive_in_the_folder_of_its_container(tmp_path: Path):
+    w = MirrorWriter(tmp_path / "out")
+    w.nest("lib!/a.war!/WEB-INF/lib/b.jar", "lib!/a.war")
+    w.nest("lib!/a.war!/WEB-INF/lib/b.jar!/c!/d.jar", "lib!/a.war!/WEB-INF/lib/b.jar")
+    assert w.dest_for("lib!/a.war") == tmp_path / "out/lib!/a.war"  # a top-level archive keeps its rel
+    assert w.dest_for("lib!/a.war!/WEB-INF/lib/b.jar!/c!/d.jar") == tmp_path / "out/lib!/a.war/WEB-INF/lib/b.jar/c!/d.jar"
 
 
 def test_mirror_writer_skips_archive_blobs(tmp_path: Path):
@@ -230,6 +239,7 @@ def test_mirror_add_blob_writes_member_as_file(make_jar, tmp_path: Path):
     inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
     parent = make_jar("dep.jar", {"lib/inner.jar": inner.read_bytes()})
     w = MirrorWriter(tmp_path / "out")
+    w.nest("dep.jar!/lib/inner.jar", "dep.jar")
     assert w.add_blob(parent, "lib/inner.jar", "dep.jar!/lib/inner.jar") == (1, 0)
     blob = tmp_path / "out/dep.jar/lib/inner.jar"
     assert blob.is_file()
