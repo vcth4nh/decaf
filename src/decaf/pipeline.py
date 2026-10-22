@@ -660,28 +660,29 @@ def _package_refs(source: Path, tree: Path) -> Callable[[list[Path]], dict[Path,
 
 
 def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
-    """WEB-INF/classes or BOOT-INF/classes of an archive, extracted once (#99)."""
+    """WEB-INF/classes or BOOT-INF/classes of an archive, extracted once (#99).
+
+    The extraction holds the family lock: a second worker waits for the first one (#101).
+    """
     with ctx.family_lock:
         if rel in ctx.class_roots:
             return ctx.class_roots[rel]
-    root: Path | None = None
-    dest: Path | None = None
-    try:
-        with zipfile.ZipFile(path) as zf:
-            names = zf.namelist()
-        for prefix in _CONTAINER_ROOTS:
-            members = {n for n in names if n.startswith(prefix) and n.endswith(".class")}
-            if members:
-                dest = _tmp_dir(ctx)
-                safe_extract_zip(path, dest, members=members)
-                root = dest / prefix.rstrip("/")
-                break
-    except ZIP_ERRORS:
-        root = None  # kept as None: the other archives of the family do not try again
-    with ctx.family_lock:
-        if dest is not None:  # it goes when the family is done (#97)
-            ctx.family_dirs.setdefault(rel, []).append(dest)
-        return ctx.class_roots.setdefault(rel, root)
+        root: Path | None = None
+        try:
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+            for prefix in _CONTAINER_ROOTS:
+                members = {n for n in names if n.startswith(prefix) and n.endswith(".class")}
+                if members:
+                    dest = _tmp_dir(ctx)
+                    ctx.family_dirs.setdefault(rel, []).append(dest)  # it goes when the family is done (#97)
+                    safe_extract_zip(path, dest, members=members)
+                    root = dest / prefix.rstrip("/")
+                    break
+        except ZIP_ERRORS:
+            root = None  # kept as None: the other archives of the family do not try again
+        ctx.class_roots[rel] = root
+        return root
 
 
 def _container_group(rel: str, path: Path, ctx: Ctx) -> list[Path]:
@@ -764,7 +765,7 @@ class _Held:
 
 
 def _check_trees(
-    items: list[tuple[Path, Artifact, Path, _Held]], ctx: Ctx, heap_mb: int | None
+    items: list[tuple[Path, Artifact, Path, _Held]], ctx: Ctx, heap_mb: int | None, engine: str
 ) -> list[dict[str, check.FileResult]] | None:
     """One check call for (tree, artifact, source, held) items; results by path in each tree.
 
@@ -818,6 +819,8 @@ def _check_trees(
                 str(len(jobs)), tuple(classpath), tuple(tree / r for r in paths), release, twice,
                 frozenset(tree / r for r in paths if r in non_java), refs,
             ))
+        if by_release and ctx.on_event is not None:  # the display shows the check, not the engine run (#101)
+            ctx.on_event("decompile", artifact.rel, f"{engine} · check {sum(map(len, by_release.values())):,} files")
     if jobs:
         answers = ctx.checker(
             jobs, timeout=ctx.settings.timeout, cpu_budget=ctx.cpu_budget,
@@ -971,7 +974,7 @@ def _hold_output(
         if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and p.stat().st_size == 0:
             p.unlink()
     found = stubs.scan(tree, engine)
-    results = _check_trees([(tree, artifact, source, held)], ctx, heap_mb)
+    results = _check_trees([(tree, artifact, source, held)], ctx, heap_mb, engine)
     flagged = _apply_hold(
         tree, source, {s.path: s for s in found}, results[0] if results is not None else None, engine, held, ctx
     )
@@ -1584,7 +1587,7 @@ def _decompile_batch(
         order = sorted(trees)
         helds = {i: _Held() for i in order}
         found = {i: {s.path: s for s in stubs.scan(trees[i], name)} for i in order}
-        results = _check_trees([(trees[i], members[i][0], members[i][1], helds[i]) for i in order], ctx, heap)
+        results = _check_trees([(trees[i], members[i][0], members[i][1], helds[i]) for i in order], ctx, heap, name)
         for n, i in enumerate(order):
             by_path = results[n] if results is not None else None
             counts[i] = (

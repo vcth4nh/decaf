@@ -2162,6 +2162,28 @@ def test_run_beyond_depth_and_class_tree_events(fake_env, make_jar, tmp_path: Pa
     assert [e[2] for e in events if e[1] == "_classes" and e[0] == "fetch"] == ["copying classes"]
 
 
+def test_run_sends_a_decompile_event_before_each_check(fake_env, make_jar, tmp_path: Path):
+    """#101: while the check ran, the display showed the last engine event."""
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/a/A.class": b"a", "com/a/B.class": b"b"}, base=input_dir)
+    seen: list[tuple] = []
+    calls: list[int] = []
+
+    def checker(jobs, *, timeout, cpu_budget):
+        calls.append(sum(len(job.files) for job in jobs))
+        seen.append(("checker", calls[-1]))
+        first = len(calls) == 1  # B is flagged in the first output only: one retry
+        return [[check.FileResult("flagged" if f.name == "B.java" and first else "clean") for f in job.files]
+                for job in jobs]
+
+    run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine, checker=checker,
+        on_event=lambda kind, subject, detail: seen.append((subject, detail)) if kind == "decompile" else None)
+    assert seen == [
+        ("a.jar", "vineflower · 2 classes"), ("a.jar", "vineflower · check 2 files"), ("checker", 2),
+        ("a.jar", "cfr · retry 1 classes"), ("a.jar", "cfr · check 1 files"), ("checker", 1),
+    ]
+
+
 def test_run_maven_miss_emits_resolving_without_extracting(fake_env, make_jar, tmp_path: Path):
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"com/x/A.class": b"x"}, base=input_dir)

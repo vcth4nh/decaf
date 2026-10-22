@@ -615,6 +615,30 @@ def test_decompile_batch_gives_the_checker_one_slot_of_heap(make_jar, tmp_path):
     assert requeue == [] and heaps == [1660]  # one checker JVM for the batch, with the heap of the batch JVM
 
 
+def test_decompile_batch_sends_a_check_event_for_each_member_with_files_to_check(make_jar, tmp_path):
+    """#101: the display shows the check of a batch; a member with only Kotlin files has nothing to check."""
+    from decaf.pipeline import _decompile_batch
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        (Path(dest) / "com/b/B.java").rename(Path(dest) / "com/b/B.kt")
+        return res
+
+    def checker(jobs, *, timeout, cpu_budget):
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    events: list[tuple[str, str]] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, batch, on_event=lambda k, s, d: events.append((s, d)) if k == "decompile" else None)
+    ctx.checker = checker
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == [] and events == [
+        ("a.jar", "vineflower · batch of 2 · 1 classes"), ("b.jar", "vineflower · batch of 2 · 1 classes"),
+        ("a.jar", "vineflower · check 1 files"),
+    ]
+
+
 def test_decompile_batch_empty_member_file_requeues(make_jar, tmp_path):
     from decaf.pipeline import _decompile_batch
 
@@ -1488,6 +1512,35 @@ def test_family_classpath_war_without_lib_keeps_its_class_root(make_jar, tmp_pat
     assert len(cp) == 2 and (cp[0] / "com/w/W.class").is_file() and cp[1] == war
 
 
+def test_class_root_extracts_once_for_two_workers(make_jar, tmp_path: Path, monkeypatch):
+    """#101: two workers that asked for one class root at the same time both extracted it."""
+    import threading
+    import time
+
+    from decaf import pipeline
+
+    war = make_jar("app.war", {"WEB-INF/classes/com/w/W.class": b"w"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    real = pipeline.safe_extract_zip
+    calls: list[Path] = []
+    started = threading.Event()
+
+    def slow(*args, **kwargs):
+        calls.append(args[1])
+        started.set()
+        time.sleep(0.3)  # the second worker asks during the extraction
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "safe_extract_zip", slow)
+    roots: list = []
+    first = threading.Thread(target=lambda: roots.append(pipeline._class_root("app.war", war, ctx)))
+    first.start()
+    assert started.wait(5)
+    roots.append(pipeline._class_root("app.war", war, ctx))
+    first.join()
+    assert len(calls) == 1 and roots[0] == roots[1] and (roots[0] / "com/w/W.class").is_file()
+
+
 def test_family_classpath_input_group_and_class_tree(make_jar, tmp_path: Path):
     from decaf.pipeline import _family_classpath
 
@@ -1519,7 +1572,7 @@ def test_check_of_a_class_folder_uses_its_package_roots(tmp_path: Path):
     (tree / "build/classes/java/main/p/A.java").write_text("package p; class A {}")
     calls: list = []
     ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
-    _check_trees([(tree, Artifact(tmp_path / "in", "_classes", ArtifactKind.CLASS_TREE), source, _Held())], ctx, None)
+    _check_trees([(tree, Artifact(tmp_path / "in", "_classes", ArtifactKind.CLASS_TREE), source, _Held())], ctx, None, "vineflower")
     assert calls[0][0].classpath[:2] == (source, source / "build/classes/java/main")
 
 
@@ -1534,7 +1587,7 @@ def test_check_jobs_carry_the_release_of_their_classes(make_jar, tmp_path: Path)
         (tree / f"p/{name}.java").write_text(f"package p; class {name} {{}}")
     calls: list = []
     ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
-    _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None)
+    _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None, "vineflower")
     assert sorted((job.release or 0, [f.name for f in job.files]) for job in calls[0]) == [
         (0, ["C.java"]), (8, ["A.java"]), (17, ["B.java"]),
     ]
@@ -1557,7 +1610,7 @@ def test_check_jobs_name_the_files_of_kotlin_groovy_and_scala_classes(make_jar, 
         (tree / f"p/{name}.java").write_text("package p; class X {}")
     calls: list = []
     ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
-    _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None)
+    _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None, "vineflower")
     (job,) = calls[0]
     assert sorted(f.name for f in job.non_java) == ["G$_run_closure1.java", "G.java", "K.java"]
 
@@ -1593,7 +1646,7 @@ def test_check_jobs_read_the_package_refs_of_the_class_files_of_a_file(make_jar,
         (tree / f"p/{name}.java").write_text("package p; class X {}")
     calls: list = []
     ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
-    _check_trees([(tree, artifact, source, _Held())], ctx, None)
+    _check_trees([(tree, artifact, source, _Held())], ctx, None, "vineflower")
     (job,) = calls[0]
     files = [tree / "p/A.java", tree / "p/A$1.java", tree / "p/E.java"]
     assert job.refs(files) == {
@@ -1912,7 +1965,7 @@ def test_check_trees_returns_none_after_interrupt(make_jar, tmp_path: Path):
     ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
     PROCESSES.kill_all()
     try:
-        assert _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None) is None
+        assert _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None, "vineflower") is None
     finally:
         PROCESSES.reset()
     assert calls == []

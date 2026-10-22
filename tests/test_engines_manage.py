@@ -288,6 +288,26 @@ def test_engines_clean_removes_a_symlink_but_not_its_target(tmp_path: Path, monk
     assert "removed 1 files" in ANSI.sub("", result.output)
 
 
+def test_engines_clean_removes_the_compiled_checker(tmp_path: Path, monkeypatch):
+    """#101: no command removed cache_root()/checker; --stale keeps the checker of the current source."""
+    import decaf.check as check
+    import decaf.engines as engines
+
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path)
+    current = f"{check.source_digest()}-21"
+    for name in (current, "000000000000-21"):
+        (tmp_path / "checker" / name).mkdir(parents=True)
+        (tmp_path / "checker" / name / check.JAR).write_bytes(b"x")
+    result = runner.invoke(app, ["engines", "clean", "--stale"])
+    assert result.exit_code == 0, result.output
+    assert [p.name for p in (tmp_path / "checker").iterdir()] == [current]
+    assert "removed 1 files" in ANSI.sub("", result.output)
+    result = runner.invoke(app, ["engines", "clean"])
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "checker").exists()
+    assert "removed 1 files" in ANSI.sub("", result.output)
+
+
 def test_engines_clean_removes_everything(tmp_path: Path, monkeypatch):
     import decaf.engines as engines
 

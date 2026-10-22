@@ -148,7 +148,7 @@ def test_summary_counts():
     assert (s["checked"], s["flagged"], s["noted"], s["unchecked"]) == (3, 1, 1, 3)
     assert s["unchecked_reasons"] == {
         "absent classes": 0, "kotlin": 1, "newer class version": 2,
-        "old source": 0, "javac crash": 0, "timeout": 0,
+        "old source": 0, "javac crash": 0, "timeout": 0, "interrupted": 0,
     }
     assert s["kinds"] == {"parse": 0, "name": 1, "flow": 1, "type": 1, "other": 0}
     assert s["needs_java"] == 25
@@ -316,6 +316,23 @@ def test_run_check_timeout_marks_unfinished_files(tmp_path: Path, monkeypatch):
     jobs = [check.Job("0", (), (tmp_path / "A.java",))]
     out = check.run_check(jobs, timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
     assert out == [[unchecked("timeout")]]
+
+
+def test_run_check_marks_the_files_of_a_killed_checker_interrupted(tmp_path: Path, monkeypatch):
+    """#101: after Ctrl-C, the files without a result line got the reason "javac crash"."""
+
+    def killed(cmd, timeout, on_stderr_line=None):
+        Path(cmd[-2]).write_text("0\t0\tT\t1\n")  # the result of A; then Ctrl-C closes the registry and kills the JVM
+        check.engines.PROCESSES.kill_all()
+        return -9, False, "", None, False
+
+    monkeypatch.setattr(check.engines, "run_process", killed)
+    try:
+        out = check.run_check([check.Job("0", (), (tmp_path / "A.java", tmp_path / "B.java"))], timeout=5,
+                              cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
+    finally:
+        check.engines.PROCESSES.reset()
+    assert [(r.status, r.reason) for r in out[0]] == [("clean", None), ("unchecked", "interrupted")]
 
 
 def _class_file(name: str, long_first: bool = False) -> bytes:

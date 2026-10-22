@@ -768,6 +768,12 @@ def test_help_lists_no_resource():
     assert "--no-resource" in plain
 
 
+def test_help_says_that_the_timeout_also_limits_each_check():
+    result = runner.invoke(app, ["run", "--help"])
+    plain = " ".join(ANSI.sub("", result.output).replace("│", " ").split())
+    assert "Per-archive engine timeout, seconds; also limits each compile check" in plain
+
+
 def test_status_line_resource_only_mirrored():
     r = ArtifactReport(rel="r.jar", kind="resource_only", outcome="ok", resources_copied=3)
     assert cli._status_line(r) == "[green]✓[/] r.jar (resources only, 3 files)"
