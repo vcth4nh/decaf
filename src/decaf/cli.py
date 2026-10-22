@@ -199,16 +199,20 @@ def engines_clean(
     stale: Annotated[bool, typer.Option("--stale", help="Only remove files no active pin claims")] = False,
     config: Annotated[Optional[Path], typer.Option("--config", help="Config file (default: user config dir)")] = None,
 ) -> None:
-    """Delete the engine cache (or just superseded files with --stale)."""
+    """Delete the engine cache and the compiled checker (or just superseded files with --stale)."""
     cfg, specs = _active_specs_from(config)
     cache = engines.cache_root() / "engines"
-    if not cache.is_dir():
+    compiled = engines.cache_root() / "checker"  # the checker of each source hash and Java version (#101)
+    if not cache.is_dir() and not compiled.is_dir():
         console.print("nothing to clean")
         return
     # The CDS archives of the active pins and of the current checker are no superseded files (#113).
     keep = {f"{s.name}-{s.version}{ext}" for s in specs.values() for ext in (".jar", ".jsa")}
-    checker = f"checker-{check.source_digest()}-"
-    victims = [p for p in cache.iterdir() if not (stale and (p.name in keep or p.name.startswith(checker)))]
+    digest = check.source_digest()
+    victims = [p for p in (cache.iterdir() if cache.is_dir() else [])
+               if not (stale and (p.name in keep or p.name.startswith(f"checker-{digest}-")))]
+    victims += [p for p in (compiled.iterdir() if compiled.is_dir() else [])
+                if not (stale and p.name.startswith(f"{digest}-"))]
     files = size = 0
     for p in victims:
         n, s = _tree_size(p)
@@ -217,6 +221,7 @@ def engines_clean(
         shutil.rmtree(p) if p.is_dir() and not _is_link(p) else p.unlink()  # unlink removes a junction too
     if not stale:
         shutil.rmtree(cache, ignore_errors=True)
+        shutil.rmtree(compiled, ignore_errors=True)
     console.print(f"removed {files} files ({size / 1e6:.1f} MB)")
 
 
@@ -483,7 +488,7 @@ def main(
     jobs: Annotated[int, typer.Option("--jobs", "-j", min=0, help="Parallel decompile workers (0 = min(4, cpus))")] = 0,
     cpus: Annotated[int, typer.Option("--cpus", min=0, help="Total CPU budget across all workers (0 = all cores minus one)")] = 0,
     memory_budget: Annotated[Optional[str], typer.Option("--memory", help="Engine heap budget for all JVMs together, e.g. 8g (0 = no cap; default: 80% of RAM, at most 25% of RAM for one JVM)")] = None,
-    timeout: Annotated[float, typer.Option("--timeout", help="Per-archive engine timeout, seconds")] = 600.0,
+    timeout: Annotated[float, typer.Option("--timeout", help="Per-archive engine timeout, seconds; also limits each compile check")] = 600.0,
     force: Annotated[bool, typer.Option("--force", help="Allow writing into a non-empty output directory")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Stream engine stderr live and show it for failures")] = False,
     quiet: Annotated[bool, typer.Option("--quiet", "-q", help="Only print the final summary")] = False,

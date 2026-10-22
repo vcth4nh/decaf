@@ -4,6 +4,16 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- The live display shows the compile check of each engine output, for
+  example `vineflower · check 1,234 files` (#101). Before, it showed the last
+  engine event while the check ran.
+- `decaf engines clean` also removes the compiled checker. With `--stale`,
+  it keeps the checker of the current decaf version (#101).
+- The `--timeout` help and the README say that the value also limits each
+  compile check (#101).
+
 ### Fixed
 
 - A batch of jars lost the classes that have `$` in the simple name, or gave
@@ -260,6 +270,11 @@ All notable changes to decaf are documented here.
   top-level archive keeps its input path as its folder, and a nested
   archive gets the folder of its container plus its entry name. A name
   keeps its "!".
+- After Ctrl-C, the files of a stopped compile check had the reason
+  "javac crash". Now their reason is "interrupted", and the end of the run
+  counts them as files that the check did not finish (#101).
+- Two workers could extract the classes folder of one archive two times.
+  Now the second worker waits for the first one (#101).
 
 ### Security
 

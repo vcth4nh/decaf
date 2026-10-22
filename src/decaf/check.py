@@ -18,7 +18,7 @@ from . import engines, memory
 KINDS = ("parse", "name", "flow", "type", "other")
 RETRY_KINDS = frozenset({"parse", "name", "flow"})
 UNCHECKED_REASONS = (
-    "absent classes", "kotlin", "newer class version", "old source", "javac crash", "timeout",
+    "absent classes", "kotlin", "newer class version", "old source", "javac crash", "timeout", "interrupted",
 )
 CLASS_VERSION_OFFSET = 44  # class-file major version = Java version + 44
 MESSAGES_PER_FILE = 100  # javac's own default -Xmaxerrs
@@ -621,12 +621,14 @@ def run_check(
     # The cause of an exception in the main thread comes before its stack frames.
     cause = next((line for line in lines if line.startswith("Exception in thread")), lines[-1] if lines else None)
     crash = _short(cause) if cause is not None else f"checker exit code {returncode}"  # e.g. a JVM out of memory (#108)
+    stopped = engines.PROCESSES.closed  # Ctrl-C or SIGTERM killed the checker: no crash (#101)
     out: list[list[FileResult]] = []
     for job in jobs:
         found = [raw.get((job.id, i)) for i in range(len(job.files))]
         named = [f for f, r in zip(job.files, found) if _names_absent(r)]
         refs = job.refs(named) if job.refs is not None and named else {}
-        out.append([_classify_file(r, timed_out, crash, f, job, refs.get(f, frozenset()))
+        out.append([unchecked("interrupted") if r is None and stopped
+                    else _classify_file(r, timed_out, crash, f, job, refs.get(f, frozenset()))
                     for f, r in zip(job.files, found)])
     return out
 

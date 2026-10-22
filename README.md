@@ -221,8 +221,8 @@ of 46 of its 80 archives, and decaf does not check Maven sources. With
 `--no-maven`, decaf decompiled and checked all 80 archives: 23 minutes with the
 check, 7 minutes without it. A run on one library jar took 24 seconds with the
 check and 12 seconds without it. The checker JVM runs in the job of its engine,
-after the engine JVM stops, and gets the same heap. `--no-check` turns the
-check off.
+after the engine JVM stops, and gets the same heap. `--timeout` also limits
+each checker JVM. `--no-check` turns the check off.
 
 ## Configuration
 
@@ -274,7 +274,7 @@ write it, the next engine decompiles the class of its lowest version folder.
 ```bash
 decaf engines list             # pins, cache state, Java compatibility
 decaf engines fetch            # pre-download all engines (offline/CI prep)
-decaf engines clean --stale    # drop superseded files (bare: wipe the cache)
+decaf engines clean --stale    # drop superseded files (bare: wipe the engines and the checker)
 decaf engines update           # update pins to upstream latest
 decaf engines update cfr --version 0.150   # pin an exact version
 decaf engines update --reset   # back to built-in pins
