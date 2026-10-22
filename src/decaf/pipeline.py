@@ -702,12 +702,11 @@ def _family_classpath(artifact: Artifact, source: Path, ctx: Ctx, roots: list[Pa
     A class folder goes in as its package roots (#108).
     """
     cp = list(roots or [source]) if source.is_dir() else _container_group(artifact.rel, source, ctx)
-    if "!/" in artifact.rel:
-        parent = artifact.rel.rsplit("!/", 1)[0]
+    if artifact.parent is not None:
         with ctx.family_lock:
-            entry = ctx.families.get(parent)
+            entry = ctx.families.get(artifact.parent)
         if entry is not None:
-            cp += _container_group(parent, entry[0], ctx)
+            cp += _container_group(artifact.parent, entry[0], ctx)
     else:
         cp += ctx.input_group
     out: list[Path] = []
@@ -1208,11 +1207,13 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
             if len({(i.CRC, i.file_size) for i in copies}) > 1:  # an earlier copy gets no output
                 ctx.on_warn(f"{artifact.rel}!/{name}: {len(copies)} entries with this name are not the same;"
                             " decaf uses the last one, as Java does")
-    if artifact.rel.count("!/") >= ctx.settings.max_depth:
-        return [
-            Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.BEYOND_DEPTH)
-            for name in names
-        ]
+
+    def _artifact(path: Path, name: str, kind: ArtifactKind, classes: int = 0, refusal: str | None = None) -> Artifact:
+        rel = f"{artifact.rel}!/{name}"
+        return Artifact(path, rel, kind, classes, refusal, parent=artifact.rel, depth=artifact.depth + 1)
+
+    if artifact.depth >= ctx.settings.max_depth:
+        return [_artifact(artifact.path, name, ArtifactKind.BEYOND_DEPTH) for name in names]
     nested: list[Artifact] = []
     if ctx.case_insensitive:
         groups = casefs.case_groups(names)
@@ -1220,7 +1221,7 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
             text = _case_failure(groups, "nested archives", ctx.case_insensitive)
             clashing = {n for g in groups for n in g}
             nested = [
-                Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.ARCHIVE, refusal=text)
+                _artifact(artifact.path, name, ArtifactKind.ARCHIVE, refusal=text)
                 for name in names
                 if name in clashing
             ]
@@ -1233,9 +1234,9 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
         p = extract_dir / name
         if p.is_file():  # also when an earlier entry of the name is damaged: the last one is on disk
             kind, classes = classify_counted(p)
-            nested.append(Artifact(p, f"{artifact.rel}!/{name}", kind, classes))
+            nested.append(_artifact(p, name, kind, classes))
         elif name in unreadable:  # a damaged entry fails this archive, not its parent (#109)
-            nested.append(Artifact(artifact.path, f"{artifact.rel}!/{name}", ArtifactKind.CORRUPT))
+            nested.append(_artifact(artifact.path, name, ArtifactKind.CORRUPT))
     with ctx.family_lock:
         ctx.families[artifact.rel] = (
             artifact.path,
@@ -1322,7 +1323,7 @@ def _fetch_stage(
             report.outcome = "ok" if copied else "skipped"
         elif artifact.kind is ArtifactKind.BEYOND_DEPTH:
             state("copying resources")
-            member = artifact.rel.rsplit("!/", 1)[1]
+            member = artifact.rel.removeprefix(f"{artifact.parent}!/")
             copied, skipped = ctx.writer.add_blob(artifact.path, member, artifact.rel)
             report.resources_copied += copied
             report.resources_skipped += skipped

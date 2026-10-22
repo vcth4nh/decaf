@@ -149,7 +149,7 @@ def test_nested_discovery_respects_max_depth(make_jar, tmp_path: Path):
     runner = writing_runner({"vineflower": {"com/d/D.java": "class D {}"}})
     ctx = make_ctx(tmp_path, runner)  # default max_depth=1
     report, nested = process_artifact(
-        Artifact(dep, "app.war!/WEB-INF/lib/dep.jar", ArtifactKind.ARCHIVE), ctx
+        Artifact(dep, "app.war!/WEB-INF/lib/dep.jar", ArtifactKind.ARCHIVE, parent="app.war", depth=1), ctx
     )
     assert report.outcome == "ok"  # the at-cap artifact itself is still decompiled
     assert len(nested) == 1

@@ -235,6 +235,58 @@ def test_run_max_depth_zero_skips_all_nested(fake_env, make_jar, tmp_path: Path)
     assert (out / "src/com/w/W.java").is_file()  # the war itself is still decompiled
 
 
+# A folder name can end with "!", and a zip entry name can hold "!/": the rel does not show the depth or the container.
+_BANG_CASES = [("lib!/x.jar", "nested/inner.jar"), ("x.jar", "a!/inner.jar")]
+
+
+@pytest.mark.parametrize(("top", "entry"), _BANG_CASES)
+def test_run_reads_the_depth_of_an_archive_not_from_its_rel(fake_env, make_jar, tmp_path: Path, top, entry):
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    mid = make_jar("mid.jar", {"com/m/M.class": b"m", "lib/inner.jar": inner.read_bytes()})
+    mid_entry = entry.replace("inner", "mid")
+    input_dir = tmp_path / "in"
+    make_jar(top, {"com/x/X.class": b"x", mid_entry: mid.read_bytes()}, base=input_dir)
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, max_depth=2),
+        runner=perfect_engine,
+    )
+    assert {r.rel: r.outcome for r in report.artifacts} == {
+        top: "ok", f"{top}!/{mid_entry}": "ok", f"{top}!/{mid_entry}!/lib/inner.jar": "ok",  # depth 2: not skipped
+    }
+
+
+@pytest.mark.parametrize(("top", "entry"), _BANG_CASES)
+def test_run_gives_the_check_the_family_of_an_archive_not_from_its_rel(fake_env, make_jar, tmp_path, top, entry):
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    input_dir = tmp_path / "in"
+    make_jar(top, {"com/x/X.class": b"x", entry: inner.read_bytes()}, base=input_dir)
+    make_jar("other.jar", {"com/o/O.class": b"o"}, base=input_dir)
+    paths: dict[str, list[str]] = {}
+
+    def checker(jobs, *, timeout, cpu_budget):
+        for job in jobs:
+            paths.update((f.name, sorted(Path(e).name for e in job.classpath)) for f in job.files)
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine, checker=checker)
+    assert paths == {
+        "X.java": ["inner.jar", "other.jar", "x.jar"],  # its own group, then the input group
+        "I.java": ["inner.jar", "x.jar"],  # its own group, then the group of its container
+        "O.java": ["other.jar", "x.jar"],
+    }
+
+
+def test_run_copies_a_skipped_archive_whose_entry_name_holds_a_bang(fake_env, make_jar, tmp_path: Path):
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    input_dir = tmp_path / "in"
+    make_jar("x.jar", {"com/x/X.class": b"x", "a!/inner.jar": inner.read_bytes()}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False, max_depth=0), runner=perfect_engine)
+    row = next(r for r in report.artifacts if r.rel == "x.jar!/a!/inner.jar")
+    assert (row.outcome, row.resources_copied) == ("skipped", 1)
+    assert (out / "x.jar/a/inner.jar").read_bytes() == inner.read_bytes()
+
+
 def test_run_reports_found_counts(fake_env, make_jar, tmp_path: Path):
     input_dir = make_inputs(make_jar, tmp_path)
     found: list[int] = []
