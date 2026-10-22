@@ -199,6 +199,11 @@ source file name in the class file. For other classes, for example a Lombok
 class with `@SneakyThrows`, the retries stop when two engines in a row give the
 same first error of these two kinds. An undeclared `Throwable` or `Exception`
 does not stop them, because some engines drop the cast of `throw (T) t`.
+For old bytecode, an engine can write an inner class to a file of its own, for
+example `XStream$1.java`. Such a file uses names that javac makes for a nested
+class, for example `this$0`, and these errors go under `noted`. When such a
+file has other errors, its outer class goes to the next engine. That engine can
+nest the inner class in the file of the outer class.
 For each flagged and noted file,
 the report gives the javac errors in line order (at most 100). It also lists
 the files that the check could not examine under `unchecked`, with the reason.
