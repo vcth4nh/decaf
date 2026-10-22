@@ -275,6 +275,14 @@ All notable changes to decaf are documented here.
   counts them as files that the check did not finish (#101).
 - Two workers could extract the classes folder of one archive two times.
   Now the second worker waits for the first one (#101).
+- For old bytecode, Vineflower writes some inner classes to files of their
+  own, for example `XStream$1.java`. Such a file names `this$0`, `val$x`,
+  `access$300()`, or `class$()`: names that javac makes for a nested class.
+  Thus it did not compile alone, the check flagged it, and the jar stayed
+  partial (#101). Now these errors of such a file are noted, and its other
+  errors still flag it. On commons-collections-3.2.2, xpp3-1.1.4c, and
+  xstream-1.4.21, the flagged files fell from 70 to 11, and xpp3 is not
+  partial now.
 
 ### Security
 

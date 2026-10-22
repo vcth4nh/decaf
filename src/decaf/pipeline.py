@@ -786,6 +786,7 @@ def _check_trees(
         by_path: dict[str, check.FileResult] = {}
         by_release: dict[int | None, list[str]] = {}
         non_java: set[str] = set()
+        detached: set[str] = set()  # an inner class that the engine wrote apart from its outer class (#101)
         for p in sorted(tree.rglob("*")):
             suffix = p.suffix.lower()
             if not p.is_file() or suffix not in SOURCE_SUFFIXES or p.name.lower() in _METADATA_SOURCES:
@@ -808,6 +809,8 @@ def _check_trees(
             by_release.setdefault(release, []).append(rel)
             if top in held.non_java:
                 non_java.add(rel)
+            if top != key:
+                detached.add(rel)
         results.append(by_path)
         classpath = _family_classpath(artifact, source, ctx, held.roots)
         own = [e for e in classpath if _own_entry(e, artifact, source, held, ctx)]
@@ -817,7 +820,7 @@ def _check_trees(
             sent.append((by_path, paths))
             jobs.append(check.Job(
                 str(len(jobs)), tuple(classpath), tuple(tree / r for r in paths), release, twice,
-                frozenset(tree / r for r in paths if r in non_java), refs,
+                frozenset(tree / r for r in paths if r in non_java), refs, frozenset(tree / r for r in paths if r in detached),
             ))
         if by_release and ctx.on_event is not None:  # the display shows the check, not the engine run (#101)
             ctx.on_event("decompile", artifact.rel, f"{engine} · check {sum(map(len, by_release.values())):,} files")

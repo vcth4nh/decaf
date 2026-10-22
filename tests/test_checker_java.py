@@ -182,6 +182,29 @@ def test_bytecode_only_errors_of_a_non_java_class_are_noted(checker, tmp_path: P
     assert (out[1].status, out[1].kinds, out[1].errors) == ("flagged", ("flow", "name"), 2)
 
 
+def test_the_synthetic_names_of_a_detached_inner_class_file_are_noted(checker, tmp_path: Path):
+    """#101: javac's codes and texts for the names that javac makes for a nested class."""
+    java, javac, install = checker
+    classes = _compile(javac, tmp_path / "classes", {"p/A.java": "package p;\npublic class A {\n  private int count;\n}\n"})
+    (tmp_path / "p").mkdir()
+    body = ("  void f() {{\n    Object v = val$x;\n    A a = this$0;\n    int c = a.count;\n"
+            "    Object k = class$(\"java.lang.String\");\n    Object m = A.access$300(a);\n{}  }}\n")
+    files = []
+    for name, more in (("A$1", ""), ("A$2", "    int r = lastReturnedNode;\n")):
+        f = tmp_path / f"p/{name}.java"
+        f.write_text(f"package p;\nclass {name} {{\n" + body.format(more) + "}\n")
+        files.append(f)
+    plain = tmp_path / "p/B.java"
+    plain.write_text(files[0].read_text().replace("A$1", "B"))
+    out = check.run_check(
+        [check.Job("0", (classes,), (*files, plain), detached=frozenset(files))],
+        timeout=120, cpu_budget=1, java=java, install=install, tmp_root=tmp_path,
+    )[0]
+    assert (out[0].status, out[0].errors) == ("noted", 5)
+    assert (out[1].status, out[1].first) == ("flagged", "9: cannot find symbol: variable lastReturnedNode")
+    assert out[2].status == "flagged"
+
+
 def test_non_java_reads_class_files_of_javac(checker, tmp_path: Path):
     """#108: the markers in real class files, with stand-ins for the Kotlin and Groovy types."""
     _, javac, _ = checker

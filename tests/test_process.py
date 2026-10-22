@@ -1615,6 +1615,24 @@ def test_check_jobs_name_the_files_of_kotlin_groovy_and_scala_classes(make_jar, 
     assert sorted(f.name for f in job.non_java) == ["G$_run_closure1.java", "G.java", "K.java"]
 
 
+def test_check_jobs_name_the_files_of_detached_inner_classes(make_jar, tmp_path: Path):
+    """#101: a file of an inner class that the engine wrote apart from its outer class; Gone$In has no outer class."""
+    from decaf.pipeline import _check_trees, _Held
+    from test_check import _class_with
+
+    names = ("A", "A$1", "A$1$1", "Gone$In", "$Util")
+    jar = make_jar("app.jar", {f"p/{n}.class": _class_with(f"p/{n}") for n in names})
+    tree = tmp_path / "out-tree"
+    (tree / "p").mkdir(parents=True)
+    for name in names:
+        (tree / f"p/{name}.java").write_text("package p; class X {}")
+    calls: list = []
+    ctx = make_ctx(tmp_path, writing_runner({}), checker=marker_checker(calls))
+    _check_trees([(tree, Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), jar, _Held())], ctx, None, "vineflower")
+    (job,) = calls[0]
+    assert sorted(f.name for f in job.detached) == ["A$1$1.java", "A$1.java"]
+
+
 
 def _classes(make_jar, tmp_path: Path, entries: dict[str, bytes], as_folder: bool) -> tuple[Path, Artifact]:
     """The entries as a jar, or as a class folder."""
