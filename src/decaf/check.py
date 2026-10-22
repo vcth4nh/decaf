@@ -72,6 +72,7 @@ _GENERIC = re.compile(r"<[^<>]*>")
 _NEW = re.compile(r"\bnew\s+([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)")
 _SPACES = re.compile(r"\s*")
 _ABSENT_PACKAGE = re.compile(r"package\s+([\w.$]+)\s+does not exist")
+_SYNTHETIC = re.compile(r"(?:this|val|access|class)\$[\w$]*")  # the names that javac makes for a nested class
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,7 @@ class Job:
     non_java: frozenset[Path] = frozenset()  # the files of Kotlin, Groovy, and Scala classes (#108)
     # For the files with an absent name: the Scope.same_package of each file.
     refs: Callable[[list[Path]], dict[Path, frozenset[str]]] | None = field(default=None, compare=False)
+    detached: frozenset[Path] = frozenset()  # the files of inner classes that an engine wrote apart (#101)
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,11 @@ def _is_env(code: str, message: str, scope: Scope, inherits_absent: bool = False
     )
 
 
+def _synthetic(code: str, message: str) -> bool:
+    """A name that javac makes for a nested class: an inner class in a file of its own cannot see it (#101)."""
+    return code.startswith(_RESOLVE) and _SYNTHETIC.fullmatch(_symbol(message)[1]) is not None
+
+
 def _bytecode_only(code: str, message: str) -> bool:
     """An error that bytecode can cause legally: an undeclared checked exception, or a return-type overload."""
     return code.startswith(_UNREPORTED) or (code == "compiler.err.already.defined" and message.startswith("method "))
@@ -282,13 +289,15 @@ def _line(error: tuple[str, str, int, str]) -> str:
 
 
 def classify(
-    raw: _Raw | None, timed_out: bool, crash: str | None = None, scope: Scope = Scope(), non_java: bool = False
+    raw: _Raw | None, timed_out: bool, crash: str | None = None, scope: Scope = Scope(), non_java: bool = False,
+    detached: bool = False,
 ) -> FileResult:
     """Status of one file from its result lines (spec section 3).
 
     crash: the cause when the checker JVM stopped without a line for the file, e.g. its stderr (#108).
     scope: what can supply an absent name; a parse error never depends on the classpath (#108).
     non_java: the class is Kotlin, Groovy, or Scala bytecode, so its bytecode-only errors are noted (#108).
+    detached: an engine wrote the inner class apart from its outer class, so its synthetic names are noted (#101).
     """
     if raw is not None and raw.crash is not None:
         return unchecked("javac crash", first=_short(raw.crash))
@@ -308,7 +317,7 @@ def classify(
     absent = [e for e in errors if _is_env(e[1], e[3], scope, inherits_absent)]
     env = [] if any(e[0] == "P" for e in errors) else absent
     retry = [e for e in errors if e not in env and _kind(e[0], e[1]) in RETRY_KINDS
-             and not (non_java and _bytecode_only(e[1], e[3]))]
+             and not (non_java and _bytecode_only(e[1], e[3])) and not (detached and _synthetic(e[1], e[3]))]
     # An unqualified name that no import and no absent supertype can supply is an engine error,
     # also next to absent classes (#108). A flow error or a member of another class is not: an
     # absent catch type can cause the one, and an absent superclass of that class the other.
@@ -648,4 +657,4 @@ def _classify_file(
         except OSError:
             text = ""
         scope = scope_of(text, path.stem, job.twice, same_package)
-    return classify(raw, timed_out, crash, scope, path in job.non_java)
+    return classify(raw, timed_out, crash, scope, path in job.non_java, path in job.detached)

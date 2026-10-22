@@ -683,6 +683,48 @@ def test_other_errors_of_a_kotlin_groovy_or_scala_class_are_flagged():
     assert (r.status, r.first) == ("flagged", "14: variable x is already defined in method f()")
 
 
+def _missing(line: int, symbol: str, code: str = "compiler.err.cant.resolve.location") -> str:
+    return f"0\t0\tE\tA\t{code}\t{line}\tcannot find symbol   symbol:   {symbol}   location: class p.A$1"
+
+
+ARGS = "compiler.err.cant.resolve.location.args"
+SYNTHETIC = (  # the names that javac makes for a nested class
+    _missing(7, "variable this$0"), _missing(8, "variable val$x"), _missing(9, "method access$300()", ARGS),
+    _missing(10, "method class$(java.lang.String)", ARGS), _missing(11, "variable class$java$lang$String"),
+)
+PRIVATE = "0\t0\tE\tA\tcompiler.err.report.access\t12\tcount has private access in p.A"
+
+
+def test_the_synthetic_names_of_a_detached_inner_class_file_are_noted():
+    """#101: an engine wrote the inner class p/A$1 apart from p/A, so its file cannot see the names that
+    javac makes for a nested class, or the private members of p/A."""
+    r = classify(raw(*SYNTHETIC, PRIVATE, "0\t0\tT\t20"), False, detached=True)
+    assert (r.status, r.errors, r.first) == ("noted", 6, "7: cannot find symbol: variable this$0")
+
+
+def test_other_errors_of_a_detached_inner_class_file_are_flagged():
+    r = classify(raw(*SYNTHETIC, _missing(13, "variable lastReturnedNode"), "0\t0\tT\t20"), False, detached=True)
+    assert (r.status, r.first) == ("flagged", "13: cannot find symbol: variable lastReturnedNode")
+
+
+def test_the_synthetic_names_in_the_file_of_a_top_level_class_are_flagged():
+    """In the file of a top-level class, this$0 is an engine error: the engine did not write Outer.this."""
+    assert classify(raw(SYNTHETIC[0], "0\t0\tT\t20"), False).status == "flagged"
+
+
+def test_run_check_gives_classify_the_detached_files(tmp_path: Path, monkeypatch):
+    def fake_process(cmd, timeout, on_stderr_line=None):
+        lines = [SYNTHETIC[0], "0\t0\tT\t20", SYNTHETIC[0].replace("0\t0\t", "0\t1\t", 1), "0\t1\tT\t20"]
+        Path(cmd[-2]).write_text("\n".join(lines) + "\n")
+        return 0, False, "", None, False
+
+    monkeypatch.setattr(check.engines, "run_process", fake_process)
+    inner, top = tmp_path / "A$1.java", tmp_path / "B.java"
+    job = check.Job("0", (), (inner, top), detached=frozenset({inner}))
+    out = check.run_check([job], timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
+    assert [r.status for r in out[0]] == ["noted", "flagged"]
+
+
 def _class_with(name: str, interfaces: tuple[str, ...] = (), utf8: tuple[str, ...] = ()) -> bytes:
     """A minimal class file with interfaces and more Utf8 constants, e.g. an annotation descriptor."""
     pool, index = b"", {}
