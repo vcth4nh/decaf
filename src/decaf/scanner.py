@@ -43,6 +43,8 @@ class Artifact:
     kind: ArtifactKind
     classes: int = 0
     refusal: str | None = None  # failure text decided on discovery (#93): the artifact is not processed
+    parent: str | None = None  # the rel of the archive that holds it; a name in a rel can hold "!/"
+    depth: int = 0  # the archive levels above it
 
 
 def _read_names(path: Path) -> list[str] | None:

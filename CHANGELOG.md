@@ -247,6 +247,13 @@ All notable changes to decaf are documented here.
   container is final, because the compile check of a member reads the
   archives of its family. Thus a single fat jar keeps its nested archives
   until its last member is done.
+- decaf read the depth and the container of an archive from its row name.
+  But a folder name can end with "!" (`lib!/x.jar`), and an entry name in
+  an archive can hold "!/". Such an archive counted as one level deeper:
+  its nested archives became skipped rows one level early, and its compile
+  check did not get the other inputs or the archives of its family. A
+  skipped archive with "!/" in its entry name also got no copy in the
+  output. Now each archive records its container and its depth.
 
 ### Security
 
