@@ -420,6 +420,12 @@ def _tmp_dir(ctx: Ctx) -> Path:
     return Path(tempfile.mkdtemp(dir=ctx.tmp_root))
 
 
+def _drop(folder: Path | None) -> None:
+    """Delete a temp folder after its last use; the end of the run deletes what stays (#97)."""
+    if folder is not None:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def _jvm_input(artifact: Artifact, tmp_root: Path) -> Artifact:
     """The input with a path that a JVM can open (#113).
 
@@ -972,6 +978,7 @@ def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> Non
         for key, f in held.files.items():
             if f.result is not None:
                 held.checks[key] = f
+    _drop(held.root)
     if ctx.checker is not None:
         done = sorted(held.checks.values(), key=lambda f: f.path)
         report.flagged = [_check_entry(f) for f in done if f.result.status == "flagged"]
@@ -1101,26 +1108,30 @@ def _retry_missing_classes(
             if retry_tree is None:
                 break
             dest = _tmp_dir(ctx)
-            if ctx.on_event is not None:
-                ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
-            res = ctx.runner(
-                ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
-                ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-                **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
-                **({"heap_mb": heap} if heap is not None else {}),
-                **_stream_kw_for(ctx, name, artifact.rel),
-            )
-            if engines.PROCESSES.closed:  # Ctrl-C: no file of the killed retry goes out (#112)
-                report.attempts.append(_attempt(name, "class", res, res.java_files, [], heap))
-                break
-            found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
-            report.attempts.append(_attempt(name, "class", res, res.java_files, found, heap, flagged))
-            if res.java_files > 0:
-                java, collisions = ctx.writer.add_tree(dest, artifact.rel)
-                report.java_files += java
-                report.collisions += collisions
-                produced |= produced_stems(dest)
-                missing = expected - produced - held.stems()
+            try:
+                if ctx.on_event is not None:
+                    ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
+                res = ctx.runner(
+                    ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
+                    ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+                    **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+                    **({"heap_mb": heap} if heap is not None else {}),
+                    **_stream_kw_for(ctx, name, artifact.rel),
+                )
+                if engines.PROCESSES.closed:  # Ctrl-C: no file of the killed retry goes out (#112)
+                    report.attempts.append(_attempt(name, "class", res, res.java_files, [], heap))
+                    break
+                found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
+                report.attempts.append(_attempt(name, "class", res, res.java_files, found, heap, flagged))
+                if res.java_files > 0:
+                    java, collisions = ctx.writer.add_tree(dest, artifact.rel)
+                    report.java_files += java
+                    report.collisions += collisions
+                    produced |= produced_stems(dest)
+                    missing = expected - produced - held.stems()
+            finally:
+                _drop(retry_tree)
+                _drop(dest)
     finally:
         _finish_held(artifact.rel, ctx, report, held)  # also when a retry raises: the held files are not lost
     report.missing_classes = len(missing)
@@ -1139,29 +1150,32 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         if engines.PROCESSES.closed:
             break
         dest = _tmp_dir(ctx)
-        if ctx.on_event is not None:
-            ctx.on_event("decompile", artifact.rel, f"{name} · {len(expected):,} classes")
-        res = ctx.runner(
-            ctx.specs[name], ctx.engine_jars[name], target, dest,
-            ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
-            **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
-            **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
-            **({"heap_mb": heap} if heap is not None else {}),
-            **_stream_kw_for(ctx, name, artifact.rel),
-        )
-        if engines.PROCESSES.closed:  # Ctrl-C: the killed engine can leave a cut-off file (#112)
-            report.attempts.append(_attempt(name, "archive", res, res.java_files, [], heap))
-            break
-        found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
-        report.attempts.append(_attempt(name, "archive", res, res.java_files, found, heap, flagged))
-        if res.java_files > 0:
-            java, collisions = ctx.writer.add_tree(dest, artifact.rel)
-            report.java_files += java
-            report.collisions += collisions
-            report.method = name
-            produced |= produced_stems(dest)
-            used_index = i
-            break
+        try:
+            if ctx.on_event is not None:
+                ctx.on_event("decompile", artifact.rel, f"{name} · {len(expected):,} classes")
+            res = ctx.runner(
+                ctx.specs[name], ctx.engine_jars[name], target, dest,
+                ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
+                **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+                **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
+                **({"heap_mb": heap} if heap is not None else {}),
+                **_stream_kw_for(ctx, name, artifact.rel),
+            )
+            if engines.PROCESSES.closed:  # Ctrl-C: the killed engine can leave a cut-off file (#112)
+                report.attempts.append(_attempt(name, "archive", res, res.java_files, [], heap))
+                break
+            found, flagged = _hold_output(dest, name, artifact, source, ctx, held, heap) if res.java_files > 0 else ([], 0)
+            report.attempts.append(_attempt(name, "archive", res, res.java_files, found, heap, flagged))
+            if res.java_files > 0:
+                java, collisions = ctx.writer.add_tree(dest, artifact.rel)
+                report.java_files += java
+                report.collisions += collisions
+                report.method = name
+                produced |= produced_stems(dest)
+                used_index = i
+                break
+        finally:
+            _drop(dest)
 
     if used_index is None:
         report.outcome = "failed"
@@ -1317,6 +1331,7 @@ def _fetch_stage(
             damaged: list[str] = []
             extract_sources(artifact.path, tmp, damaged)
             java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+            _drop(tmp)
             report.java_files = java
             report.collisions = collisions
             report.missing_classes = len(damaged)  # a source entry that cannot be read is a missing file (#109)
@@ -1371,6 +1386,7 @@ def _fetch_stage(
                     resolution.miss = f"sources jar for {resolution.gav} has a damaged entry: {damaged[0]}"
                 else:
                     resolution.miss = f"sources jar for {resolution.gav} contained no .java/.kt files"
+                _drop(tmp)
             if resolution is not None:
                 if resolution.gav is not None:
                     report.gav = str(resolution.gav)
@@ -1400,6 +1416,9 @@ def _decompile_stage(
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
+    finally:
+        if artifact.kind is ArtifactKind.CLASS_TREE:  # the target is the copy of the fetch stage
+            _drop(target)
     return report
 
 
@@ -1557,6 +1576,7 @@ def _decompile_batch(
             )
     except Exception:
         trees = {}  # split unusable; every member requeues and redoes solo (self-healing)
+    _drop(dest)
 
     done: list[ArtifactReport] = []
     requeue: list[tuple[Artifact, Path, ArtifactReport]] = []
@@ -1568,6 +1588,7 @@ def _decompile_batch(
             continue
         try:
             java, collisions = ctx.writer.add_tree(trees[i], a.rel)
+            _drop(trees[i])
             report.java_files += java
             report.collisions += collisions
             report.method = name

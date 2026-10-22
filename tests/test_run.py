@@ -3808,3 +3808,106 @@ def test_run_keeps_the_input_path_when_the_link_fails(fake_env, make_jar, tmp_pa
     monkeypatch.setattr(os, "symlink", no_link)
     report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=engine)
     assert report.artifacts[0].outcome == "ok" and targets == [jar]
+
+
+def _other_folders(dest, target) -> set[str]:
+    """The folders of the temp root that are not the output folder or the input folder of this engine call (#97)."""
+    return {p.name for p in Path(dest).parent.iterdir()} - {Path(dest).name, Path(target).name}
+
+
+def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_path):
+    """#97: the temp root grew with the whole run. Now the folders of an engine call go after the call."""
+    input_dir = tmp_path / "in"
+    for k in range(3):
+        make_jar(f"j{k}.jar", {f"p{k}/A.class": b"a", f"p{k}/B.class": b"b"}, base=input_dir)
+    left: list[set[str]] = []
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        left.append(_other_folders(dest, target))
+        res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+        if spec.name in ("vineflower", "cfr"):  # B is missing: two class retries
+            for b in Path(dest).rglob("B.java"):
+                b.unlink()
+        return res
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1), runner=engine)
+    assert report.totals["ok"] == 3 and all(r.missing_classes == 0 for r in report.artifacts)
+    assert left == [set()] * 9  # 3 jars, 3 engine calls each
+
+
+def test_run_leaves_the_final_delete_an_empty_temp_root(fake_env, make_jar, tmp_path, monkeypatch):
+    """#97: held files, a class-folder copy, and extracted sources also go after their last use."""
+    import shutil
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"p/A.class": b"a", "p/B.class": b"b"}, base=input_dir)
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
+    make_jar("s-sources.jar", {"com/s/S.java": "class S {}"}, base=input_dir)
+    (input_dir / "q").mkdir()
+    (input_dir / "q/Q.class").write_bytes(b"q")
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        if Path(jar_path).name != "lib-1.2.jar":
+            return Resolution(miss="no sources")
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    real = shutil.rmtree
+    left: list[list[str]] = []
+
+    def rmtree(path, *args, **kwargs):
+        if Path(path).name.startswith("decaf-"):  # the temp root, at the end of the run
+            left.append(sorted(p.name for p in Path(path).iterdir()))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    report = run(Settings(input=input_dir, output=tmp_path / "out"),
+                 runner=stub_engine({"vineflower": {"p/B"}}), resolver=resolver)
+    methods = {r.rel: r.method for r in report.artifacts}
+    assert methods == {"a.jar": "vineflower", "lib-1.2.jar": "maven", "s-sources.jar": "extracted",
+                       "_classes": "vineflower"}
+    assert [a.engine for a in report.artifacts if a.rel == "a.jar" for a in a.attempts] == ["vineflower", "cfr"]
+    assert left == [[]]
+    inputs = sorted(p.relative_to(input_dir).as_posix() for p in input_dir.rglob("*") if p.is_file())
+    assert inputs == ["a.jar", "lib-1.2.jar", "q/Q.class", "s-sources.jar"]  # only temp folders go
+
+
+def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_path):
+    """#97: the batch output goes after the split, and the folder of each jar of the batch after its write."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": b"x", "com/s0/B.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x", "com/s1/B.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar("big.jar", {**{f"com/big/C{i}.class": b"x" for i in range(900)},
+                         "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()}, base=input_dir)
+    all_queued = threading.Event()
+    queued = [0]
+    left: list[set[str]] = []
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)  # the two small jars then form one batch
+        if Path(target).is_dir():  # a class retry of a jar of the batch
+            left.append(_other_folders(dest, target))
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def batch_without_b(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        for b in Path(dest).rglob("B.java"):
+            b.unlink()
+        return res
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+        runner=gated_solo, batch_runner=batch_without_b, on_event=on_event,
+    )
+    assert report.totals["ok"] == 3 and all(r.missing_classes == 0 for r in report.artifacts)
+    # At the retry of the first jar: the nested folder of big.jar (#97 part 2) and the split folder of
+    # the second jar, which is not written yet. At the retry of the second jar: only the nested folder.
+    assert [len(s) for s in left] == [2, 1]

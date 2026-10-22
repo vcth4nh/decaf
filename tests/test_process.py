@@ -13,9 +13,12 @@ from decaf.scanner import Artifact, ArtifactKind
 def writing_runner(files_per_engine: dict[str, dict[str, str]]):
     """Fake run_engine: each engine 'produces' the given {rel: content} files."""
     calls: list[tuple[str, Path]] = []
+    sent: list[list[str] | None] = []  # the class files of a folder target, read in the call: it goes after (#97)
 
     def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
         calls.append((spec.name, Path(target)))
+        folder = Path(target)
+        sent.append(sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*.class")) if folder.is_dir() else None)
         files = files_per_engine.get(spec.name, {})
         for rel, content in files.items():
             p = Path(dest) / rel
@@ -24,6 +27,7 @@ def writing_runner(files_per_engine: dict[str, dict[str, str]]):
         return EngineResult(spec.name, 0 if files else 1, False, len(files), "" if files else "boom")
 
     _run.calls = calls
+    _run.sent = sent
     return _run
 
 
@@ -107,9 +111,7 @@ def test_class_level_retry_fills_missing(make_jar, tmp_path: Path):
     ]
     assert (tmp_path / "out/src/com/x/A.java").is_file()
     assert (tmp_path / "out/src/com/x/B.java").is_file()
-    retry_target = runner.calls[1][1]
-    assert retry_target.is_dir()
-    assert sorted(p.name for p in retry_target.rglob("*.class")) == ["B$1.class", "B.class"]
+    assert runner.sent[1] == ["com/x/B$1.class", "com/x/B.class"]
 
 
 def test_war_prefix_normalized_for_missing_check(make_jar, tmp_path: Path):
@@ -306,8 +308,7 @@ def test_class_tree_decompiled_from_copied_tree(tmp_path: Path):
     report, _ = process_artifact(Artifact(tmp_path, "_classes", ArtifactKind.CLASS_TREE), ctx)
     assert report.outcome == "ok"
     assert report.classes == 1
-    target = runner.calls[0][1]
-    assert target.is_dir() and target != tmp_path  # copied tree, not the input root
+    assert runner.sent[0] == ["loose/com/x/A.class"] and runner.calls[0][1] != tmp_path  # copied tree, not the input root
 
 
 def test_runner_exception_becomes_failed_report(make_jar, tmp_path: Path):
@@ -844,7 +845,7 @@ def test_class_level_retry_takes_dollar_classes(make_jar, tmp_path: Path):
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     assert (report.classes, report.missing_classes) == (2, 0)
     assert [(a.engine, a.level) for a in report.attempts] == [("vineflower", "archive"), ("cfr", "class")]
-    assert sorted(p.name for p in runner.calls[1][1].rglob("*.class")) == ["$Util$In.class", "$Util.class"]
+    assert [Path(p).name for p in runner.sent[1]] == ["$Util$In.class", "$Util.class"]
     assert (tmp_path / "out/src/com/x/$Util.java").is_file()
 
 
@@ -1722,8 +1723,7 @@ def test_flagged_file_replaced_by_clean_retry(make_jar, tmp_path: Path):
     ]
     assert (tmp_path / "out/src/com/x/A.java").read_text() == "class A { /* cfr */ }"
     assert report.check["checked"] == 2 and report.check["flagged"] == 0
-    retry_target = runner.calls[1][1]
-    assert sorted(p.name for p in retry_target.rglob("*.class")) == ["A.class"]
+    assert runner.sent[1] == ["com/x/A.class"]
 
 
 def test_all_engines_flagged_keeps_first_file_and_is_partial(make_jar, tmp_path: Path):
@@ -1796,7 +1796,7 @@ def test_retries_stop_only_for_the_class_with_the_same_first_error(make_jar, tmp
     ctx = make_ctx(tmp_path, runner, checker=marker_checker())
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
-    sent = [sorted(p.name for p in target.rglob("*.class")) for _, target in runner.calls[1:]]
+    sent = [[Path(p).name for p in s] for s in runner.sent[1:]]
     assert sent == [["A.class", "B.class"], ["B.class"], ["B.class"], ["B.class"]]
     assert [(f["path"], f["engine"]) for f in report.flagged] == [
         ("com/x/A.java", "vineflower"), ("com/x/B.java", "vineflower"),
@@ -2010,8 +2010,7 @@ def test_class_retry_sends_no_versioned_class(make_jar, tmp_path: Path):
     runner = writing_runner({"vineflower": {"com/x/A.java": "// FLAG"}, "cfr": {"com/x/A.java": "class A {}"}})
     ctx = make_ctx(tmp_path, runner, checker=marker_checker())
     process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
-    retry_target = runner.calls[1][1]
-    assert [p.relative_to(retry_target).as_posix() for p in retry_target.rglob("*.class")] == ["com/x/A.class"]
+    assert runner.sent[1] == ["com/x/A.class"]
 
 
 def test_class_retry_sends_the_lowest_version_of_a_class_with_no_base(make_jar, tmp_path: Path):
@@ -2024,10 +2023,7 @@ def test_class_retry_sends_the_lowest_version_of_a_class_with_no_base(make_jar, 
     runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}, "cfr": {"com/x/V.java": "class V {}"}})
     ctx = make_ctx(tmp_path, runner, checker=marker_checker())
     report, _ = process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
-    retry_target = runner.calls[1][1]
-    assert sorted(p.relative_to(retry_target).as_posix() for p in retry_target.rglob("*.class")) == [
-        "META-INF/versions/17/com/x/V$1.class", "META-INF/versions/17/com/x/V.class",
-    ]
+    assert runner.sent[1] == ["META-INF/versions/17/com/x/V$1.class", "META-INF/versions/17/com/x/V.class"]
     assert report.missing_classes == 0
 
 

@@ -236,6 +236,14 @@ All notable changes to decaf are documented here.
   folding, and it joins at least the names that NTFS, APFS, or ext4 casefold
   join. The key also joins some names that NTFS keeps apart, for example
   `ß` and `ss`: decaf refuses them, but no file overwrites another.
+- The temp folder of a run grew until the run ended, because decaf deleted
+  its temp files only at the end (#97). On a tmpfs, these files used RAM
+  next to the engine JVMs, and a large input could fill the disk. Now decaf
+  deletes each temp folder with one owner after its last use: the output of
+  each engine run and each class retry, the retry tree, the held files, an
+  extracted sources jar, the copy of a class folder, and the folders of a
+  batch. The nested archives of a container still stay until the end of
+  the run.
 
 ### Security
 
