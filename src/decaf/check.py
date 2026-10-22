@@ -615,6 +615,7 @@ def run_check(
         text = result_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         text = ""
+    shutil.rmtree(work, ignore_errors=True)  # each file of it is read (#97)
     raw = parse_results(text)
     lines = [line for line in tail.splitlines() if line.strip()]
     # The cause of an exception in the main thread comes before its stack frames.

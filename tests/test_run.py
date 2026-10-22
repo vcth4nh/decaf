@@ -3810,6 +3810,22 @@ def test_run_keeps_the_input_path_when_the_link_fails(fake_env, make_jar, tmp_pa
     assert report.artifacts[0].outcome == "ok" and targets == [jar]
 
 
+def _watch_final_delete(monkeypatch) -> list[list[str]]:
+    """The folders that the final delete of the temp root finds, one list for each run (#97)."""
+    import shutil
+
+    real = shutil.rmtree
+    left: list[list[str]] = []
+
+    def rmtree(path, *args, **kwargs):
+        if Path(path).name.startswith("decaf-"):  # the temp root of the run
+            left.append(sorted(p.name for p in Path(path).iterdir()))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    return left
+
+
 def _other_folders(dest, target) -> set[str]:
     """The folders of the temp root that are not the output folder or the input folder of this engine call (#97)."""
     return {p.name for p in Path(dest).parent.iterdir()} - {Path(dest).name, Path(target).name}
@@ -3837,8 +3853,6 @@ def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_p
 
 def test_run_leaves_the_final_delete_an_empty_temp_root(fake_env, make_jar, tmp_path, monkeypatch):
     """#97: held files, a class-folder copy, and extracted sources also go after their last use."""
-    import shutil
-
     input_dir = tmp_path / "in"
     make_jar("a.jar", {"p/A.class": b"a", "p/B.class": b"b"}, base=input_dir)
     make_jar("lib-1.2.jar", {"com/x/A.class": b"x"}, base=input_dir)
@@ -3853,15 +3867,7 @@ def test_run_leaves_the_final_delete_an_empty_temp_root(fake_env, make_jar, tmp_
         return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
                           repo="https://r.test/m2", resolved_by="pom-properties")
 
-    real = shutil.rmtree
-    left: list[list[str]] = []
-
-    def rmtree(path, *args, **kwargs):
-        if Path(path).name.startswith("decaf-"):  # the temp root, at the end of the run
-            left.append(sorted(p.name for p in Path(path).iterdir()))
-        return real(path, *args, **kwargs)
-
-    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    left = _watch_final_delete(monkeypatch)
     report = run(Settings(input=input_dir, output=tmp_path / "out"),
                  runner=stub_engine({"vineflower": {"p/B"}}), resolver=resolver)
     methods = {r.rel: r.method for r in report.artifacts}
@@ -3873,8 +3879,9 @@ def test_run_leaves_the_final_delete_an_empty_temp_root(fake_env, make_jar, tmp_
     assert inputs == ["a.jar", "lib-1.2.jar", "q/Q.class", "s-sources.jar"]  # only temp folders go
 
 
-def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_path):
+def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_path, monkeypatch):
     """#97: the batch output goes after the split, and the folder of each jar of the batch after its write."""
+    at_end = _watch_final_delete(monkeypatch)
     s0 = make_jar("s0.jar", {"com/s0/A.class": b"x", "com/s0/B.class": b"x"})
     s1 = make_jar("s1.jar", {"com/s1/A.class": b"x", "com/s1/B.class": b"x"})
     input_dir = tmp_path / "in"
@@ -3908,6 +3915,50 @@ def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_pat
         runner=gated_solo, batch_runner=batch_without_b, on_event=on_event,
     )
     assert report.totals["ok"] == 3 and all(r.missing_classes == 0 for r in report.artifacts)
-    # At the retry of the first jar: the nested folder of big.jar (#97 part 2) and the split folder of
-    # the second jar, which is not written yet. At the retry of the second jar: only the nested folder.
+    # At the retry of the first jar: the nested folder of big.jar and the split folder of the second
+    # jar, which is not written yet. At the retry of the second jar: only the nested folder.
     assert [len(s) for s in left] == [2, 1]
+    assert at_end == [[]]  # the nested folder went when the rows of the batch were final
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+def test_run_drops_the_nested_archives_when_their_family_is_done(fake_env, make_jar, tmp_path, monkeypatch, depth):
+    """#97: the nested archives and the class root of a container go when each member below it is done.
+
+    The check of a member reads the archives of its family, and with --max-depth 1 the row of a
+    deeper archive reads it from the archive of its parent.
+    """
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    fat = make_jar("fat.jar", {"BOOT-INF/classes/com/f/F.class": b"f", "BOOT-INF/lib/inner.jar": inner.read_bytes()})
+    dep = make_jar("dep.jar", {"com/d/D.class": b"d"})
+    input_dir = tmp_path / "in"
+    make_jar("app.war", {"WEB-INF/classes/com/w/W.class": b"w", "WEB-INF/lib/fat.jar": fat.read_bytes(),
+                         "WEB-INF/lib/dep.jar": dep.read_bytes()}, base=input_dir)
+    gone: list[str] = []
+
+    def checker(jobs, *, timeout, cpu_budget):
+        gone.extend(str(e) for job in jobs for e in job.classpath if not Path(e).exists())
+        return [[check.FileResult("clean") for _ in job.files] for job in jobs]
+
+    left = _watch_final_delete(monkeypatch)
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, max_depth=depth),
+                 runner=perfect_engine, checker=checker)
+    outcomes = {r.rel: r.outcome for r in report.artifacts}
+    assert outcomes == {
+        "app.war": "ok", "app.war!/WEB-INF/lib/dep.jar": "ok", "app.war!/WEB-INF/lib/fat.jar": "ok",
+        "app.war!/WEB-INF/lib/fat.jar!/BOOT-INF/lib/inner.jar": "ok" if depth == 2 else "skipped",
+    }
+    assert gone == []  # each class path entry of each check was still on disk
+    assert left == [[]]
+
+
+def test_run_finds_no_container_for_a_jar_in_a_folder_whose_name_ends_with_a_bang(
+    fake_env, make_jar, tmp_path, monkeypatch
+):
+    """#97: the rel "lib!/x.jar" is a top-level row, not a member of a container "lib"."""
+    input_dir = tmp_path / "in"
+    make_jar("x.jar", {"com/x/X.class": b"x"}, base=input_dir / "lib!")
+    left = _watch_final_delete(monkeypatch)
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine)
+    assert [(r.rel, r.outcome) for r in report.artifacts] == [("lib!/x.jar", "ok")]
+    assert left == [[]]

@@ -281,6 +281,21 @@ def test_run_check_maps_results_and_missing_lines(tmp_path: Path, monkeypatch):
     assert seen["cmd"][-1] == "2"
 
 
+def test_run_check_deletes_its_work_folder(tmp_path: Path, monkeypatch):
+    """#97: each checker JVM left its jobs file and results file in the temp root until the end of the run."""
+
+    def fake_process(cmd, timeout, on_stderr_line=None):
+        Path(cmd[-2]).write_text("0\t0\tT\t1\n")
+        return 0, False, "", None, False
+
+    monkeypatch.setattr(check.engines, "run_process", fake_process)
+    root = tmp_path / "tmp"
+    root.mkdir()
+    out = check.run_check([check.Job("0", (), (tmp_path / "A.java",))], timeout=5, cpu_budget=1, java="java",
+                          install=tmp_path, tmp_root=root)
+    assert [r.status for r in out[0]] == ["clean"] and list(root.iterdir()) == []
+
+
 def test_run_check_gives_the_checker_jvm_its_heap(tmp_path: Path, monkeypatch):
     cmds = []
 

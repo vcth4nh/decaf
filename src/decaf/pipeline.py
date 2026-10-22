@@ -411,6 +411,7 @@ class Ctx:
     input_group: list[Path] = field(default_factory=list)  # top-level classpath entries (#99)
     tree_roots: dict[Path, list[Path]] = field(default_factory=dict)  # the _tree_roots of each class-folder input
     families: dict[str, tuple[Path, list[Path]]] = field(default_factory=dict)  # parent rel -> (path, nested archives)
+    family_dirs: dict[str, list[Path]] = field(default_factory=dict)  # container rel -> its temp folders (#97)
     class_roots: dict[str, Path | None] = field(default_factory=dict)  # rel -> extracted WEB-INF/BOOT-INF classes
     entry_names: dict[Path, frozenset[str]] = field(default_factory=dict)  # classpath entry -> its class names (#108)
     family_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -653,6 +654,7 @@ def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
         if rel in ctx.class_roots:
             return ctx.class_roots[rel]
     root: Path | None = None
+    dest: Path | None = None
     try:
         with zipfile.ZipFile(path) as zf:
             names = zf.namelist()
@@ -666,6 +668,8 @@ def _class_root(rel: str, path: Path, ctx: Ctx) -> Path | None:
     except ZIP_ERRORS:
         root = None  # kept as None: the other archives of the family do not try again
     with ctx.family_lock:
+        if dest is not None:  # it goes when the family is done (#97)
+            ctx.family_dirs.setdefault(rel, []).append(dest)
         return ctx.class_roots.setdefault(rel, root)
 
 
@@ -1237,6 +1241,7 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
             artifact.path,
             [a.path for a in nested if a.kind is ArtifactKind.ARCHIVE and a.refusal is None],
         )
+        ctx.family_dirs.setdefault(artifact.rel, []).append(extract_dir)  # it goes when the family is done (#97)
     return nested
 
 
@@ -1602,6 +1607,26 @@ def _decompile_batch(
     return done, requeue
 
 
+def _member_done(rel: str, open_count: dict[str, int], parent_of: dict[str, str], ctx: Ctx) -> None:
+    """A row is final. When no row below a container is open, the folders of the container go (#97).
+
+    The check of a member reads the archives of its family, and the row of an archive
+    beyond --max-depth reads it from the archive of its parent.
+    """
+    while True:
+        open_count[rel] -= 1
+        if open_count[rel]:
+            return
+        del open_count[rel]
+        with ctx.family_lock:
+            folders = ctx.family_dirs.pop(rel, [])
+        for folder in folders:
+            _drop(folder)
+        if rel not in parent_of:  # not from the rel: a folder name can end with "!"
+            return
+        rel = parent_of.pop(rel)
+
+
 def process_artifact(artifact: Artifact, ctx: Ctx) -> tuple[ArtifactReport, list[Artifact]]:
     """Run both stages synchronously; the parallel runner splits them across pools."""
     report, nested, target = _fetch_stage(artifact, ctx)
@@ -1885,6 +1910,8 @@ def run(
                 dec_futs: dict = {}  # Future -> (kind, weight)
                 ready: list[tuple] = []  # (-classes, seq, artifact, target, report)
                 ready_small: deque = deque()  # batch-eligible: (artifact, target, report, stems, claims)
+                open_count: dict[str, int] = {}  # rel -> its own row and the open rows below it (#97)
+                parent_of: dict[str, str] = {}  # nested rel -> the rel of its container (#97)
                 dec_weight = 0
                 scheduling = True  # from here, the handler below takes the first Ctrl-C
                 try:
@@ -1938,6 +1965,8 @@ def run(
                                     for a2, t2, r2 in requeue:
                                         heappush(ready, (-a2.classes, next(seq), a2, t2, r2))
                                     reports.extend(done_reports)  # all rows first: on_done can fail
+                                    for r2 in done_reports:
+                                        _member_done(r2.rel, open_count, parent_of, ctx)
                                     if on_done is not None:
                                         for r2 in done_reports:
                                             on_done(r2)
@@ -1946,7 +1975,9 @@ def run(
                             else:
                                 a = fetch_futs.pop(fut)
                                 report, nested, target = fut.result()
+                                open_count[a.rel] = 1 + len(nested)
                                 for n in nested:
+                                    parent_of[n.rel] = a.rel
                                     heappush(todo, (-n.classes, next(seq), n))
                                 delta = len(nested) - nested_counts.pop(a.rel, 0)
                                 discovered += delta
@@ -1972,6 +2003,7 @@ def run(
                                         heappush(ready, (-a.classes, next(seq), a, target, report))
                                     continue
                             reports.append(report)
+                            _member_done(report.rel, open_count, parent_of, ctx)
                             if on_done is not None:
                                 on_done(report)
                 except BaseException as exc:  # Ctrl-C, SIGTERM (see cli), or an error such as a broken pipe
