@@ -241,9 +241,12 @@ All notable changes to decaf are documented here.
   next to the engine JVMs, and a large input could fill the disk. Now decaf
   deletes each temp folder with one owner after its last use: the output of
   each engine run and each class retry, the retry tree, the held files, an
-  extracted sources jar, the copy of a class folder, and the folders of a
-  batch. The nested archives of a container still stay until the end of
-  the run.
+  extracted sources jar, the copy of a class folder, the work files of each
+  checker JVM, and the folders of a batch. The nested archives and the
+  extracted classes folder of a container go when each row below the
+  container is final, because the compile check of a member reads the
+  archives of its family. Thus a single fat jar keeps its nested archives
+  until its last member is done.
 
 ### Security
 
