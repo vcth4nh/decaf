@@ -284,7 +284,24 @@ def test_run_copies_a_skipped_archive_whose_entry_name_holds_a_bang(fake_env, ma
     report = run(Settings(input=input_dir, output=out, maven=False, max_depth=0), runner=perfect_engine)
     row = next(r for r in report.artifacts if r.rel == "x.jar!/a!/inner.jar")
     assert (row.outcome, row.resources_copied) == ("skipped", 1)
-    assert (out / "x.jar/a/inner.jar").read_bytes() == inner.read_bytes()
+    assert (out / "x.jar/a!/inner.jar").read_bytes() == inner.read_bytes()
+
+
+def test_run_gives_each_archive_its_own_output_folder_when_a_name_holds_a_bang(fake_env, make_jar, tmp_path: Path):
+    """The mirror output dropped each "!" of a rel, so in/lib!/x.jar and in/lib/x.jar wrote into one folder."""
+    inner = make_jar("inner.jar", {"com/i/I.class": b"i"})
+    input_dir = tmp_path / "in"
+    make_jar("x.jar", {"com/a/A.class": b"a", "res/a.txt": "from lib!"}, base=input_dir / "lib!")
+    make_jar("x.jar", {"com/b/B.class": b"b", "res/a.txt": "from lib", "a!/inner.jar": inner.read_bytes()},
+             base=input_dir / "lib")
+    out = tmp_path / "out"
+    run(Settings(input=input_dir, output=out, maven=False), runner=perfect_engine)
+    files = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    assert files == [
+        "decaf-report.json", "lib!/x.jar/com/a/A.java", "lib!/x.jar/res/a.txt",
+        "lib/x.jar/a!/inner.jar/com/i/I.java", "lib/x.jar/com/b/B.java", "lib/x.jar/res/a.txt",
+    ]
+    assert (out / "lib!/x.jar/res/a.txt").read_text() == "from lib!"
 
 
 def test_run_reports_found_counts(fake_env, make_jar, tmp_path: Path):

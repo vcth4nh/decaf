@@ -254,6 +254,12 @@ All notable changes to decaf are documented here.
   check did not get the other inputs or the archives of its family. A
   skipped archive with "!/" in its entry name also got no copy in the
   output. Now each archive records its container and its depth.
+- The mirror output dropped each "!" of a row name. Thus `in/lib!/x.jar`
+  and `in/lib/x.jar` wrote into one output folder: their sources mixed,
+  and a resource file of one replaced the file of the other. Now a
+  top-level archive keeps its input path as its folder, and a nested
+  archive gets the folder of its container plus its entry name. A name
+  keeps its "!".
 
 ### Security
 
