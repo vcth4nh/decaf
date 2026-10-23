@@ -755,6 +755,7 @@ class _Held:
     non_java: set[str] = field(default_factory=set)  # keys of the Kotlin, Groovy, and Scala classes, read with versions
     copies: set[str] | None = None  # the _copied_keys of the source, read once
     roots: list[Path] | None = None  # the _tree_roots of a class folder, read once
+    waiting: set[str] = field(default_factory=set)  # outer classes whose held family waits for a retry (#101)
 
     def stems(self, settled: bool = True) -> set[str]:
         """The class stems of the held files: a copy's key loses its container root (#107).
@@ -897,12 +898,21 @@ def _apply_hold(
     inner class or a variant of a held class (#107).
     A held file gets no more retries when the next engine's file has the same first error, and
     bytecode can cause this error legally (#108).
+    A flagged file of an inner class that the engine wrote apart from its outer class holds its
+    family: the files of the outer class and of its inner classes in the output. The family must
+    be new: no earlier output wrote or held a file of it. Then the outer class gets a retry, and
+    the next engine can nest the inner classes. A later output replaces the family as a whole,
+    when it has the file of the outer class and each of its files of the family passes the
+    check; else its files of the family go (#101).
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
-    flagged = 0
-    held_now: set[str] = set()
-    written_now: set[str] = set()
+    versions = held.versions or {}
+
+    def top(key: str) -> str:
+        return outer_stem(key, versions) or key
+
+    files: list[tuple[Path, str, str, stubs.Stub | None, check.FileResult | None]] = []
     for p in sorted(tree.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
             continue
@@ -910,14 +920,28 @@ def _apply_hold(
         key = _held_key(rel)
         if key in held.copies:
             key = rel[: -len(PurePosixPath(rel).suffix)]  # one key for each copy (#107)
-        stub = found.get(rel)
-        result = results.get(rel) if results is not None else None
+        files.append((p, rel, key, found.get(rel), results.get(rel) if results is not None else None))
+    waiting = {top(key) for _, _, key, _, r in files if top(key) != key and r is not None and r.status == "flagged"}
+    if waiting:  # only a new family waits
+        waiting -= {top(k) for k in held.files.keys() | held.written}
+    for family in list(held.waiting):
+        mine = [(key, stub, r) for _, _, key, stub, r in files if top(key) == family]
+        if any(key == family for key, _, _ in mine) and all(
+            stub is None and r is not None and r.passes for _, stub, r in mine
+        ):  # the files of this output replace the held files of the family
+            held.waiting.discard(family)
+            for k in [k for k in held.files if top(k) == family]:
+                (held.root / held.files.pop(k).path).unlink(missing_ok=True)
+    flagged = 0
+    held_now: set[str] = set()
+    written_now: set[str] = set()
+    for p, rel, key, stub, result in files:
         is_flagged = result is not None and result.status == "flagged"
         flagged += is_flagged
         if key in held_now:
             continue  # another file of this output with the same key: keep both
         if key in held.files:
-            if stub is None and not is_flagged and not engines.PROCESSES.closed and (
+            if stub is None and not is_flagged and not engines.PROCESSES.closed and top(key) not in held.waiting and (
                 held.files[key].stub is not None or result is None or result.passes
             ):  # an unchecked file can replace a stub (a known loss), not a flagged file; after
                 # Ctrl-C a retry file can be cut off, and the check did not run (#112)
@@ -935,7 +959,9 @@ def _apply_hold(
                 p.unlink()  # the earlier engine's held file stays
         elif key in held.written and key not in written_now:
             p.unlink()  # an earlier engine wrote this class, and its file stays (#107)
-        elif stub is not None or is_flagged:
+        elif top(key) in held.waiting:
+            p.unlink()  # the held family of its outer class waits: only a whole family replaces it
+        elif stub is not None or is_flagged or top(key) in waiting:
             if held.root is None:
                 held.root = _tmp_dir(ctx)
             target = held.root / rel
@@ -950,6 +976,7 @@ def _apply_hold(
             written_now.add(key)
             if result is not None:
                 held.checks[key] = _HeldFile(engine, rel, None, result)
+    held.waiting |= waiting
     return flagged
 
 

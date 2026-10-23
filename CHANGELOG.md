@@ -283,6 +283,15 @@ All notable changes to decaf are documented here.
   errors still flag it. On commons-collections-3.2.2, xpp3-1.1.4c, and
   xstream-1.4.21, the flagged files fell from 70 to 11, and xpp3 is not
   partial now.
+- A flagged file of such an inner class now gets a retry of its outer class
+  (#101). Until the retry ends, decaf holds the files of the outer class and
+  of its inner classes from that engine. The next engine can nest the inner
+  classes in the file of the outer class. Its files replace the held files
+  only as a whole. The file of the outer class must be one of them, and each
+  file must pass the check. Before, when the engine wrote no file of the
+  outer class, the retry of the outer class gave the inner class two times.
+  On the three jars, the flagged files fell from 11 to 0, and no jar is
+  partial now.
 
 ### Security
 
