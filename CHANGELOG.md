@@ -23,6 +23,16 @@ All notable changes to decaf are documented here.
   113, and they take 27 s instead of 261 s. The flagged files rose from 309
   to 336: for 27 classes, the file of Fernflower passed as `noted`, and now
   the file of Vineflower stays.
+- CFR and Procyon decompile the classes of a folder in one JVM, not in one
+  JVM for each class (#101). They take class files as positional arguments.
+  When that JVM stops with an error, out of memory, or at the timeout, each
+  class of its group gets a JVM of its own, as before. A group holds the
+  class paths that fit one command line of Windows. The class retries of the
+  compile check and a run with `--engine cfr` or `--engine procyon` on a
+  class folder use this path. On groovy-all-2.4.21, the CFR retry of 445
+  classes took 43 s instead of 206 s, and the run 177 s instead of 331 s,
+  with the same files and flags. The heap estimate of a class folder now
+  uses the whole folder for every engine.
 
 ### Fixed
 
