@@ -29,6 +29,7 @@ class ConfigError(Exception):
 class Config:
     repositories: tuple[str, ...]
     engine_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
+    update_check: bool = True
 
 
 def default_config_path() -> Path:
@@ -112,13 +113,14 @@ def _check_repo(where: str, r: str) -> None:
 def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Config:
     file_repos: list[str] = []
     engine_overrides: dict[str, dict[str, str]] = {}
+    update_check = True
     cfg_path = path or default_config_path()
     if path is not None and not path.is_file():
         raise ConfigError(f"{path}: config file not found")
     if cfg_path.is_file():
         data = _read_toml(cfg_path)
         for key in data:
-            if key not in ("repositories", "engines"):
+            if key not in ("repositories", "engines", "update_check"):
                 raise ConfigError(f"{cfg_path}: unknown key {key!r}")
         repos = data.get("repositories", [])
         if not isinstance(repos, list):
@@ -129,6 +131,9 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
             _check_repo(f"{cfg_path}: repository", r)
         file_repos = repos
         engine_overrides = _parse_engines(cfg_path, data["engines"]) if "engines" in data else {}
+        update_check = data.get("update_check", True)
+        if not isinstance(update_check, bool):
+            raise ConfigError(f"{cfg_path}: update_check must be true or false")
 
     for r in extra_repos:
         _check_repo("--repo", r)
@@ -140,7 +145,7 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
             ordered.append(repo)
     if not any(_is_central(r) for r in ordered):
         ordered.append(MAVEN_CENTRAL)
-    return Config(repositories=tuple(ordered), engine_overrides=engine_overrides)
+    return Config(repositories=tuple(ordered), engine_overrides=engine_overrides, update_check=update_check)
 
 
 def write_engine_pins(path: Path, overrides: dict[str, dict[str, str]]) -> None:
