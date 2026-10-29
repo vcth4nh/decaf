@@ -1,6 +1,8 @@
+import contextlib
 import shutil
 import struct
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -97,3 +99,34 @@ def fixture_jar(compiled_classes: Path, tmp_path_factory) -> Path:
         for p in sorted(compiled_classes.rglob("*.class")):
             zf.write(p, p.relative_to(compiled_classes).as_posix())
     return jar
+
+
+HOLDER = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "from decaf import runlock\n"
+    "lock = runlock.acquire(exclusive=sys.argv[2] == '1', path=Path(sys.argv[1]))\n"
+    "print('held' if lock else 'none', flush=True)\n"
+    "sys.stdin.read()\n"
+)
+
+
+@pytest.fixture
+def lock_holder():
+    """A child process holds decaf.lock until the with-block ends (#155)."""
+
+    @contextlib.contextmanager
+    def hold(path: Path, *, exclusive: bool):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", HOLDER, str(path), "1" if exclusive else "0"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        try:
+            assert proc.stdout.readline().strip() == "held"
+            yield proc
+        finally:
+            proc.stdin.close()
+            proc.wait(timeout=30)
+            proc.stdout.close()
+
+    return hold

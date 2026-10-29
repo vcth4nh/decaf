@@ -23,7 +23,7 @@ from rich.text import Text
 from typer.core import TyperGroup
 
 from . import __version__, check, engines, memory
-from . import report_view, update
+from . import report_view, runlock, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
 from .pipeline import ArtifactReport, DecafError, Settings, _engine_failure, run
 from .report_view import _status_line, marks, plain, safe
@@ -508,6 +508,7 @@ def main(
     prior_console = console
     if machine:
         console = _for_logs(Console(stderr=True, emoji=False))
+    run_lock = None
     try:
         if not input.exists():
             raise _fail(f"input {input} does not exist")
@@ -540,6 +541,10 @@ def main(
             cfg = load_config(config, extra_repos=repo or [])
         except ConfigError as exc:
             raise _fail(str(exc))
+        try:  # self-update takes the exclusive lock: it cannot start while a run holds this shared lock (#155)
+            run_lock = runlock.acquire(exclusive=False)
+        except runlock.LockBusy:
+            raise _fail("decaf is updating: run again when it ends")
 
         settings = Settings(
             input=input,
@@ -650,6 +655,8 @@ def main(
             raise typer.Exit(code=130)
         raise typer.Exit(code=0 if report.totals["failed"] == 0 else 1)
     finally:
+        if run_lock is not None:
+            run_lock.release()
         console = prior_console
 
 

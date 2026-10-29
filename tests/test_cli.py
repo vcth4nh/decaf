@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 import decaf.cli as cli
+from decaf import engines, runlock
 from decaf.cli import app
 from decaf.pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
 
@@ -1499,3 +1500,40 @@ def test_report_memory_lists_the_peaks(tmp_path: Path):
     result = runner.invoke(app, ["report", str(out), "--memory"])
     assert result.exit_code == 0
     assert "5.1 GB  heap 6.1 GB   vineflower archive  w.jar" in ANSI.sub("", result.output)
+
+
+def test_run_stops_while_an_update_holds_the_lock(tmp_path, make_jar, monkeypatch, lock_holder):
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    with lock_holder(tmp_path / "cache" / "decaf.lock", exclusive=True):
+        result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 2
+    assert "decaf is updating: run again when it ends" in result.output
+    assert not (tmp_path / "out").exists()
+
+
+def test_run_holds_a_shared_lock_and_frees_it(tmp_path, make_jar, monkeypatch):
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    lock = tmp_path / "cache" / "decaf.lock"
+    seen = {}
+
+    def fake_run(settings, **kw):
+        with pytest.raises(runlock.LockBusy):
+            runlock.acquire(exclusive=True, path=lock)
+        seen["busy"] = True
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0 and seen == {"busy": True}
+    runlock.acquire(exclusive=True, path=lock).release()  # the run freed it
+
+
+def test_run_goes_on_without_a_usable_lock_file(tmp_path, make_jar, monkeypatch):
+    (tmp_path / "file").write_text("x")
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "file" / "cache")
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
