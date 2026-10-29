@@ -4,6 +4,13 @@ All notable changes to decaf are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- An Agent Skill for AI coding agents (#153). `skills/decaf/SKILL.md` says
+  which decaf command fits which task, what a run writes, how long it takes,
+  and how to read the report. `npx skills add vcth4nh/decaf` installs it,
+  `decaf --help` hints at it, and the README has a section for it.
+
 ### Changed
 
 - The live display shows the compile check of each engine output, for
