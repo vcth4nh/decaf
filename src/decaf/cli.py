@@ -75,7 +75,11 @@ def _root(
     version: Annotated[bool, typer.Option("--version", callback=_version_callback, is_eager=True,
                                           help="Print version and exit")] = False,
 ) -> None:
-    """All-in-one Java decompiler."""
+    """All-in-one Java decompiler.
+
+    For AI coding agents, `npx skills add vcth4nh/decaf` installs the decaf
+    skill: what each feature is for, and what a run gives back.
+    """
     for stream in (sys.stdout, sys.stderr):  # a character that the stream cannot encode becomes an escape (#109)
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:

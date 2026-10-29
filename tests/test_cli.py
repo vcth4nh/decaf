@@ -58,6 +58,13 @@ def test_group_help_lists_run():
     assert "run" in plain and "--version" in plain
 
 
+def test_group_help_hints_the_agent_skill():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    plain = ANSI.sub("", result.output)
+    assert "npx skills add vcth4nh/decaf" in plain, plain
+
+
 def test_version():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
