@@ -199,6 +199,9 @@ source file name in the class file. For other classes, for example a Lombok
 class with `@SneakyThrows`, the retries stop when two engines in a row give the
 same first error of these two kinds. An undeclared `Throwable` or `Exception`
 does not stop them, because some engines drop the cast of `throw (T) t`.
+For a Groovy class, the retries stop when two engines in a row flag its file.
+No engine writes compilable Java for the call-site and meta-class code of
+groovyc, and each engine gives a different first error for it.
 For old bytecode, an engine can write an inner class to a file of its own, for
 example `XStream$1.java`. Such a file uses names that javac makes for a nested
 class, for example `this$0`, and these errors go under `noted`. When such a

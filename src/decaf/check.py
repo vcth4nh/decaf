@@ -465,11 +465,12 @@ def _utf8(text: bytes) -> bytes:
 
 
 # Kotlin or Scala puts one of these annotations on each class.
-_ANNOTATIONS = tuple(_utf8(d) for d in (
-    b"Lkotlin/Metadata;", b"Lscala/reflect/ScalaSignature;", b"Lscala/reflect/ScalaLongSignature;",
+_ANNOTATIONS = tuple((_utf8(d), name) for d, name in (
+    (b"Lkotlin/Metadata;", "kotlin"), (b"Lscala/reflect/ScalaSignature;", "scala"),
+    (b"Lscala/reflect/ScalaLongSignature;", "scala"),
 ))
 _GROOVY = b"groovy/lang/GroovyObject"  # Groovy makes a class implement this interface when no superclass does
-_SOURCE_SUFFIXES = (b".groovy", b".scala", b".kt")
+_SOURCE_SUFFIXES = {b".groovy": "groovy", b".scala": "scala", b".kt": "kotlin"}
 
 
 def non_java(data: bytes) -> bool:
@@ -478,17 +479,23 @@ def non_java(data: bytes) -> bool:
     Their bytecode can throw undeclared checked exceptions and can have two methods that
     differ only in the return type. A Java class that only uses these types is no match.
     """
-    if any(a in data for a in _ANNOTATIONS):
-        return True
+    return language(data) is not None
+
+
+def language(data: bytes) -> str | None:
+    """The language of a class file from Kotlin, Groovy, or Scala ("kotlin", "groovy", "scala"), else None."""
+    for annotation, name in _ANNOTATIONS:
+        if annotation in data:
+            return name
     pool = _pool(data) if _utf8(_GROOVY) in data or any(s in data for s in _SOURCE_SUFFIXES) else None
     if pool is None:
-        return False
+        return None
     start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
     count = int.from_bytes(data[start - 2:start], "big")
     if any(_class_at(pool, data, start + 2 * k) == _GROOVY for k in range(count)):
-        return True
-    source = _source_file(pool, data, start + 2 * count)
-    return source is not None and source.endswith(_SOURCE_SUFFIXES)  # also a Groovy script or subclass
+        return "groovy"
+    source = _source_file(pool, data, start + 2 * count)  # also a Groovy script or subclass
+    return next((name for suffix, name in _SOURCE_SUFFIXES.items() if source is not None and source.endswith(suffix)), None)
 
 
 def _source_file(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int) -> bytes | None:
