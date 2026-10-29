@@ -6,6 +6,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 
@@ -130,3 +131,31 @@ def lock_holder():
             proc.stdout.close()
 
     return hold
+
+
+@pytest.fixture(autouse=True)
+def _no_github(monkeypatch):
+    """No test reaches GitHub through decaf.selfupdate (#155)."""
+    from decaf import selfupdate
+
+    def blocked(request):
+        raise httpx.ConnectError("network blocked in tests", request=request)
+
+    monkeypatch.setattr(selfupdate, "client", lambda: httpx.Client(transport=httpx.MockTransport(blocked)))
+
+
+@pytest.fixture
+def github():
+    """A fake GitHub releases API: github(tag=..., status=..., body=..., seen=[]) -> httpx.Client (#155)."""
+
+    def make(tag="v1.12.0", status=200, body=None, seen=None) -> httpx.Client:
+        def handler(request):
+            if seen is not None:
+                seen.append(request)
+            if body is not None:
+                return httpx.Response(status, text=body)
+            return httpx.Response(status, json={"tag_name": tag})
+
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+    return make
