@@ -63,6 +63,18 @@ uv tool install .        # from a checkout → `decaf` on PATH
 uvx --from . decaf --help
 ```
 
+## Agent skill
+
+For AI coding agents (Claude Code, Codex, and others), decaf ships an
+[Agent Skill](https://agentskills.io) in `skills/decaf/SKILL.md`: which
+command fits which task, what a run writes, how long it takes, and how to
+read the report. Install it with the
+[skills CLI](https://github.com/vercel-labs/skills):
+
+```bash
+npx skills add vcth4nh/decaf
+```
+
 ## Usage
 
 ```bash
