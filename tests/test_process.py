@@ -1450,7 +1450,7 @@ def test_class_versions_reads_top_level_majors(make_jar, tmp_path: Path):
         (folder / rel).write_bytes(data)
     expected = ({
         "com/a/A": 69, "com/b/B": 52, "META-INF/versions/9/com/b/B": 53, "com/c/$Top": 61, "com/k/K": 52,
-    }, {"com/k/K"})
+    }, {"com/k/K": "kotlin"})
     assert _class_versions(make_jar("v.jar", entries)) == expected
     assert _class_versions(folder) == expected
 
@@ -1463,7 +1463,7 @@ def test_class_versions_skip_a_class_entry_above_the_size_limit(make_jar, tmp_pa
     small, big = _class_header(52), _class_header(61) + bytes(100)
     source, _ = _classes(make_jar, tmp_path, {"p/A.class": small, "p/B.class": big}, as_folder)
     monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(small))
-    assert pipeline._class_versions(source) == ({"p/A": 52}, set())
+    assert pipeline._class_versions(source) == ({"p/A": 52}, {})
 
 
 def test_tree_roots_skip_a_class_file_above_the_size_limit(tmp_path: Path, monkeypatch):
@@ -1872,6 +1872,62 @@ def test_retries_stop_only_for_the_class_with_the_same_first_error(make_jar, tmp
     assert [(f["path"], f["engine"]) for f in report.flagged] == [
         ("com/x/A.java", "vineflower"), ("com/x/B.java", "vineflower"),
     ]
+
+
+def _marked_jar(make_jar, language: str):
+    """com/g/G with the class-file marker of a Groovy or a Kotlin class (#108)."""
+    from test_check import _class_with
+
+    marker = {"groovy": {"interfaces": ("groovy/lang/GroovyObject",)}, "kotlin": {"utf8": ("Lkotlin/Metadata;",)}}
+    return make_jar("app.jar", {"com/g/G.class": _class_with("com/g/G", **marker[language])})
+
+
+_G = "com/g/G.java"
+
+
+def test_a_groovy_class_gets_no_more_retries_when_two_engines_in_a_row_flag_it(make_jar, tmp_path: Path):
+    """#101: no engine writes compilable Java for the call-site and meta-class code of groovyc, and each
+    engine gives a different first error, so the #108 rule (the same bytecode-only error two times) never
+    stops the retries. A FLAG file never settles under #108: its error is no bytecode-only kind."""
+    files = {"vineflower": "// FLAG vf", "cfr": "// FLAG cfr", "fernflower": "// ff passes"}
+    runner = writing_runner({name: {_G: text} for name, text in files.items()})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(_marked_jar(make_jar, "groovy"), "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [(a.engine, a.flagged) for a in report.attempts] == [("vineflower", 1), ("cfr", 1)]
+    assert (tmp_path / "out/src" / _G).read_text() == "// FLAG vf"
+    assert report.partial and [(f["path"], f["engine"]) for f in report.flagged] == [(_G, "vineflower")]
+
+
+def test_a_kotlin_class_keeps_its_retries_when_two_engines_in_a_row_flag_it(make_jar, tmp_path: Path):
+    """The rule is for Groovy only: a later engine can write compilable Java for a Kotlin or Scala class."""
+    files = {"vineflower": "// FLAG vf", "cfr": "// FLAG cfr", "fernflower": "// ff passes"}
+    runner = writing_runner({name: {_G: text} for name, text in files.items()})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(_marked_jar(make_jar, "kotlin"), "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower"]
+    assert (tmp_path / "out/src" / _G).read_text() == "// ff passes"
+    assert report.flagged == [] and not report.partial
+
+
+def test_a_groovy_class_with_a_stub_but_no_flag_keeps_its_retries(make_jar, tmp_path: Path):
+    """A stub is no flag: the rule needs two flagged files in a row."""
+    files = {"vineflower": _VF_STUB, "cfr": "// FLAG cfr", "fernflower": "// ff passes"}
+    runner = writing_runner({name: {_G: text} for name, text in files.items()})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(_marked_jar(make_jar, "groovy"), "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower"]
+    assert (tmp_path / "out/src" / _G).read_text() == "// ff passes"
+    assert report.stubs == [] and report.flagged == []
+
+
+def test_a_groovy_class_whose_retry_passes_gets_the_retry_file(make_jar, tmp_path: Path):
+    files = {"vineflower": "// FLAG vf", "cfr": "// cfr passes"}
+    runner = writing_runner({name: {_G: text} for name, text in files.items()})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker())
+    report, _ = process_artifact(Artifact(_marked_jar(make_jar, "groovy"), "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+    assert (tmp_path / "out/src" / _G).read_text() == "// cfr passes"
+    assert report.flagged == []
 
 
 def test_unchecked_retry_file_does_not_replace_held_file(make_jar, tmp_path: Path):

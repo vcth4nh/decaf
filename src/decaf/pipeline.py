@@ -550,11 +550,11 @@ def _bounded(f) -> bytes | None:
     return data if len(data) <= _CLASS_FILE_MAX else None
 
 
-def _class_versions(source: Path) -> tuple[dict[str, int], set[str]]:
+def _class_versions(source: Path) -> tuple[dict[str, int], dict[str, str]]:
     """Lowest class-file major version of each top-level class file, by _held_key (#99),
-    and the keys of the classes from Kotlin, Groovy, or Scala (#108)."""
+    and the language of each class from Kotlin, Groovy, or Scala (#108)."""
     out: dict[str, int] = {}
-    non_java: set[str] = set()
+    non_java: dict[str, str] = {}
 
     def keep(key: str, data: bytes | None) -> None:
         if data is None:
@@ -562,8 +562,9 @@ def _class_versions(source: Path) -> tuple[dict[str, int], set[str]]:
         major = check.class_major(data[:8])
         if major is not None:
             out[key] = min(out.get(key, major), major)
-        if check.non_java(data):
-            non_java.add(key)
+        language = check.language(data)
+        if language is not None:
+            non_java[key] = language
 
     if source.is_dir():
         paths = {p.relative_to(source).as_posix(): p for p in source.rglob("*.class")}
@@ -752,7 +753,7 @@ class _Held:
     firsts: dict[str, str] = field(default_factory=dict)  # key -> the first error of its newest flagged file
     settled: set[str] = field(default_factory=set)  # keys that get no more retries (#108)
     versions: dict[str, int] | None = None  # key -> class major version, read once
-    non_java: set[str] = field(default_factory=set)  # keys of the Kotlin, Groovy, and Scala classes, read with versions
+    non_java: dict[str, str] = field(default_factory=dict)  # key -> "kotlin", "groovy", or "scala", read with versions
     copies: set[str] | None = None  # the _copied_keys of the source, read once
     roots: list[Path] | None = None  # the _tree_roots of a class folder, read once
     waiting: set[str] = field(default_factory=set)  # outer classes whose held family waits for a retry (#101)
@@ -897,7 +898,9 @@ def _apply_hold(
     other, and a retry drops its copy of a class that an earlier output wrote, for example an
     inner class or a variant of a held class (#107).
     A held file gets no more retries when the next engine's file has the same first error, and
-    bytecode can cause this error legally (#108).
+    bytecode can cause this error legally (#108). A file of a Groovy class gets no more retries
+    when two engines in a row flag it: no engine writes compilable Java for the call-site and
+    meta-class code of groovyc, and each engine gives a different first error for it (#101).
     A flagged file of an inner class that the engine wrote apart from its outer class holds its
     family: the files of the outer class and of its inner classes in the output. The family must
     be new: no earlier output wrote or held a file of it. Then the outer class gets a retry, and
@@ -953,7 +956,9 @@ def _apply_hold(
             else:
                 if is_flagged:  # two engines in a row with the same error that bytecode can cause legally (#108)
                     first = _first_error(result)
-                    if result.bytecode_only and held.firsts.get(key) == first and not first.startswith(_CAST_DROPPED):
+                    if (result.bytecode_only and held.firsts.get(key) == first and not first.startswith(_CAST_DROPPED)) or (
+                        key in held.firsts and held.non_java.get(top(_strip_container(key))) == "groovy"
+                    ):  # a Groovy class: two engines in a row flag it, and no engine writes compilable Java for it (#101)
                         held.settled.add(key)
                     held.firsts[key] = first
                 p.unlink()  # the earlier engine's held file stays

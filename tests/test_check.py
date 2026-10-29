@@ -783,6 +783,20 @@ def test_non_java_reads_the_source_file_attribute():
     assert not check.non_java(_class_with_members("p/Script1", "Script1.groovy")[:-4])
 
 
+def test_language_names_the_source_language_of_a_class_file():
+    """#101: the Groovy rule needs the language, not only the fact that the class is not Java."""
+    assert check.language(_class_with("p/K", utf8=("Lkotlin/Metadata;",))) == "kotlin"
+    assert check.language(_class_with("p/S", utf8=("Lscala/reflect/ScalaSignature;",))) == "scala"
+    assert check.language(_class_with("p/L", utf8=("Lscala/reflect/ScalaLongSignature;",))) == "scala"
+    assert check.language(_class_with("p/G", interfaces=("java/io/Serializable", "groovy/lang/GroovyObject"))) == "groovy"
+    assert check.language(_class_with_members("p/Script1", "Script1.groovy")) == "groovy"
+    assert check.language(_class_with_members("p/S", "S.scala")) == "scala"
+    assert check.language(_class_with_members("p/K", "K.kt")) == "kotlin"
+    assert check.language(_class_with_members("p/J", "J.java")) is None
+    assert check.language(_class_with("p/A", interfaces=("java/io/Serializable",))) is None
+    assert check.language(b"not a class") is None
+
+
 def test_run_check_notes_bytecode_only_errors_of_the_non_java_files(tmp_path: Path, monkeypatch):
     def fake_process(cmd, timeout, on_stderr_line=None):
         Path(cmd[-2]).write_text("".join(

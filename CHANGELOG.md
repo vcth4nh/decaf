@@ -13,6 +13,16 @@ All notable changes to decaf are documented here.
   it keeps the checker of the current decaf version (#101).
 - The `--timeout` help and the README say that the value also limits each
   compile check (#101).
+- A class from Groovy gets no more retries when two engines in a row flag
+  its file (#101). No engine writes compilable Java for the call-site and
+  meta-class code of groovyc, and each engine gives a different first error
+  for it, so the stop rule of #108 never applied. On groovy-all-2.4.21, 111
+  such classes got four retries each, and CFR and Procyon start one JVM for
+  each class: the retries took 85% of a 496 s run. Now the Fernflower,
+  Procyon, and JD retries get 11, 7, and 3 classes instead of 137, 113, and
+  113, and they take 27 s instead of 261 s. The flagged files rose from 309
+  to 336: for 27 classes, the file of Fernflower passed as `noted`, and now
+  the file of Vineflower stays.
 
 ### Fixed
 
