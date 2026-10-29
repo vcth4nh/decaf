@@ -3687,7 +3687,7 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
     reads: list[Path] = []
-    monkeypatch.setattr(pipeline, "_class_bytes", lambda target, largest=False: reads.append(target) or 0)
+    monkeypatch.setattr(pipeline, "_class_bytes", lambda target: reads.append(target) or 0)
     for out, engine in (("out", "jd"), ("out2", "vineflower")):
         run(
             Settings(input=input_dir, output=tmp_path / out, maven=False, jobs=1, cpus=1, memory_mb=1400,
@@ -3716,8 +3716,8 @@ def test_run_warns_for_a_batch_eligible_jar_too(fake_env, tmp_path):
     assert "big.jar: vineflower may need about 1.2 GB of heap; its share is 1.0 GB (raise --memory)" in warnings
 
 
-def test_run_estimates_one_class_for_an_engine_that_runs_each_class_alone(fake_env, tmp_path):
-    """#114: CFR runs one JVM for each class of a class folder, so the sum of the folder gave a false warning."""
+def test_run_estimates_the_folder_for_each_engine(fake_env, tmp_path):
+    """#101: CFR and Procyon take the classes of a folder in one JVM too, so the estimate uses the folder."""
     input_dir = tmp_path / "in"
     for i in range(40):
         (input_dir / "p").mkdir(parents=True, exist_ok=True)
@@ -3731,7 +3731,7 @@ def test_run_estimates_one_class_for_an_engine_that_runs_each_class_alone(fake_e
             on_warn=warnings.append,
         )
     estimates = [w for w in warnings if "may need about" in w]
-    assert len(estimates) == 1 and "vineflower" in estimates[0]  # Vineflower takes the folder in one JVM
+    assert len(estimates) == 2 and "cfr" in estimates[0] and "vineflower" in estimates[1]
 
 
 def test_run_counts_one_out_of_heap_batch_jvm_once(fake_env, make_jar, tmp_path: Path):

@@ -108,6 +108,20 @@ def _fake_build(script: str, python: str = sys.executable):
     return _b
 
 
+def _fake_batch(script: str, seen: list[list[str]] | None = None):
+    """Replace build_batch_command with one that runs a python script; {dest} is substituted.
+
+    seen gets the class file names of each command (#101: the one JVM for the classes of a folder).
+    """
+
+    def _bb(spec, jar_path, targets, dest, java="java", cpu_budget=None, **kwargs):
+        if seen is not None:
+            seen.append(sorted(Path(t).name for t in targets))
+        return [sys.executable, "-c", script.format(dest=str(dest))]
+
+    return _bb
+
+
 def test_run_engine_success(tmp_path: Path, monkeypatch):
     script = (
         "import pathlib, sys\n"
@@ -227,35 +241,37 @@ def test_class_runs_of_a_folder_share_the_timeout(tmp_path: Path, monkeypatch):
     clock = [100.0]
     given: list[float] = []
 
+    def fake_exec(spec, cmd, timeout, on_stderr_line):  # the one JVM for all classes fails after 0.5 s
+        given.append(timeout)
+        clock[0] += 0.5
+        return EngineResult(spec.name, 1, False, 0, "boom")
+
     def fake_run_once(spec, jar_path, target, dest, timeout, *args, **kwargs):
         given.append(timeout)
         clock[0] += 0.5  # each class takes 0.5 s, in its time
         return EngineResult(spec.name, 0, False, 0, "")
 
     monkeypatch.setattr(engines.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(engines, "_exec_command", fake_exec)
     monkeypatch.setattr(engines, "_run_once", fake_run_once)
     res = run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=1.0)
-    assert given == [1.0, 0.5] and res.timed_out  # no time is left for the other three classes
+    assert given == [1.0, 0.5] and res.timed_out  # no time is left for the other four classes
 
 
-def test_run_engine_dir_target_iterates_for_non_native(tmp_path: Path, monkeypatch):
+def test_run_engine_dir_target_runs_the_top_level_classes_in_one_jvm(tmp_path: Path, monkeypatch):
+    """#101: CFR and Procyon take class files as positional arguments, so the classes of a folder need one
+    JVM, not one JVM for each class. An inner class rides with its outer class."""
     tree = tmp_path / "classes"
     (tree / "com/x").mkdir(parents=True)
     (tree / "com/x/A.class").write_bytes(b"a")
     (tree / "com/x/A$1.class").write_bytes(b"inner")
     (tree / "B.class").write_bytes(b"b")
-
-    seen: list[str] = []
-    real_targets_script = "import pathlib; pathlib.Path(r'{dest}').joinpath('x.java').write_text('x')"
-
-    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
-        seen.append(str(target))
-        return [sys.executable, "-c", real_targets_script.format(dest=str(dest))]
-
-    monkeypatch.setattr(engines, "build_command", _b)
+    seen: list[list[str]] = []
+    script = "import pathlib; pathlib.Path(r'{dest}').joinpath('x.java').write_text('x')"
+    monkeypatch.setattr(engines, "build_batch_command", _fake_batch(script, seen))
     res = run_engine(ENGINES["procyon"], JAR, tree, tmp_path / "out", timeout=30)
-    assert sorted(Path(s).name for s in seen) == ["A.class", "B.class"]  # no A$1
-    assert res.returncode == 0
+    assert seen == [["A.class", "B.class"]]  # one JVM, no A$1
+    assert res.returncode == 0 and res.java_files == 1
 
 
 def test_run_per_class_runs_top_level_dollar_classes(tmp_path: Path, monkeypatch):
@@ -264,15 +280,84 @@ def test_run_per_class_runs_top_level_dollar_classes(tmp_path: Path, monkeypatch
     (tree / "com/x").mkdir(parents=True)
     for name in ("A", "A$1", "$Util", "$Util$In", "Gone$In", "Gone$In$1"):
         (tree / f"com/x/{name}.class").write_bytes(b"c")
-    seen: list[str] = []
-
-    def _b(spec, jar_path, target, dest, java="java", cpu_budget=None):
-        seen.append(Path(target).name)
-        return [sys.executable, "-c", "pass"]
-
-    monkeypatch.setattr(engines, "build_command", _b)
+    seen: list[list[str]] = []
+    monkeypatch.setattr(engines, "build_batch_command", _fake_batch("pass", seen))
     run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=30)
-    assert sorted(seen) == ["$Util.class", "A.class", "Gone$In.class"]
+    assert seen == [["$Util.class", "A.class", "Gone$In.class"]]
+
+
+def test_run_per_class_runs_one_jvm_for_each_class_when_the_one_jvm_fails(tmp_path: Path, monkeypatch):
+    """#101: a JVM that stops with an error can leave classes without a file, so each class of its group
+    then gets a JVM of its own, also a class that got a file."""
+    tree = tmp_path / "classes"
+    (tree / "p").mkdir(parents=True)
+    for name in ("A", "B", "C"):
+        (tree / f"p/{name}.class").write_bytes(b"c")
+    script = (
+        "import pathlib, sys\n"
+        "d = pathlib.Path(r'{dest}') / 'p'\n"
+        "d.mkdir(parents=True, exist_ok=True)\n"
+        "(d / 'A.java').write_text('class A {{}}')\n"
+        "sys.exit(1)\n"
+    )
+    monkeypatch.setattr(engines, "build_batch_command", _fake_batch(script))
+    alone: list[str] = []
+
+    def once(spec, jar_path, target, dest, timeout, *args, **kwargs):
+        alone.append(Path(target).name)
+        (Path(dest) / "p").mkdir(parents=True, exist_ok=True)
+        (Path(dest) / "p" / f"{Path(target).stem}.java").write_text("class X {}")
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    monkeypatch.setattr(engines, "_run_once", once)
+    res = run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=30)
+    assert alone == ["A.class", "B.class", "C.class"]
+    assert res.returncode == 0 and res.java_files == 3  # the class JVMs decide the exit code
+
+
+def test_run_per_class_keeps_the_exit_code_of_a_class_jvm_that_fails(tmp_path: Path, monkeypatch):
+    tree = tmp_path / "classes"
+    (tree / "p").mkdir(parents=True)
+    (tree / "p/A.class").write_bytes(b"a")
+    (tree / "p/B.class").write_bytes(b"b")
+    monkeypatch.setattr(engines, "build_batch_command", _fake_batch("import sys; sys.exit(1)"))
+    results = iter([EngineResult("cfr", 0, False, 0, ""), EngineResult("cfr", 2, False, 0, "bad B")])
+    monkeypatch.setattr(engines, "_run_once", lambda *a, **k: next(results))
+    res = run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=30)
+    assert res.returncode == 2 and "bad B" in res.stderr_tail
+
+
+def test_run_per_class_runs_one_jvm_for_each_class_when_the_one_jvm_runs_out_of_memory(tmp_path: Path, monkeypatch):
+    tree = tmp_path / "classes"
+    (tree / "p").mkdir(parents=True)
+    (tree / "p/A.class").write_bytes(b"a")
+    (tree / "p/B.class").write_bytes(b"b")
+    oom = "java.lang.OutOfMemoryError: Java heap space"
+    monkeypatch.setattr(
+        engines, "_exec_command", lambda spec, cmd, timeout, on_stderr_line: EngineResult(spec.name, 0, False, 0, oom, 500, True)
+    )
+    alone: list[str] = []
+
+    def once(spec, jar_path, target, dest, timeout, *args, **kwargs):
+        alone.append(Path(target).name)
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    monkeypatch.setattr(engines, "_run_once", once)
+    res = run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=30)
+    assert alone == ["A.class", "B.class"] and res.out_of_memory and res.returncode == 0
+
+
+def test_run_per_class_bounds_the_length_of_one_command(tmp_path: Path, monkeypatch):
+    """#101: Windows takes at most 32,767 characters in one command line."""
+    tree = tmp_path / "classes"
+    (tree / "p").mkdir(parents=True)
+    for name in ("A", "B", "C"):
+        (tree / f"p/{name}.class").write_bytes(b"c")
+    seen: list[list[str]] = []
+    monkeypatch.setattr(engines, "build_batch_command", _fake_batch("pass", seen))
+    monkeypatch.setattr(engines, "_ARGS_MAX", 2 * (len(str((tree / "p/A.class").absolute())) + 1))
+    run_engine(ENGINES["cfr"], JAR, tree, tmp_path / "out", timeout=30)
+    assert seen == [["A.class", "B.class"], ["C.class"]]
 
 
 def test_run_engine_spawns_with_pdeathsig_hook(tmp_path: Path, monkeypatch):
@@ -745,26 +830,34 @@ def test_run_per_class_keeps_the_largest_peak(tmp_path: Path, monkeypatch):
     (root / "p").mkdir(parents=True)
     (root / "p/A.class").write_bytes(b"a")
     (root / "p/B.class").write_bytes(b"b")
+    monkeypatch.setattr(
+        engines, "_exec_command", lambda spec, cmd, timeout, on_stderr_line: EngineResult(spec.name, 1, False, 0, "", 10, False)
+    )
     results = iter([
-        EngineResult("cfr", 0, False, 0, "", 10, False),
         EngineResult("cfr", 0, False, 0, "", 30, True),
+        EngineResult("cfr", 0, False, 0, "", 5, False),
     ])
     monkeypatch.setattr(engines, "_run_once", lambda *a, **k: next(results))
     res = run_engine(ENGINES["cfr"], JAR, root, tmp_path / "out", timeout=10)
     assert (res.peak_rss_mb, res.out_of_memory) == (30, True)
 
 
-def test_run_per_class_gives_each_class_jvm_the_heap(tmp_path: Path, monkeypatch):
+def test_run_per_class_gives_the_one_jvm_and_each_class_jvm_the_heap(tmp_path: Path, monkeypatch):
     root = tmp_path / "classes"
     (root / "p").mkdir(parents=True)
     (root / "p/A.class").write_bytes(b"a")
     (root / "p/B.class").write_bytes(b"b")
     heaps = []
 
+    def _bb(spec, jar_path, targets, dest, java="java", cpu_budget=None, heap_mb=None, **kwargs):
+        heaps.append(("all", heap_mb))
+        return [sys.executable, "-c", "import sys; sys.exit(1)"]
+
     def once(*args, heap_mb=None, **kwargs):
-        heaps.append(heap_mb)
+        heaps.append(("one", heap_mb))
         return EngineResult("cfr", 0, False, 0, "")
 
+    monkeypatch.setattr(engines, "build_batch_command", _bb)
     monkeypatch.setattr(engines, "_run_once", once)
     run_engine(ENGINES["cfr"], JAR, root, tmp_path / "out", timeout=10, heap_mb=1700)
-    assert heaps == [1700, 1700]  # one JVM for each class, each with the artifact's heap
+    assert heaps == [("all", 1700), ("one", 1700), ("one", 1700)]  # each JVM gets the artifact's heap

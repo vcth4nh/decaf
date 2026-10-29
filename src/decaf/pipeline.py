@@ -57,11 +57,10 @@ def _decompile_weight(artifact: Artifact) -> int:
     return 2 if artifact.classes >= _WHALE_CLASSES else 1
 
 
-def _class_bytes(target: Path, largest: bool = False) -> int:
-    """The uncompressed size of a decompile target's class files (#98), or of its largest one."""
+def _class_bytes(target: Path) -> int:
+    """The uncompressed size of a decompile target's class files (#98)."""
     if target.is_dir():
-        sizes = [p.stat().st_size for p in target.rglob("*.class") if p.is_file()]
-        return max(sizes, default=0) if largest else sum(sizes)
+        return sum(p.stat().st_size for p in target.rglob("*.class") if p.is_file())
     try:
         with zipfile.ZipFile(target) as zf:
             return sum(i.file_size for i in zf.infolist() if i.filename.endswith(".class"))
@@ -77,8 +76,7 @@ def _share_warning(artifact: Artifact, target: Path, ctx: Ctx) -> str | None:
     engine = ctx.chain[0]
     if memory.estimate_heap_mb(engine, 0) is None:
         return None  # no size model: do not read the jar
-    per_class = target.is_dir() and engine not in engines.NATIVE_DIR_ENGINES  # one JVM for each class (#114)
-    est = memory.estimate_heap_mb(engine, _class_bytes(target, largest=per_class))
+    est = memory.estimate_heap_mb(engine, _class_bytes(target))
     if est is None or est <= heap:
         return None
     return (

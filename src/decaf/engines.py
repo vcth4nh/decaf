@@ -656,6 +656,23 @@ def run_engine_batch(
     return result
 
 
+_ARGS_MAX = 24_000  # characters of class paths in one command: Windows takes at most 32,767 in a command line
+
+
+def _groups(tops: list[tuple[str, Path]]) -> list[list[tuple[str, Path]]]:
+    """The top-level class files in groups whose paths fit one command line (#101)."""
+    groups: list[list[tuple[str, Path]]] = []
+    size = 0
+    for stem, f in tops:
+        n = len(str(f.absolute())) + 1
+        if not groups or size + n > _ARGS_MAX:
+            groups.append([])
+            size = 0
+        groups[-1].append((stem, f))
+        size += n
+    return groups
+
+
 def _run_per_class(
     spec: EngineSpec,
     jar_path: Path,
@@ -669,32 +686,53 @@ def _run_per_class(
     engine_args: Sequence[str] = (),
     heap_mb: int | None = None,
 ) -> EngineResult:
-    returncode = 0
-    timed_out = False
-    tails: list[str] = []
-    peak: int | None = None
-    out_of_memory = False
+    """One JVM for the top-level classes of a folder, then one JVM for each class of a group whose JVM
+    failed (#101).
+
+    CFR and Procyon take class files as positional arguments, and an inner class rides along with
+    its outer class (#106). A JVM that stops with an error, out of memory, or at the timeout can
+    leave classes without a file, so each class of its group then gets a JVM of its own, in the
+    time that is left. The timeout is for the whole folder (#113).
+    """
     files = {f.relative_to(root).as_posix()[: -len(".class")]: f for f in sorted(root.rglob("*.class"))}
-    deadline = time.monotonic() + timeout  # the timeout is for the whole folder (#113)
-    for stem, f in files.items():
-        if outer_stem(stem, files) is not None:
-            continue  # inner classes ride along with their outer class (#106)
+    tops = [(stem, f) for stem, f in files.items() if outer_stem(stem, files) is None]
+    deadline = time.monotonic() + timeout
+    results: list[EngineResult] = []
+    final: list[EngineResult] = []  # the results that decide the exit code: a failed group JVM does not
+    timed_out = False
+    options = {
+        **({"cds_dir": cds_dir} if cds_dir is not None else {}),
+        **({"engine_args": engine_args} if engine_args else {}),
+        **({"heap_mb": heap_mb} if heap_mb is not None else {}),
+    }
+    for group in _groups(tops):
         left = deadline - time.monotonic()
         if left <= 0:
             timed_out = True
             break
-        r = _run_once(spec, jar_path, f, dest, left, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
-                      heap_mb=heap_mb)
-        returncode = returncode or r.returncode
-        timed_out = timed_out or r.timed_out
-        if r.stderr_tail:
-            tails.append(r.stderr_tail)
-        if r.peak_rss_mb is not None:
-            peak = max(peak or 0, r.peak_rss_mb)
-        out_of_memory = out_of_memory or r.out_of_memory
-        if timed_out:
+        cmd = build_batch_command(spec, jar_path, [f for _, f in group], dest, java=java, cpu_budget=cpu_budget, **options)
+        r = _exec_command(spec, cmd, left, on_stderr_line)
+        results.append(r)
+        if r.returncode == 0 and not r.timed_out and not r.out_of_memory:
+            final.append(r)
+            continue
+        for _, f in group:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                timed_out = True
+                break
+            r = _run_once(spec, jar_path, f, dest, left, java, cpu_budget, cds_dir, on_stderr_line, engine_args,
+                          heap_mb=heap_mb)
+            results.append(r)
+            final.append(r)
+        if timed_out or any(r.timed_out for r in results):
             break
-    return EngineResult(spec.name, returncode, timed_out, 0, "\n".join(tails)[-2000:], peak, out_of_memory)
+    returncode = next((r.returncode for r in final if r.returncode), 0)
+    timed_out = timed_out or any(r.timed_out for r in results)
+    tails = [r.stderr_tail for r in results if r.stderr_tail]
+    peaks = [r.peak_rss_mb for r in results if r.peak_rss_mb is not None]
+    return EngineResult(spec.name, returncode, timed_out, 0, "\n".join(tails)[-2000:],
+                        max(peaks, default=None), any(r.out_of_memory for r in results))
 
 
 def _unpack_emitted_archives(dest: Path) -> None:
