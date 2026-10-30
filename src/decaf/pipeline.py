@@ -754,7 +754,7 @@ class _Held:
     non_java: dict[str, str] = field(default_factory=dict)  # key -> "kotlin", "groovy", or "scala", read with versions
     copies: set[str] | None = None  # the _copied_keys of the source, read once
     roots: list[Path] | None = None  # the _tree_roots of a class folder, read once
-    waiting: set[str] = field(default_factory=set)  # outer classes whose held family waits for a retry (#101)
+    waiting: set[str] = field(default_factory=set)  # outer classes whose held family waits for a retry (#101, #150)
 
     def stems(self, settled: bool = True) -> set[str]:
         """The class stems of the held files: a copy's key loses its container root (#107).
@@ -901,17 +901,29 @@ def _apply_hold(
     meta-class code of groovyc, and each engine gives a different first error for it (#101).
     A flagged file of an inner class that the engine wrote apart from its outer class holds its
     family: the files of the outer class and of its inner classes in the output. The family must
-    be new: no earlier output wrote or held a file of it. Then the outer class gets a retry, and
-    the next engine can nest the inner classes. A later output replaces the family as a whole,
-    when it has the file of the outer class and each of its files of the family passes the
-    check; else its files of the family go (#101).
+    be new: no earlier output wrote or held a file of it (#101). A held file of an outer class
+    holds its family too, from any output: the next engine can nest the inner classes in its file
+    of the outer class, so no file of an inner class goes out alone (#150). Then the outer class
+    gets a retry. A later output replaces a held family as a whole, when it has the file of the
+    outer class and each of its files of the family is good, as for one file: no stub, not
+    flagged, and it passes the check or replaces a stub; else its files of the family go.
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
-    versions = held.versions or {}
+    if held.versions is None:  # no check ran: the families still need the top-level classes (#150)
+        held.versions, held.non_java = _class_versions(source)
+    versions = held.versions
 
     def top(key: str) -> str:
         return outer_stem(key, versions) or key
+
+    def good(key: str, stub: stubs.Stub | None, r: check.FileResult | None) -> bool:
+        """Can this file take part in the replacement of a held family? As for one file: no stub, not
+        flagged, and it passes the check, or the held file of its key or of its outer class has a stub."""
+        if stub is not None or (r is not None and r.status == "flagged"):
+            return False
+        old = held.files.get(key) or held.files.get(top(key))
+        return (r is not None and r.passes) or (old is not None and old.stub is not None)
 
     files: list[tuple[Path, str, str, stubs.Stub | None, check.FileResult | None]] = []
     for p in sorted(tree.rglob("*")):
@@ -923,12 +935,16 @@ def _apply_hold(
             key = rel[: -len(PurePosixPath(rel).suffix)]  # one key for each copy (#107)
         files.append((p, rel, key, found.get(rel), results.get(rel) if results is not None else None))
     waiting = {top(key) for _, _, key, _, r in files if top(key) != key and r is not None and r.status == "flagged"}
-    if waiting:  # only a new family waits
+    if waiting:  # a flagged file of an inner class holds only a new family
         waiting -= {top(k) for k in held.files.keys() | held.written}
+    waiting |= {  # a stubbed or flagged file of an outer class holds its family, from any output (#150)
+        key for _, _, key, stub, r in files
+        if top(key) == key and key not in held.written and (stub is not None or (r is not None and r.status == "flagged"))
+    }
     for family in list(held.waiting):
         mine = [(key, stub, r) for _, _, key, stub, r in files if top(key) == family]
-        if any(key == family for key, _, _ in mine) and all(
-            stub is None and r is not None and r.passes for _, stub, r in mine
+        if any(key == family for key, _, _ in mine) and not engines.PROCESSES.closed and all(
+            good(key, stub, r) for key, stub, r in mine
         ):  # the files of this output replace the held files of the family
             held.waiting.discard(family)
             for k in [k for k in held.files if top(k) == family]:

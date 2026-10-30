@@ -2309,14 +2309,14 @@ def test_decompile_batch_holds_stubs_and_flags_in_one_step(make_jar, tmp_path: P
 _A, _A1, _A2 = "com/x/A.java", "com/x/A$1.java", "com/x/A$2.java"
 
 
-def _run_family(make_jar, tmp_path: Path, files: dict[str, dict[str, str]]):
+def _run_family(make_jar, tmp_path: Path, files: dict[str, dict[str, str]], *, check: bool = True):
     """com/x/A, A$1, and A$2 with class headers, so the check knows the outer class of each inner class.
 
-    Returns the report, the written {path: text} in mirror mode, and the runner.
+    Returns the report, the written {path: text} in mirror mode, and the runner. check=False runs no check.
     """
     jar = make_jar("app.jar", {f"com/x/{n}.class": _class_header(52) for n in ("A", "A$1", "A$2")})
     runner = writing_runner(files)
-    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker() if check else None, writer=MirrorWriter(tmp_path / "out"))
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     out = tmp_path / "out/app.jar"
     return report, {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}, runner
@@ -2382,24 +2382,27 @@ def test_a_retry_with_the_missing_outer_class_drops_the_held_file_of_its_inner_c
     assert report.flagged == [] and report.missing_classes == 0
 
 
-def test_a_family_with_a_held_file_of_an_earlier_output_keeps_the_rules_for_each_file(make_jar, tmp_path: Path):
-    """Only a family whose files come from one output waits. Here the clean A$1 of Fernflower replaces a stub."""
-    _, written, _ = _run_family(make_jar, tmp_path, {
+def test_a_family_held_for_stubs_is_replaced_only_as_a_whole(make_jar, tmp_path: Path):
+    """The stubs of Vineflower hold A and A$1, so the family waits (#150). No retry passes as a whole, so the
+    clean A$1 of Fernflower goes: it cannot replace the held A$1 alone."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A: _VF_STUB, _A1: _VF_STUB.replace("class A", "class A$1")},
         "cfr": {_A: "class A {} // FLAG cfr", _A1: "class A$1 {} // FLAG cfr"},
         "fernflower": {_A: "class A {} // FLAG ff", _A1: "class A$1 { /* ff */ }"},
     })
-    assert written == {_A: _VF_STUB, _A1: "class A$1 { /* ff */ }"}
+    assert written == {_A: _VF_STUB, _A1: _VF_STUB.replace("class A", "class A$1")}
+    assert [s["path"] for s in report.stubs] == [_A1, _A]
 
 
-def test_a_flagged_file_of_an_outer_class_makes_no_family_wait(make_jar, tmp_path: Path):
-    """Only a flagged file of an inner class makes its family wait. Here each file keeps its own rule (#107)."""
+def test_a_retry_replaces_a_family_with_a_held_outer_file_only_as_a_whole(make_jar, tmp_path: Path):
+    """The flagged A of Vineflower holds its family, with the clean A$1 (#150). The flagged A$1 of CFR fails
+    the whole retry family, so the clean A of CFR replaces nothing."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A: "// FLAG", _A1: "class A$1 { /* vf */ }"},
         "cfr": {_A: "class A { /* cfr */ }", _A1: "class A$1 {} // FLAG cfr"},
     })
-    assert written == {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* vf */ }"}
-    assert report.flagged == []
+    assert written == {_A: "// FLAG", _A1: "class A$1 { /* vf */ }"}
+    assert [(f["path"], f["engine"]) for f in report.flagged] == [(_A, "vineflower")]
 
 
 def test_a_family_with_a_written_file_of_an_earlier_output_does_not_wait(make_jar, tmp_path: Path):
@@ -2431,3 +2434,39 @@ def test_a_retry_output_without_a_check_replaces_no_waiting_family(make_jar, tmp
     assert sorted(held.files) == ["com/x/A", "com/x/A$1"]
     _apply_hold(retry, jar, {}, None, "cfr", held, ctx)
     assert sorted(held.files) == ["com/x/A", "com/x/A$1"] and list(retry.rglob("*.java")) == []
+
+
+# A held file of an outer class makes its family wait, from any output (#150).
+_A1_VF = "class A$1 { /* vf */ }"
+
+
+@pytest.mark.parametrize("files, expected", [
+    ({"vineflower": {_A: _VF_STUB, _A1: _A1_VF}, "cfr": {_A: "class A { /* cfr */ }"}}, {_A: "class A { /* cfr */ }"}),
+    ({"vineflower": {_A: "class A {} // FLAG", _A1: _A1_VF}, "cfr": {_A: "class A { /* cfr */ }"}},
+     {_A: "class A { /* cfr */ }"}),
+    ({"vineflower": {_A: _VF_STUB, _A1: _A1_VF}, "cfr": {_A: _CFR_STUB}, "fernflower": {_A: "class A { /* ff */ }"}},
+     {_A: "class A { /* ff */ }"}),
+    ({"vineflower": {_A: _VF_STUB, _A1: _A1_VF}, "cfr": {_A: "// ENV"}}, {_A: "// ENV"}),  # a stub is a known loss
+    ({"vineflower": {_A: "class A {} // FLAG", _A1: _A1_VF},
+      "cfr": {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* cfr */ }"}},
+     {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* cfr */ }"}),
+    ({"vineflower": {_A: "class A {} // FLAG"}, "cfr": {_A: "class A {} // FLAG cfr", _A1: "class A$1 {} // FLAG cfr"},
+      "fernflower": {_A: "class A { /* ff */ }"}}, {_A: "class A { /* ff */ }"}),  # xstream-1.4.21 with --engine cfr
+])
+def test_a_held_file_of_an_outer_class_makes_its_family_wait(make_jar, tmp_path: Path, files, expected):
+    """A is held for a stub or a flag, and an engine writes A$1 apart from A, in the same output or in a retry.
+    A later retry nests A$1, so the file of A$1 must not go out on its own: the family of A waits, and only a
+    whole family replaces it (#150)."""
+    report, written, _ = _run_family(make_jar, tmp_path, files)
+    assert written == expected
+    assert report.flagged == [] and report.stubs == [] and report.missing_classes == 0
+    assert report.java_files == len(expected)
+
+
+def test_a_held_file_of_an_outer_class_makes_its_family_wait_without_the_check(make_jar, tmp_path: Path):
+    """With --no-check, a stub still holds A, and the family of A still waits (#150)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: _VF_STUB, _A1: _A1_VF}, "cfr": {_A: "class A { /* cfr */ }"},
+    }, check=False)
+    assert written == {_A: "class A { /* cfr */ }"}
+    assert report.stubs == [] and report.missing_classes == 0 and report.java_files == 1
