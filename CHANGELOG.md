@@ -331,7 +331,10 @@ All notable changes to decaf are documented here.
   any output: the files of its inner classes wait with it, and only a whole
   family replaces it, as for a flagged file of an inner class. The files of
   a retry that fails as a whole go. With `--no-check`, a stub holds the
-  family too.
+  family too. On that jar, the output now has 385 files and no flagged
+  file, and the jar is complete: the family of `SerializableConverter`
+  comes from Fernflower as one file, in place of five Vineflower files with
+  one flagged.
 
 ### Security
 
