@@ -1,5 +1,6 @@
 """decaf self-update (#155): the latest release of decaf on GitHub, the facts of the active
-install, the uv command that installs a release, and the rename of the active exe on Windows.
+install, the uv command that installs a release, the rename of the active exe on Windows,
+and the uv child.
 
 `fetch_latest` gets its httpx client from the caller. The tests replace `client`, so no
 test reaches GitHub.
@@ -12,6 +13,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -196,3 +199,20 @@ def restore_exe(exe: Path, aside: Path | None) -> None:
     """Give the exe of move_exe_aside its name again, unless uv wrote a new exe there."""
     if aside is not None and not exe.exists():
         aside.rename(exe)
+
+
+def run_uv(cmd: list[str]) -> tuple[int, bool]:
+    """Run uv with the stdout and the stderr of decaf. Give the exit code of uv, and True
+    when a Ctrl-C came.
+
+    A Ctrl-C goes to uv too. While uv runs, the SIGINT handler only notes the Ctrl-C, so
+    decaf waits for uv to end, then restores the exe and writes its text. SIG_IGN is not
+    an option: a child keeps an ignored signal, and uv must get the Ctrl-C.
+    """
+    stops: list[int] = []
+    old = signal.signal(signal.SIGINT, lambda signum, frame: stops.append(signum))
+    try:
+        code = subprocess.Popen(cmd).wait()
+    finally:
+        signal.signal(signal.SIGINT, old)
+    return code, bool(stops)

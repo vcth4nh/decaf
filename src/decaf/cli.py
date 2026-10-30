@@ -5,8 +5,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 from enum import Enum
@@ -23,7 +25,7 @@ from rich.text import Text
 from typer.core import TyperGroup
 
 from . import __version__, check, engines, memory
-from . import report_view, runlock, update
+from . import report_view, runlock, selfupdate, update
 from .config import ConfigError, default_config_path, load_config, write_engine_pins
 from .pipeline import ArtifactReport, DecafError, Settings, _engine_failure, run
 from .report_view import _status_line, marks, plain, safe
@@ -267,9 +269,9 @@ class Format(str, Enum):
     ndjson = "ndjson"
 
 
-def _fail(message: str) -> typer.Exit:
+def _fail(message: str, code: int = 2) -> typer.Exit:
     console.print(f"[red]error:[/] {safe(message)}")
-    return typer.Exit(code=2)
+    return typer.Exit(code=code)
 
 
 def _end_like_ctrl_c() -> dict:
@@ -704,6 +706,96 @@ def report_cmd(
         report_view.render_network_fallbacks(console, report)
     if memory_peaks:
         report_view.render_memory(console, report)
+
+
+@app.command(name="self-update")
+def self_update(
+    check_only: Annotated[bool, typer.Option("--check", help="Show the latest release; install nothing")] = False,
+) -> None:
+    """Install the latest decaf release (uv tool installs only)."""
+    cur = __version__
+    version = selfupdate.parse_version(cur)
+    if version is None:
+        raise _fail(f"cannot compare versions: this decaf is {cur!r}", code=1)
+    try:
+        http = selfupdate.client()
+    except Exception as exc:  # httpx reads the proxy settings here: a bad HTTPS_PROXY raises ValueError (#155)
+        raise _fail(f"cannot read the latest release: {exc}", code=1)
+    with http:
+        try:
+            release = selfupdate.fetch_latest(http, timeout=30)
+        except selfupdate.SelfUpdateError as exc:
+            raise _fail(f"cannot read the latest release: {exc}", code=1)
+    if release.version == version:
+        console.print(f"decaf {cur} is the latest release")
+        return
+    if release.version < version:
+        console.print(f"decaf {cur} is newer than the latest release ({release.text})")
+        return
+    available = f"decaf {release.text} is available (this is {cur})."
+    if check_only:
+        console.print(f"{available} Run `decaf self-update` to install it.")
+        return
+
+    install = selfupdate.find_install(Path(sys.prefix), selfupdate.direct_url())
+    if install.kind == "editable":
+        raise _fail("this decaf is an editable install from a source folder: update the folder with git pull", code=1)
+    by_uv = f"  uv tool install {release.spec}"
+    if install.kind == "other":
+        console.print(f"{available}\nThis decaf is not a uv tool install, so decaf cannot update it.\n"
+                      f"Update it the way you installed it, or install the release with:\n{by_uv}")
+        raise typer.Exit(code=1)
+    uv = selfupdate.find_uv()
+    if uv is None:
+        console.print(f"{available}\nuv is not on PATH, so decaf cannot update itself. "
+                      f"Install the release with:\n{by_uv}")
+        raise typer.Exit(code=1)
+
+    try:  # a run takes the shared lock: no update starts under an active run (#155)
+        lock = runlock.acquire(exclusive=True)
+    except runlock.LockBusy:
+        raise _fail("another decaf run is active: let it end, then run `decaf self-update` again", code=1)
+    if lock is None:
+        console.print("[yellow]warning: cannot check for active decaf runs[/]")
+    try:
+        windows = selfupdate.WINDOWS
+        cmd = selfupdate.uv_command(uv, release, install, windows=windows,
+                                    base=selfupdate.base_python() if windows else None)
+        # uv can replace the files of decaf and of its packages, so a later import can get new
+        # code. After uv starts, decaf imports nothing: it makes each text here, writes it with
+        # print(), and leaves with typer.Exit (#155).
+        shown = subprocess.list2cmdline(cmd) if windows else shlex.join(cmd)
+        rerun = f"Run this command in a new terminal after decaf ends:\n  {shown}"
+        stopped = "error: the update stopped. Run `decaf self-update` again"
+        no_rev = f"error: uv ended, but the receipt does not show {release.tag}"
+        done = f"decaf {cur} -> {release.text}\n{release.url}"
+        aside = None
+        if windows and install.exe is not None:  # uv cannot replace an active exe on Windows
+            try:
+                aside = selfupdate.move_exe_aside(install.exe)
+            except OSError as exc:
+                raise _fail(f"cannot move {install.exe} aside: {exc}", code=1)
+        by_hand = f"\nrename {aside} to {install.exe} by hand"
+
+        code, interrupted = selfupdate.run_uv(cmd)
+        if interrupted:
+            text, exit_code = stopped, 130
+        elif code != 0:
+            text, exit_code = f"error: uv exited with code {code}. {rerun}", 1
+        elif selfupdate.receipt_rev(install.receipt) != release.tag:
+            text, exit_code = no_rev, 1
+        else:
+            print(done)
+            raise typer.Exit(code=0)
+        try:
+            selfupdate.restore_exe(install.exe, aside)  # no-op when decaf moved no exe
+        except OSError:
+            text += by_hand
+        print(text)
+        raise typer.Exit(code=exit_code)
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 @engines_app.command("update")
