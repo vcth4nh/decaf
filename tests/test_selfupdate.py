@@ -1,4 +1,7 @@
+import importlib.metadata
 import re
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -55,3 +58,101 @@ def test_fetch_latest_errors(github, kw, reason):
 def test_the_suite_cannot_reach_github():
     with pytest.raises(selfupdate.SelfUpdateError, match="network blocked in tests"):
         selfupdate.fetch_latest(selfupdate.client(), timeout=5)
+
+
+GIT_RECEIPT = (
+    "[tool]\n"
+    'requirements = [{ name = "decaf", git = "https://github.com/vcth4nh/decaf?rev=v1.11.0" }]\n'
+    'entrypoints = [{ name = "decaf", install-path = "/home/u/.local/bin/decaf", from = "decaf" }]\n'
+)
+GIT_URL = '{"url": "https://github.com/vcth4nh/decaf", "vcs_info": {"vcs": "git", "commit_id": "bbd7063", "requested_revision": "v1.11.0"}}'
+EDITABLE_URL = '{"url": "file:///src/decaf", "dir_info": {"editable": true}}'
+REL = selfupdate.Release((1, 12, 0))
+SPEC = "git+https://github.com/vcth4nh/decaf@v1.12.0"
+
+
+def test_find_install_uv_tool(tmp_path):
+    (tmp_path / "uv-receipt.toml").write_text(GIT_RECEIPT)
+    inst = selfupdate.find_install(tmp_path, GIT_URL)
+    assert inst == selfupdate.Install("uv-tool", tmp_path / "uv-receipt.toml", None,
+                                      Path("/home/u/.local/bin/decaf"))
+
+
+def test_find_install_reads_the_python_pin(tmp_path):
+    (tmp_path / "uv-receipt.toml").write_text(GIT_RECEIPT.replace("[tool]\n", '[tool]\npython = "3.12"\n'))
+    assert selfupdate.find_install(tmp_path, GIT_URL).python == "3.12"
+
+
+def test_find_install_editable_by_direct_url(tmp_path):
+    assert selfupdate.find_install(tmp_path, EDITABLE_URL).kind == "editable"
+
+
+def test_find_install_editable_receipt(tmp_path):
+    (tmp_path / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "decaf", editable = "/src/decaf" }]\n')
+    assert selfupdate.find_install(tmp_path, None).kind == "editable"
+
+
+@pytest.mark.parametrize("receipt", [None, "not [toml"])
+def test_find_install_other(tmp_path, receipt):
+    if receipt is not None:
+        (tmp_path / "uv-receipt.toml").write_text(receipt)
+    assert selfupdate.find_install(tmp_path, None) == selfupdate.Install("other")
+
+
+def test_receipt_rev(tmp_path):
+    r = tmp_path / "uv-receipt.toml"
+    assert selfupdate.receipt_rev(r) is None
+    r.write_text(GIT_RECEIPT)
+    assert selfupdate.receipt_rev(r) == "v1.11.0"
+    r.write_text('[tool]\nrequirements = [{ name = "decaf", directory = "/src/decaf" }]\n')
+    assert selfupdate.receipt_rev(r) is None
+
+
+@pytest.mark.parametrize("python,want", [(None, []), ("3.12", ["--python", "3.12"])])
+def test_uv_command_posix(python, want):
+    inst = selfupdate.Install("uv-tool", python=python)
+    assert selfupdate.uv_command("uv", REL, inst, windows=False, base="/py/bin/python3") == [
+        "uv", "tool", "install", *want, SPEC]
+
+
+@pytest.mark.parametrize("base,python,want", [
+    ("C:\\py\\python.exe", "3.12", ["--python", "C:\\py\\python.exe"]),
+    (None, "3.12", ["--python", "3.12"]),
+    (None, None, []),
+])
+def test_uv_command_windows_pins_the_venv_python(base, python, want):
+    inst = selfupdate.Install("uv-tool", python=python)
+    assert selfupdate.uv_command("uv", REL, inst, windows=True, base=base) == [
+        "uv", "tool", "install", *want, SPEC]
+
+
+def test_base_python_needs_a_file(tmp_path, monkeypatch):
+    # without a base Python file, uv_command on Windows uses the python pin of the receipt
+    py = tmp_path / "python.exe"
+    py.write_bytes(b"")
+    monkeypatch.setattr(sys, "_base_executable", str(py))
+    assert selfupdate.base_python() == str(py)
+    monkeypatch.setattr(sys, "_base_executable", str(tmp_path / "gone.exe"))
+    assert selfupdate.base_python() is None
+    monkeypatch.setattr(sys, "_base_executable", "")
+    assert selfupdate.base_python() is None
+
+
+def test_direct_url_reads_the_decaf_metadata(tmp_path, monkeypatch):
+    info = tmp_path / "decaf-9.9.9.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: decaf\nVersion: 9.9.9\n")
+    monkeypatch.syspath_prepend(str(tmp_path))  # this decaf metadata comes before the real one
+    assert selfupdate.direct_url() is None  # an install from a package index writes no direct_url.json
+    (info / "direct_url.json").write_text(EDITABLE_URL)
+    assert selfupdate.direct_url() == EDITABLE_URL
+
+
+def test_direct_url_without_decaf_metadata(monkeypatch):
+    # a decaf from a source folder on PYTHONPATH has no metadata: the result is None, not an error
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", missing)
+    assert selfupdate.direct_url() is None
