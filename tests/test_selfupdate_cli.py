@@ -269,10 +269,10 @@ def test_exe_that_cannot_move_stops_the_update(upd, monkeypatch, tmp_path):
     exe.write_bytes(b"old")
     monkeypatch.setattr(selfupdate, "WINDOWS", True)
 
-    def in_use(path):
+    def in_use(self, target):
         raise PermissionError("in use")
 
-    monkeypatch.setattr(selfupdate, "move_exe_aside", in_use)
+    monkeypatch.setattr(Path, "rename", in_use)
     upd.install = dataclasses.replace(upd.install, exe=exe)
     r = upd.invoke()
     assert r.exit_code == 1 and upd.cmds == []
@@ -301,6 +301,37 @@ def test_exe_that_cannot_return_names_both_paths(upd, monkeypatch, tmp_path, res
     r = upd.invoke()
     assert r.exit_code == code and text in r.output
     assert r.output.endswith(f"\nrename {tmp_path / 'decaf.exe.old'} to {exe} by hand\n")
+
+
+@pytest.mark.parametrize("restore_works", [True, False])
+def test_ctrl_c_in_the_exe_rename(upd, monkeypatch, tmp_path, restore_works):
+    # Python raises the KeyboardInterrupt of a Ctrl-C in the OS rename after the rename: the command must
+    # know the .old path before the rename, or decaf.exe keeps the .old name and the text has no hint (#161)
+    exe = tmp_path / "decaf.exe"
+    exe.write_bytes(b"old")
+    monkeypatch.setattr(selfupdate, "WINDOWS", True)
+    real_rename = Path.rename
+
+    def rename_then_ctrl_c(self, target):
+        moved = real_rename(self, target)
+        if self == exe:  # the rename aside; the rename back works
+            raise KeyboardInterrupt
+        return moved
+
+    def in_use(*args):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(Path, "rename", rename_then_ctrl_c)
+    if not restore_works:
+        monkeypatch.setattr(selfupdate, "restore_exe", in_use)
+    upd.install = dataclasses.replace(upd.install, exe=exe)
+    r = upd.invoke()
+    assert r.exit_code == 130 and "error: the update stopped. Run `decaf self-update` again" in r.output
+    assert upd.cmds == []
+    if restore_works:
+        assert exe.exists() and exe.read_bytes() == b"old"
+    else:
+        assert r.output.endswith(f"\nrename {tmp_path / 'decaf.exe.old'} to {exe} by hand\n")
 
 
 def test_ctrl_c_during_uv(upd, monkeypatch, tmp_path):
