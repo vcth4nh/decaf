@@ -1,5 +1,5 @@
 """decaf self-update (#155): the latest release of decaf on GitHub, the facts of the active
-install, and the uv command that installs a release.
+install, the uv command that installs a release, and the rename of the active exe on Windows.
 
 `fetch_latest` gets its httpx client from the caller. The tests replace `client`, so no
 test reaches GitHub.
@@ -170,3 +170,29 @@ def uv_command(uv: str, release: Release, install: Install, *, windows: bool, ba
     """
     python = base if windows and base is not None else install.python
     return [uv, "tool", "install", *(["--python", python] if python is not None else []), release.spec]
+
+
+def move_exe_aside(exe: Path) -> Path | None:
+    """Rename the exe to a free .old name, and give that path; None when `exe` is not a file.
+    On Windows, uv cannot copy a new exe over an active one (astral-sh/uv#11930), but a
+    program can rename an active exe. First delete the .old files of earlier updates: a
+    file that an old process still uses stays."""
+    if not exe.is_file():
+        return None
+    for old in exe.parent.glob(exe.name + "*.old"):
+        try:
+            old.unlink()
+        except OSError:  # an old decaf process still runs from this file
+            pass
+    aside, n = exe.with_name(exe.name + ".old"), 0
+    while aside.exists():  # POSIX rename overwrites a file that exists
+        n += 1
+        aside = exe.with_name(f"{exe.name}.{n}.old")
+    exe.rename(aside)
+    return aside
+
+
+def restore_exe(exe: Path, aside: Path | None) -> None:
+    """Give the exe of move_exe_aside its name again, unless uv wrote a new exe there."""
+    if aside is not None and not exe.exists():
+        aside.rename(exe)
