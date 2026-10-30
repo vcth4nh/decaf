@@ -760,15 +760,15 @@ def self_update(
     install = selfupdate.find_install(Path(sys.prefix), selfupdate.direct_url())
     if install.kind == "editable":
         raise _fail("this decaf is an editable install from a source folder: update the folder with git pull", code=1)
-    by_uv = f"  uv tool install {release.spec}"
+    by_uv = f"  uv tool install {release.spec}"  # soft_wrap: rich must not break the command on a narrow terminal (#155)
     if install.kind == "other":
         console.print(f"{available}\nThis decaf is not a uv tool install, so decaf cannot update it.\n"
-                      f"Update it the way you installed it, or install the release with:\n{by_uv}")
+                      f"Update it the way you installed it, or install the release with:\n{by_uv}", soft_wrap=True)
         raise typer.Exit(code=1)
     uv = selfupdate.find_uv()
     if uv is None:
         console.print(f"{available}\nuv is not on PATH, so decaf cannot update itself. "
-                      f"Install the release with:\n{by_uv}")
+                      f"Install the release with:\n{by_uv}", soft_wrap=True)
         raise typer.Exit(code=1)
 
     try:  # a run takes the shared lock: no update starts under an active run (#155)

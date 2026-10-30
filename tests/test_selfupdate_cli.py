@@ -8,6 +8,7 @@ import types
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 import decaf.cli as cli
@@ -138,6 +139,19 @@ def test_no_uv_prints_the_command(upd, monkeypatch):
     r = upd.invoke()
     assert r.exit_code == 1 and "uv is not on PATH" in r.output
     assert "uv tool install git+https://github.com/vcth4nh/decaf@v1.12.0" in r.output
+
+
+@pytest.mark.parametrize("case", ["other", "no-uv"])
+def test_printed_command_stays_whole_on_a_narrow_terminal(upd, monkeypatch, case):
+    # on a terminal, rich wraps a long line: a copied half of the command runs `uv tool install` alone
+    term = Console(emoji=False, force_terminal=True, width=60, height=25)  # with no height, TERM=dumb gives 80 columns
+    monkeypatch.setattr(cli, "console", term)
+    if case == "other":
+        upd.install = selfupdate.Install("other")
+    else:
+        monkeypatch.setattr(selfupdate, "find_uv", lambda: None)
+    r = upd.invoke()
+    assert r.exit_code == 1 and f"\n  uv tool install {SPEC}\n" in r.output
 
 
 def test_update_runs_uv_and_checks_the_receipt(upd):
