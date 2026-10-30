@@ -184,8 +184,10 @@ def uv_env(prefix: Path, install: Install, env: Mapping[str, str]) -> dict[str, 
     """The environment of the uv child: `env` with the tool folder and the bin folder of the
     active install. `prefix` is the venv of the active decaf in the tool folder.
 
-    uv reads these folders from UV_TOOL_DIR and UV_TOOL_BIN_DIR, else from XDG_DATA_HOME and
-    its defaults. With other values in the shell of the update, uv installs a second decaf.
+    uv reads the tool folder from UV_TOOL_DIR, else from XDG_DATA_HOME on Unix. It reads the
+    bin folder from UV_TOOL_BIN_DIR, else from XDG_BIN_HOME, else from XDG_DATA_HOME/../bin.
+    Without these variables, uv uses its defaults. With other values in the shell of the
+    update, uv installs a second decaf.
     """
     child = {**env, "UV_TOOL_DIR": str(prefix.parent)}
     if install.exe is not None:
@@ -193,11 +195,13 @@ def uv_env(prefix: Path, install: Install, env: Mapping[str, str]) -> dict[str, 
     return child
 
 
-def move_exe_aside(exe: Path) -> Path | None:
-    """Rename the exe to a free .old name, and give that path; None when `exe` is not a file.
+def aside_path(exe: Path) -> Path | None:
+    """A free .old path for the rename of the exe; None when `exe` is not a file.
     On Windows, uv cannot copy a new exe over an active one (astral-sh/uv#11930), but a
     program can rename an active exe. First delete the .old files of earlier updates: a
-    file that an old process still uses stays."""
+    file that an old process still uses stays. The caller does the rename: Python raises
+    the KeyboardInterrupt of a Ctrl-C in the rename after it, so the caller must have the
+    path first to restore the exe (#161)."""
     if not exe.is_file():
         return None
     for old in exe.parent.glob(exe.name + "*.old"):
@@ -209,12 +213,12 @@ def move_exe_aside(exe: Path) -> Path | None:
     while aside.exists():  # POSIX rename overwrites a file that exists
         n += 1
         aside = exe.with_name(f"{exe.name}.{n}.old")
-    exe.rename(aside)
     return aside
 
 
 def restore_exe(exe: Path, aside: Path | None) -> None:
-    """Give the exe of move_exe_aside its name again, unless uv wrote a new exe there."""
+    """Rename `aside` back to the exe, unless a file has the exe name: a new exe of uv, or
+    the exe itself when a Ctrl-C came before the rename."""
     if aside is not None and not exe.exists():
         aside.rename(exe)
 

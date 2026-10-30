@@ -732,7 +732,7 @@ def report_cmd(
 def self_update(
     check_only: Annotated[bool, typer.Option("--check", help="Show the latest release; install nothing")] = False,
 ) -> None:
-    """Install the latest decaf release (uv tool installs only)."""
+    """Install the latest decaf release (non-editable uv tool installs only)."""
     cur = __version__
     version = selfupdate.parse_version(cur)
     if version is None:
@@ -795,10 +795,12 @@ def self_update(
         try:
             if windows and install.exe is not None:  # uv cannot replace an active exe on Windows
                 try:
-                    aside = selfupdate.move_exe_aside(install.exe)
+                    aside = selfupdate.aside_path(install.exe)
+                    if aside is not None:
+                        by_hand = f"\nrename {aside} to {install.exe} by hand"
+                        install.exe.rename(aside)  # after aside and by_hand: Python raises a Ctrl-C in the rename after the rename (#161)
                 except OSError as exc:
                     raise _fail(f"cannot move {install.exe} aside: {exc}", code=1)
-            by_hand = f"\nrename {aside} to {install.exe} by hand"
 
             try:
                 code, interrupted = selfupdate.run_uv(cmd, env=env)

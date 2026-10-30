@@ -180,11 +180,12 @@ def test_direct_url_without_decaf_metadata(monkeypatch):
     assert selfupdate.direct_url() is None
 
 
-def test_move_exe_aside_and_restore(tmp_path):
+def test_aside_path_and_restore(tmp_path):
     exe = tmp_path / "decaf.exe"
     exe.write_bytes(b"old")
-    aside = selfupdate.move_exe_aside(exe)
-    assert aside == tmp_path / "decaf.exe.old" and aside.read_bytes() == b"old" and not exe.exists()
+    aside = selfupdate.aside_path(exe)
+    assert aside == tmp_path / "decaf.exe.old" and exe.read_bytes() == b"old"  # the command renames the exe
+    exe.rename(aside)
     selfupdate.restore_exe(exe, aside)
     assert exe.read_bytes() == b"old" and not aside.exists()
 
@@ -192,22 +193,23 @@ def test_move_exe_aside_and_restore(tmp_path):
 def test_restore_keeps_a_new_exe(tmp_path):
     exe = tmp_path / "decaf.exe"
     exe.write_bytes(b"old")
-    aside = selfupdate.move_exe_aside(exe)
+    aside = selfupdate.aside_path(exe)
+    exe.rename(aside)
     exe.write_bytes(b"new")
     selfupdate.restore_exe(exe, aside)
     assert exe.read_bytes() == b"new" and aside.read_bytes() == b"old"
 
 
-def test_move_exe_aside_deletes_old_leftovers(tmp_path):
+def test_aside_path_deletes_old_leftovers(tmp_path):
     exe = tmp_path / "decaf.exe"
     exe.write_bytes(b"old")
     (tmp_path / "decaf.exe.old").write_bytes(b"1")
     (tmp_path / "decaf.exe.1.old").write_bytes(b"2")
-    assert selfupdate.move_exe_aside(exe) == tmp_path / "decaf.exe.old"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["decaf.exe.old"]
+    assert selfupdate.aside_path(exe) == tmp_path / "decaf.exe.old"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["decaf.exe"]
 
 
-def test_move_exe_aside_skips_a_leftover_in_use(tmp_path, monkeypatch):
+def test_aside_path_skips_a_leftover_in_use(tmp_path, monkeypatch):
     exe = tmp_path / "decaf.exe"
     exe.write_bytes(b"old")
     (tmp_path / "decaf.exe.old").write_bytes(b"in use")
@@ -219,12 +221,12 @@ def test_move_exe_aside_skips_a_leftover_in_use(tmp_path, monkeypatch):
         real_unlink(self, missing_ok=missing_ok)
 
     monkeypatch.setattr(Path, "unlink", unlink)
-    assert selfupdate.move_exe_aside(exe) == tmp_path / "decaf.exe.1.old"
+    assert selfupdate.aside_path(exe) == tmp_path / "decaf.exe.1.old"
     assert (tmp_path / "decaf.exe.old").read_bytes() == b"in use"
 
 
-def test_move_exe_aside_without_an_exe(tmp_path):
-    assert selfupdate.move_exe_aside(tmp_path / "decaf.exe") is None
+def test_aside_path_without_an_exe(tmp_path):
+    assert selfupdate.aside_path(tmp_path / "decaf.exe") is None
 
 
 def _probe_wheel(folder: Path, version: str) -> Path:
@@ -275,7 +277,9 @@ def test_uv_replaces_an_active_tool_exe_after_the_rename(tmp_path):
         (venv / "marker").write_text("x")
         base = subprocess.run([str(venv / "Scripts" / "python.exe"), "-c", "import sys; print(sys._base_executable)"],
                               capture_output=True, text=True, check=True, timeout=120).stdout.strip()
-        assert selfupdate.move_exe_aside(exe) == tmp_path / "bin" / "decafprobe.exe.old"
+        aside = selfupdate.aside_path(exe)
+        assert aside == tmp_path / "bin" / "decafprobe.exe.old"
+        exe.rename(aside)  # what decaf self-update does with its own active exe
         r = subprocess.run([uv, "tool", "install", "--offline", "--python", base, str(_probe_wheel(tmp_path, "2.0"))],
                            env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=120)  # uv writes UTF-8
         assert r.returncode == 0, r.stderr
