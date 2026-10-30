@@ -333,6 +333,22 @@ All notable changes to decaf are documented here.
   outer class, the retry of the outer class gave the inner class two times.
   On the three jars, the flagged files fell from 11 to 0, and no jar is
   partial now.
+- An inner class could be in the output two times: in a file of its own,
+  and nested in the file of its outer class (#150). When an engine wrote the
+  file of the inner class apart, decaf wrote it at once when it passed the
+  check, or held it alone when it was flagged. When decaf held the file of
+  the outer class for a stub or a flag, the retry of the next engine nested
+  the inner class, and its file replaced the held file alone. On
+  xstream-1.4.21 with `--engine cfr`, the output had
+  `PureJavaReflectionProvider$1` two times, and the report counted 390 files
+  for 371 classes. Now a held file of an outer class holds its family, from
+  any output: the files of its inner classes wait with it, and only a whole
+  family replaces it, as for a flagged file of an inner class. The files of
+  a retry that fails as a whole go. With `--no-check`, a stub holds the
+  family too. On that jar, the output now has 385 files and no flagged
+  file, and the jar is complete: the family of `SerializableConverter`
+  comes from Fernflower as one file, in place of five Vineflower files with
+  one flagged.
 
 ### Security
 
