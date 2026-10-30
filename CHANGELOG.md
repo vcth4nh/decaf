@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-10-31
+
 ### Added
 
 - An Agent Skill for AI coding agents (#153). `skills/decaf/SKILL.md` says
@@ -25,6 +27,9 @@
 
 ### Changed
 
+- The README leads with feature bullets and a Mermaid overview. Detailed
+  guides live in `docs/`, and the demo shows archive failures, compile-check
+  diagnostics, and fallback attempts (#164).
 - The live display shows the compile check of each engine output, for
   example `vineflower · check 1,234 files` (#101). Before, it showed the last
   engine event while the check ran.
@@ -55,6 +60,8 @@
 
 ### Fixed
 
+- On Windows, Ctrl-C during the executable rename in `decaf self-update`
+  now restores `decaf.exe` and exits with code 130 (#163).
 - A batch of jars lost the classes that have `$` in the simple name, or gave
   them to another jar of the batch, and the report still showed ✓ with
   `missing_classes: 0` (#106). For guice-5.1.0, a batch wrote 243 of its 275
@@ -821,7 +828,8 @@ First public release.
 - Exit codes: `0` all succeeded · `1` some failed · `2` usage/environment
   error · `130` interrupted.
 
-[Unreleased]: https://github.com/vcth4nh/decaf/compare/v1.11.0...HEAD
+[Unreleased]: https://github.com/vcth4nh/decaf/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.12.0
 [1.11.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.11.0
 [1.10.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.10.0
 [1.9.1]: https://github.com/vcth4nh/decaf/releases/tag/v1.9.1
