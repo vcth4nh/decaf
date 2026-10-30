@@ -1,6 +1,7 @@
 import json
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 import decaf.cli as cli
-from decaf import engines, runlock
+from decaf import engines, runlock, selfupdate
 from decaf.cli import app
 from decaf.pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
 
@@ -1537,3 +1538,54 @@ def test_run_goes_on_without_a_usable_lock_file(tmp_path, make_jar, monkeypatch)
     make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
     result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
     assert result.exit_code == 0
+
+
+def _notice_run(tmp_path, make_jar, monkeypatch, github, *, terminal=True, args=(), cfg_text="", thread=False):
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    monkeypatch.setattr(cli, "__version__", "1.11.0")
+    monkeypatch.setattr(cli, "_is_terminal", lambda: terminal)
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    if not thread:
+        monkeypatch.setattr(selfupdate.NoticeCheck, "start", lambda self: self._run())  # no thread
+    monkeypatch.setattr(selfupdate, "client", lambda: github(tag="v1.12.0"))
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    (tmp_path / "c.toml").write_text(cfg_text)  # not the user config: it can hold update_check = false
+    return runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+                               "--config", str(tmp_path / "c.toml"), *args])
+
+
+NOTICE = "decaf 1.12.0 is available (this is 1.11.0). Run `decaf self-update` to install it."
+
+
+def test_run_prints_the_notice_on_a_terminal(tmp_path, make_jar, monkeypatch, github):
+    r = _notice_run(tmp_path, make_jar, monkeypatch, github)
+    assert r.exit_code == 0 and NOTICE in ANSI.sub("", r.output)
+
+
+@pytest.mark.parametrize("kw", [
+    {"terminal": False},
+    {"cfg_text": "update_check = false\n"},
+    {"args": ["-q"]},
+    {"args": ["--format", "json"]},
+    {"args": ["--format", "ndjson"]},
+])
+def test_run_has_no_notice(tmp_path, make_jar, monkeypatch, github, kw):
+    r = _notice_run(tmp_path, make_jar, monkeypatch, github, **kw)
+    assert r.exit_code == 0 and "is available" not in r.output
+    assert not (tmp_path / "cache" / "update-check.json").exists()  # no request, no file
+
+
+def test_run_does_not_wait_for_the_check(tmp_path, make_jar, monkeypatch, github):
+    # GitHub answers only after the run: the run ends without the line, and does not wait
+    gate = threading.Event()
+
+    def slow(http, timeout):
+        gate.wait(10)
+        return selfupdate.Release((1, 12, 0))
+
+    monkeypatch.setattr(selfupdate, "fetch_latest", slow)
+    try:
+        r = _notice_run(tmp_path, make_jar, monkeypatch, github, thread=True)
+    finally:
+        gate.set()
+    assert r.exit_code == 0 and "is available" not in r.output

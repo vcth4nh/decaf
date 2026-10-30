@@ -1,6 +1,6 @@
 """decaf self-update (#155): the latest release of decaf on GitHub, the facts of the active
 install, the uv command that installs a release, the rename of the active exe on Windows,
-and the uv child.
+the uv child, and the notice after a run.
 
 `fetch_latest` gets its httpx client from the caller. The tests replace `client`, so no
 test reaches GitHub.
@@ -16,7 +16,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -216,3 +220,100 @@ def run_uv(cmd: list[str]) -> tuple[int, bool]:
     finally:
         signal.signal(signal.SIGINT, old)
     return code, bool(stops)
+
+
+NOTICE_FILE = "update-check.json"  # in the decaf cache folder
+NOTICE_MAX_AGE = 86400  # seconds: the notice asks GitHub at most one time each day
+
+
+def available_text(new: str, cur: str) -> str:
+    """The line of `decaf self-update --check` and of the notice after a run."""
+    return f"decaf {new} is available (this is {cur}). Run `decaf self-update` to install it."
+
+
+def _read_notice(path: Path) -> tuple[float, tuple[int, int, int] | None] | None:
+    """The time and the version of the notice file; None for a missing or damaged file."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        checked, latest = data["checked"], data["latest"]
+    except (OSError, ValueError, TypeError, KeyError):  # no file, not UTF-8, not JSON, or no such keys
+        return None
+    version = parse_version(latest) if isinstance(latest, str) else None
+    if not isinstance(checked, (int, float)) or (latest is not None and version is None):
+        return None
+    return checked, version
+
+
+def _write_notice(path: Path, checked: float, latest: tuple[int, int, int] | None) -> None:
+    """Write the notice file through a temp file and os.replace. A write error keeps the old file."""
+    tmp = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile(
+            "w", dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False, encoding="utf-8",
+        )
+        with tmp:
+            json.dump({"checked": checked, "latest": None if latest is None else Release(latest).text}, tmp)
+        os.replace(tmp.name, path)
+    except OSError:
+        if tmp is not None:
+            try:
+                Path(tmp.name).unlink()
+            except OSError:
+                pass
+
+
+def latest_known(cache_dir: Path, now: float, fetch: Callable[[], Release]) -> tuple[int, int, int] | None:
+    """The latest release version for the notice after a run.
+
+    A notice file younger than NOTICE_MAX_AGE gives its version with no request; a time in
+    the future counts as old. Else fetch() asks GitHub. A failed request keeps the version of
+    the file, and both save the time, so an offline machine asks one time each day.
+    """
+    path = cache_dir / NOTICE_FILE
+    saved = _read_notice(path)
+    if saved is not None and 0 <= now - saved[0] < NOTICE_MAX_AGE:
+        return saved[1]
+    latest = saved[1] if saved is not None else None
+    try:
+        latest = fetch().version
+    except Exception:  # for example no network, a GitHub refusal, or a bad proxy setting
+        pass
+    _write_notice(path, now, latest)
+    return latest
+
+
+def _ask_github() -> Release:
+    with client() as http:  # the module global at call time: the tests replace it
+        return fetch_latest(http, timeout=5)
+
+
+class NoticeCheck:
+    """The check behind the notice after a run. start() asks in a daemon thread, and line()
+    never waits for that thread: a slow answer gives no line, and the run ends at once."""
+
+    def __init__(self, cache_dir: Path, current: str, fetch: Callable[[], Release] | None = None) -> None:
+        self._cache_dir = cache_dir
+        self._current = current
+        self._fetch = fetch if fetch is not None else _ask_github
+        self._thread: threading.Thread | None = None
+        self._latest: tuple[int, int, int] | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            self._latest = latest_known(self._cache_dir, time.time(), self._fetch)
+        except Exception:  # the notice is only a hint: an error gives no line
+            pass
+
+    def line(self) -> str | None:
+        """The notice, or None while the thread lives, after an error, or with no newer release."""
+        if self._thread is not None and self._thread.is_alive():
+            return None
+        current = parse_version(self._current)
+        if self._latest is None or current is None or self._latest <= current:
+            return None
+        return available_text(Release(self._latest).text, self._current)

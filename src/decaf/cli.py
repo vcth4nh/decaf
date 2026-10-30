@@ -477,6 +477,11 @@ class _RunDisplay:
         return best
 
 
+def _is_terminal() -> bool:
+    """stdout is a terminal. rich also takes FORCE_COLOR as a terminal, so the notice asks the stream (#155)."""
+    return sys.stdout.isatty()
+
+
 @app.command(name="run")
 def main(
     input: Annotated[Path, typer.Argument(help="Folder to scan recursively, or a single archive", show_default=False)],
@@ -547,6 +552,10 @@ def main(
             run_lock = runlock.acquire(exclusive=False)
         except runlock.LockBusy:
             raise _fail("decaf is updating: run again when it ends")
+        notice = None  # the line about a newer release: its check never makes the run wait (#155)
+        if format is Format.human and not quiet and cfg.update_check and _is_terminal():
+            notice = selfupdate.NoticeCheck(engines.cache_root(), __version__)
+            notice.start()
 
         settings = Settings(
             input=input,
@@ -641,6 +650,9 @@ def main(
                 thread.join(timeout=2.0)
 
         report_view.render_ending(console, report, output=output, report_path=output / "decaf-report.json", verbose=verbose)
+        text = notice.line() if notice is not None else None
+        if text is not None:
+            console.print(f"[dim]{text}[/]")
         if format is Format.json:
             print(report.to_json(), flush=True)
         elif format is Format.ndjson:
@@ -734,7 +746,7 @@ def self_update(
         return
     available = f"decaf {release.text} is available (this is {cur})."
     if check_only:
-        console.print(f"{available} Run `decaf self-update` to install it.")
+        console.print(selfupdate.available_text(release.text, cur))
         return
 
     install = selfupdate.find_install(Path(sys.prefix), selfupdate.direct_url())

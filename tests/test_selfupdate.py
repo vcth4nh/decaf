@@ -1,11 +1,14 @@
 import base64
 import hashlib
 import importlib.metadata
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -268,3 +271,123 @@ def test_uv_replaces_an_active_tool_exe_after_the_rename(tmp_path):
         proc.stdin.close()
         proc.wait(timeout=30)
         proc.stdout.close()
+
+
+R12 = selfupdate.Release((1, 12, 0))
+
+
+def saved(d):
+    return json.loads((d / "update-check.json").read_text())
+
+
+def test_latest_known_asks_github_without_a_file(tmp_path):
+    assert selfupdate.latest_known(tmp_path, 1000.0, lambda: R12) == (1, 12, 0)
+    assert saved(tmp_path) == {"checked": 1000.0, "latest": "1.12.0"}
+
+
+def test_latest_known_uses_a_new_file(tmp_path):
+    (tmp_path / "update-check.json").write_text('{"checked": 1000.0, "latest": "1.12.0"}')
+    assert selfupdate.latest_known(tmp_path, 1000.0 + 86399, lambda: pytest.fail("asked")) == (1, 12, 0)
+
+
+@pytest.mark.parametrize("text", [
+    '{"checked": 1000.0, "latest": "1.11.0"}',      # one day old (now = 87400)
+    '{"checked": 90000.0, "latest": "1.11.0"}',     # in the future
+    "{not json", '{"checked": "x", "latest": 5}',
+    # damaged files with a new time: only the damage makes the check ask again
+    '{"checked": "x", "latest": "1.11.0"}', '{"checked": 87000.0, "latest": "1.x"}',
+    '{"checked": 87000.0}', "[]",
+])
+def test_latest_known_asks_again(tmp_path, text):
+    (tmp_path / "update-check.json").write_text(text)
+    assert selfupdate.latest_known(tmp_path, 87400.0, lambda: R12) == (1, 12, 0)
+
+
+# A bad HTTPS_PROXY makes httpx raise ValueError, not SelfUpdateError: it must not cost a request on each run
+@pytest.mark.parametrize("error", [selfupdate.SelfUpdateError("HTTP 403"), ValueError("Unknown scheme for proxy URL")])
+def test_failed_request_keeps_the_version_and_saves_the_time(tmp_path, error):
+    (tmp_path / "update-check.json").write_text('{"checked": 0.0, "latest": "1.12.0"}')
+
+    def fail():
+        raise error
+
+    assert selfupdate.latest_known(tmp_path, 100000.0, fail) == (1, 12, 0)
+    assert saved(tmp_path) == {"checked": 100000.0, "latest": "1.12.0"}
+
+
+def test_write_error_is_ignored(tmp_path):
+    (tmp_path / "file").write_text("x")
+    assert selfupdate.latest_known(tmp_path / "file", 1.0, lambda: R12) == (1, 12, 0)
+
+
+def test_notice_line(tmp_path):
+    n = selfupdate.NoticeCheck(tmp_path, "1.11.0", fetch=lambda: R12)
+    n.start()
+    n._thread.join(5)
+    assert n.line() == "decaf 1.12.0 is available (this is 1.11.0). Run `decaf self-update` to install it."
+    assert selfupdate.NoticeCheck(tmp_path, "1.12.0", fetch=lambda: R12).line() is None  # not started
+
+
+@pytest.mark.parametrize("current", ["1.12.0", "1.13.0", "1.12.0.dev0"])
+def test_notice_line_needs_a_newer_release(tmp_path, current):
+    # the same release, a newer local build, or a version that does not parse: no line
+    n = selfupdate.NoticeCheck(tmp_path, current, fetch=lambda: R12)
+    n.start()
+    n._thread.join(5)
+    assert n.line() is None
+
+
+def test_notice_asks_through_the_client_of_the_module(tmp_path, monkeypatch, github):
+    # the test guard replaces selfupdate.client: a client taken at import time would reach GitHub
+    seen = []
+    monkeypatch.setattr(selfupdate, "client", lambda: github(tag="v1.12.0", seen=seen))
+    n = selfupdate.NoticeCheck(tmp_path, "1.11.0")
+    n.start()
+    n._thread.join(5)
+    assert n.line() is not None and len(seen) == 1
+    assert seen[0].extensions["timeout"]["read"] == 5  # the notice waits less than the command (30 s)
+
+
+def test_notice_check_never_raises(tmp_path, monkeypatch):
+    # an error in the thread must not print a traceback at the end of a run
+    def broken(cache_dir, now, fetch):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(selfupdate, "latest_known", broken)
+    n = selfupdate.NoticeCheck(tmp_path, "1.11.0", fetch=lambda: R12)
+    n._run()
+    assert n.line() is None
+
+
+def test_notice_line_waits_for_nothing(tmp_path):
+    gate = threading.Event()
+    n = selfupdate.NoticeCheck(tmp_path, "1.11.0", fetch=lambda: (gate.wait(5), R12)[1])
+    n.start()
+    assert n.line() is None
+    gate.set()
+
+
+def test_notice_survives_a_fetch_error(tmp_path):
+    def boom():
+        raise RuntimeError("boom")
+
+    n = selfupdate.NoticeCheck(tmp_path, "1.11.0", fetch=boom)
+    n.start()
+    n._thread.join(5)
+    assert n.line() is None
+
+
+def test_exit_while_the_check_waits(tmp_path):
+    # the check runs in a daemon thread: the process ends at once, also while the request waits
+    code = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from decaf import selfupdate\n"
+        "n = selfupdate.NoticeCheck(Path(sys.argv[1]), '1.11.0', fetch=lambda: time.sleep(30))\n"
+        "n.start()\n"
+        "print(n.line())\n"
+    )
+    t0 = time.monotonic()
+    r = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0 and r.stdout.strip() == "None" and r.stderr == ""
+    assert time.monotonic() - t0 < 10
