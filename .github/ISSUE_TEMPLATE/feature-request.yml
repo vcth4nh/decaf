@@ -3,10 +3,6 @@ description: Suggest an idea for improving decaf
 title: "[Feature Request] Concise description of the feature"
 labels: ["enhancement"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for taking the time to suggest a feature!
   - type: textarea
     id: problem
     attributes:

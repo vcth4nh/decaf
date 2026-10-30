@@ -1,7 +1,7 @@
 ## Proposed change
 
 <!--
-Please include a summary of the change and which issue is fixed (if any) and any relevant motivation / context. List any dependencies that are required for this change. If appropriate, please include an explanation of how your proposed change can be tested. Example `decaf-report.json` output can also be helpful if appropriate.
+Describe the change, why it is needed, and any new dependencies. Include how you tested it and relevant `decaf-report.json` output.
 -->
 
 Closes #(issue)
