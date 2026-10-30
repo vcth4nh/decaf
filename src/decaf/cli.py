@@ -791,28 +791,31 @@ def self_update(
         no_rev = f"error: uv ended, but the receipt does not show {release.tag}"
         no_start = "error: cannot start uv: "
         done = f"decaf {cur} -> {release.text}\n{release.url}"
-        aside = None
-        if windows and install.exe is not None:  # uv cannot replace an active exe on Windows
-            try:
-                aside = selfupdate.move_exe_aside(install.exe)
-            except OSError as exc:
-                raise _fail(f"cannot move {install.exe} aside: {exc}", code=1)
-        by_hand = f"\nrename {aside} to {install.exe} by hand"
-
+        aside, by_hand = None, ""  # a Ctrl-C can come before the lines that set them
         try:
-            code, interrupted = selfupdate.run_uv(cmd, env=env)
-        except OSError as exc:  # for example, antivirus software blocks uv.exe
-            text, exit_code = f"{no_start}{exc}", 1
-        else:
-            if code == 0:  # uv finished the install, also after a Ctrl-C: the receipt decides
-                if selfupdate.receipt_rev(install.receipt) == release.tag:
-                    print(done)
-                    raise typer.Exit(code=0)
-                text, exit_code = no_rev, 1
-            elif interrupted:
-                text, exit_code = stopped, 130
+            if windows and install.exe is not None:  # uv cannot replace an active exe on Windows
+                try:
+                    aside = selfupdate.move_exe_aside(install.exe)
+                except OSError as exc:
+                    raise _fail(f"cannot move {install.exe} aside: {exc}", code=1)
+            by_hand = f"\nrename {aside} to {install.exe} by hand"
+
+            try:
+                code, interrupted = selfupdate.run_uv(cmd, env=env)
+            except OSError as exc:  # for example, antivirus software blocks uv.exe
+                text, exit_code = f"{no_start}{exc}", 1
             else:
-                text, exit_code = f"error: uv exited with code {code}. {rerun}", 1
+                if code == 0:  # uv finished the install, also after a Ctrl-C: the receipt decides
+                    if selfupdate.receipt_rev(install.receipt) == release.tag:
+                        print(done)
+                        raise typer.Exit(code=0)
+                    text, exit_code = no_rev, 1
+                elif interrupted:
+                    text, exit_code = stopped, 130
+                else:
+                    text, exit_code = f"error: uv exited with code {code}. {rerun}", 1
+        except KeyboardInterrupt:  # a Ctrl-C outside the handler of run_uv: the exe must get its name back too (#155)
+            text, exit_code = stopped, 130
         try:
             selfupdate.restore_exe(install.exe, aside)  # no-op when decaf moved no exe
         except OSError:

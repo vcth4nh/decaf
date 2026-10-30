@@ -50,7 +50,7 @@ class Update:
             self.seen_during.append(self.during())
         if self.snapshot_modules:
             self.modules = set(sys.modules)
-        if isinstance(self.result, OSError):  # uv did not start
+        if isinstance(self.result, BaseException):  # uv did not start, or a Ctrl-C came outside the handler of run_uv
             raise copy.copy(self.result)  # a new exception: no traceback of an earlier test
         if self.write_receipt:  # a uv install writes the rev of the new release
             self.receipt.write_text(GIT_RECEIPT.replace("rev=v1.11.0", "rev=v1.12.0"))
@@ -270,6 +270,7 @@ def test_exe_that_cannot_move_stops_the_update(upd, monkeypatch, tmp_path):
     ((130, True), True, "error: the update stopped.", 130),
     ((0, False), False, "error: uv ended, but the receipt does not show v1.12.0", 1),
     (NO_UV, True, "error: cannot start uv: ", 1),
+    (KeyboardInterrupt(), True, "error: the update stopped.", 130),
 ])
 def test_exe_that_cannot_return_names_both_paths(upd, monkeypatch, tmp_path, result, write_receipt, text, code):
     # the old exe keeps its .old name, so decaf has no command until the user renames it
@@ -309,6 +310,37 @@ def test_ctrl_c_after_which_uv_ends_with_code_0(upd, write_receipt, code, text):
     assert r.exit_code == code and text in r.output and "the update stopped" not in r.output
 
 
+def test_ctrl_c_outside_the_handler_of_run_uv(upd, monkeypatch, tmp_path):
+    # a Ctrl-C just before run_uv sets its handler, or just after it gives the old one back: without
+    # the restore, decaf.exe keeps its .old name, and the user has no decaf command and no hint
+    exe = tmp_path / "decaf.exe"
+    exe.write_bytes(b"old")
+    monkeypatch.setattr(selfupdate, "WINDOWS", True)
+    upd.install = dataclasses.replace(upd.install, exe=exe)
+    upd.during = exe.exists
+    upd.result = KeyboardInterrupt()
+    r = upd.invoke()
+    assert r.exit_code == 130 and "error: the update stopped. Run `decaf self-update` again" in r.output
+    assert upd.seen_during == [False] and exe.read_bytes() == b"old"  # moved aside, then back
+
+
+def test_ctrl_c_after_uv_ends_keeps_the_new_exe(upd, monkeypatch, tmp_path):
+    # a second Ctrl-C as uv ends, here in the receipt read: uv wrote the new exe, and the restore must keep it
+    exe = tmp_path / "decaf.exe"
+    exe.write_bytes(b"old")
+    monkeypatch.setattr(selfupdate, "WINDOWS", True)
+    upd.install = dataclasses.replace(upd.install, exe=exe)
+    upd.during = lambda: exe.write_bytes(b"new")  # uv writes the new exe
+
+    def ctrl_c(receipt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(selfupdate, "receipt_rev", ctrl_c)
+    r = upd.invoke()
+    assert r.exit_code == 130 and "error: the update stopped. Run `decaf self-update` again" in r.output
+    assert exe.read_bytes() == b"new"
+
+
 @pytest.mark.parametrize("windows", [False, True])
 def test_uv_that_cannot_start(upd, monkeypatch, tmp_path, windows):
     # for example, antivirus software blocks uv.exe: one line, no traceback, and the exe gets its name back
@@ -325,10 +357,10 @@ def test_uv_that_cannot_start(upd, monkeypatch, tmp_path, windows):
 
 @pytest.mark.parametrize("windows", [False, True])
 @pytest.mark.parametrize("result,write_receipt", [((0, False), True), ((2, False), True), ((130, True), True),
-                                                  ((0, False), False), (NO_UV, True)])
+                                                  ((0, False), False), (NO_UV, True), (KeyboardInterrupt(), True)])
 def test_no_new_imports_after_uv(upd, monkeypatch, tmp_path, windows, result, write_receipt):
     # uv can replace the files of a later import, so no exit path may import: done, failure, Ctrl-C,
-    # no rev, and a uv that cannot start
+    # no rev, a uv that cannot start, and a Ctrl-C outside the handler of run_uv
     exe = tmp_path / "decaf.exe"
     exe.write_bytes(b"old")
     monkeypatch.setattr(selfupdate, "WINDOWS", windows)  # True: the exe rename and its restore run too
