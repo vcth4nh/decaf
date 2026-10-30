@@ -1,0 +1,101 @@
+<svg role="img" width="1238" height="391.59999999999997" class="rich-terminal" viewBox="0 0 1238 391.59999999999997" xmlns="http://www.w3.org/2000/svg">
+    <title>decaf / compile check and fallback</title>
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    .compile-check-matrix {
+        font-family: "DejaVu Sans Mono", monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .compile-check-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .compile-check-r1 { fill: #89b4fa;font-weight: bold }
+.compile-check-r2 { fill: #cdd6f4 }
+.compile-check-r3 { fill: #cdd6f4;font-weight: bold }
+.compile-check-r4 { fill: #f9e2af }
+.compile-check-r5 { fill: #cba6f7 }
+.compile-check-r6 { fill: #cba6f7;font-style: italic; }
+.compile-check-r7 { fill: #94e2d5;font-weight: bold }
+.compile-check-r8 { fill: #f38ba8;font-style: italic; }
+    </style>
+
+    <defs>
+    <clipPath id="compile-check-clip-terminal">
+      <rect x="0" y="0" width="1219.0" height="340.59999999999997" />
+    </clipPath>
+    <clipPath id="compile-check-line-0">
+    <rect x="0" y="1.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-1">
+    <rect x="0" y="25.9" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-2">
+    <rect x="0" y="50.3" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-3">
+    <rect x="0" y="74.7" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-4">
+    <rect x="0" y="99.1" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-5">
+    <rect x="0" y="123.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-6">
+    <rect x="0" y="147.9" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-7">
+    <rect x="0" y="172.3" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-8">
+    <rect x="0" y="196.7" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-9">
+    <rect x="0" y="221.1" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-10">
+    <rect x="0" y="245.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-11">
+    <rect x="0" y="269.9" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="compile-check-line-12">
+    <rect x="0" y="294.3" width="1220" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#1e1e2e" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1236" height="389.6" rx="8"/><text class="compile-check-title" fill="#cdd6f4" text-anchor="middle" x="618" y="27">decaf&#160;/&#160;compile&#160;check&#160;and&#160;fallback</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+
+    <g transform="translate(9, 41)" clip-path="url(#compile-check-clip-terminal)">
+
+    <g class="compile-check-matrix">
+    <text class="compile-check-r1" x="0" y="20" textLength="512.4" clip-path="url(#compile-check-line-0)">$&#160;decaf&#160;report&#160;out&#160;--artifact&#160;bytecode.jar</text><text class="compile-check-r2" x="1220" y="20" textLength="12.2" clip-path="url(#compile-check-line-0)">
+</text><text class="compile-check-r3" x="0" y="44.4" textLength="146.4" clip-path="url(#compile-check-line-1)">bytecode.jar</text><text class="compile-check-r2" x="1220" y="44.4" textLength="12.2" clip-path="url(#compile-check-line-1)">
+</text><text class="compile-check-r4" x="24.4" y="68.8" textLength="48.8" clip-path="url(#compile-check-line-2)">kind</text><text class="compile-check-r2" x="73.2" y="68.8" textLength="12.2" clip-path="url(#compile-check-line-2)">=</text><text class="compile-check-r5" x="85.4" y="68.8" textLength="85.4" clip-path="url(#compile-check-line-2)">archive</text><text class="compile-check-r4" x="183" y="68.8" textLength="85.4" clip-path="url(#compile-check-line-2)">outcome</text><text class="compile-check-r2" x="268.4" y="68.8" textLength="12.2" clip-path="url(#compile-check-line-2)">=</text><text class="compile-check-r5" x="280.6" y="68.8" textLength="24.4" clip-path="url(#compile-check-line-2)">ok</text><text class="compile-check-r4" x="317.2" y="68.8" textLength="73.2" clip-path="url(#compile-check-line-2)">method</text><text class="compile-check-r2" x="390.4" y="68.8" textLength="12.2" clip-path="url(#compile-check-line-2)">=</text><text class="compile-check-r5" x="402.6" y="68.8" textLength="122" clip-path="url(#compile-check-line-2)">vineflower</text><text class="compile-check-r2" x="1220" y="68.8" textLength="12.2" clip-path="url(#compile-check-line-2)">
+</text><text class="compile-check-r4" x="24.4" y="93.2" textLength="36.6" clip-path="url(#compile-check-line-3)">gav</text><text class="compile-check-r2" x="61" y="93.2" textLength="12.2" clip-path="url(#compile-check-line-3)">=</text><text class="compile-check-r6" x="73.2" y="93.2" textLength="48.8" clip-path="url(#compile-check-line-3)">None</text><text class="compile-check-r4" x="134.2" y="93.2" textLength="48.8" clip-path="url(#compile-check-line-3)">repo</text><text class="compile-check-r2" x="183" y="93.2" textLength="12.2" clip-path="url(#compile-check-line-3)">=</text><text class="compile-check-r6" x="195.2" y="93.2" textLength="48.8" clip-path="url(#compile-check-line-3)">None</text><text class="compile-check-r4" x="256.2" y="93.2" textLength="134.2" clip-path="url(#compile-check-line-3)">resolved_by</text><text class="compile-check-r2" x="390.4" y="93.2" textLength="12.2" clip-path="url(#compile-check-line-3)">=</text><text class="compile-check-r6" x="402.6" y="93.2" textLength="48.8" clip-path="url(#compile-check-line-3)">None</text><text class="compile-check-r4" x="463.6" y="93.2" textLength="146.4" clip-path="url(#compile-check-line-3)">sources_miss</text><text class="compile-check-r2" x="610" y="93.2" textLength="12.2" clip-path="url(#compile-check-line-3)">=</text><text class="compile-check-r6" x="622.2" y="93.2" textLength="48.8" clip-path="url(#compile-check-line-3)">None</text><text class="compile-check-r2" x="1220" y="93.2" textLength="12.2" clip-path="url(#compile-check-line-3)">
+</text><text class="compile-check-r4" x="24.4" y="117.6" textLength="85.4" clip-path="url(#compile-check-line-4)">classes</text><text class="compile-check-r2" x="109.8" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">=</text><text class="compile-check-r7" x="122" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">1</text><text class="compile-check-r4" x="146.4" y="117.6" textLength="122" clip-path="url(#compile-check-line-4)">java_files</text><text class="compile-check-r2" x="268.4" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">=</text><text class="compile-check-r7" x="280.6" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">1</text><text class="compile-check-r4" x="305" y="117.6" textLength="195.2" clip-path="url(#compile-check-line-4)">resources_copied</text><text class="compile-check-r2" x="500.2" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">=</text><text class="compile-check-r7" x="512.4" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">0</text><text class="compile-check-r4" x="536.8" y="117.6" textLength="207.4" clip-path="url(#compile-check-line-4)">resources_skipped</text><text class="compile-check-r2" x="744.2" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">=</text><text class="compile-check-r7" x="756.4" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">0</text><text class="compile-check-r4" x="780.8" y="117.6" textLength="183" clip-path="url(#compile-check-line-4)">missing_classes</text><text class="compile-check-r2" x="963.8" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">=</text><text class="compile-check-r7" x="976" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">0</text><text class="compile-check-r4" x="1000.4" y="117.6" textLength="85.4" clip-path="url(#compile-check-line-4)">stubbed</text><text class="compile-check-r2" x="1085.8" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">=</text><text class="compile-check-r7" x="1098" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">0</text><text class="compile-check-r2" x="1220" y="117.6" textLength="12.2" clip-path="url(#compile-check-line-4)">
+</text><text class="compile-check-r4" x="0" y="142" textLength="122" clip-path="url(#compile-check-line-5)">collisions</text><text class="compile-check-r2" x="122" y="142" textLength="12.2" clip-path="url(#compile-check-line-5)">=</text><text class="compile-check-r7" x="134.2" y="142" textLength="12.2" clip-path="url(#compile-check-line-5)">0</text><text class="compile-check-r2" x="1220" y="142" textLength="12.2" clip-path="url(#compile-check-line-5)">
+</text><text class="compile-check-r2" x="0" y="166.4" textLength="109.8" clip-path="url(#compile-check-line-6)">&#160;&#160;check:&#160;</text><text class="compile-check-r4" x="109.8" y="166.4" textLength="85.4" clip-path="url(#compile-check-line-6)">checked</text><text class="compile-check-r2" x="195.2" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">=</text><text class="compile-check-r7" x="207.4" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">1</text><text class="compile-check-r4" x="231.8" y="166.4" textLength="85.4" clip-path="url(#compile-check-line-6)">flagged</text><text class="compile-check-r2" x="317.2" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">=</text><text class="compile-check-r7" x="329.4" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">1</text><text class="compile-check-r4" x="353.8" y="166.4" textLength="61" clip-path="url(#compile-check-line-6)">noted</text><text class="compile-check-r2" x="414.8" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">=</text><text class="compile-check-r7" x="427" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">0</text><text class="compile-check-r4" x="451.4" y="166.4" textLength="109.8" clip-path="url(#compile-check-line-6)">unchecked</text><text class="compile-check-r2" x="561.2" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">=</text><text class="compile-check-r7" x="573.4" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">0</text><text class="compile-check-r2" x="1220" y="166.4" textLength="12.2" clip-path="url(#compile-check-line-6)">
+</text><text class="compile-check-r2" x="0" y="190.8" textLength="341.6" clip-path="url(#compile-check-line-7)">&#160;&#160;flagged&#160;demo/Checked.java&#160;</text><text class="compile-check-r3" x="341.6" y="190.8" textLength="12.2" clip-path="url(#compile-check-line-7)">(</text><text class="compile-check-r2" x="353.8" y="190.8" textLength="122" clip-path="url(#compile-check-line-7)">vineflower</text><text class="compile-check-r3" x="475.8" y="190.8" textLength="12.2" clip-path="url(#compile-check-line-7)">)</text><text class="compile-check-r2" x="488" y="190.8" textLength="97.6" clip-path="url(#compile-check-line-7)">:&#160;flow,&#160;</text><text class="compile-check-r7" x="585.6" y="190.8" textLength="12.2" clip-path="url(#compile-check-line-7)">1</text><text class="compile-check-r2" x="597.8" y="190.8" textLength="109.8" clip-path="url(#compile-check-line-7)">&#160;error&#160;-&#160;</text><text class="compile-check-r7" x="707.6" y="190.8" textLength="12.2" clip-path="url(#compile-check-line-7)">7</text><text class="compile-check-r2" x="719.8" y="190.8" textLength="280.6" clip-path="url(#compile-check-line-7)">:&#160;unreported&#160;exception&#160;</text><text class="compile-check-r2" x="1220" y="190.8" textLength="12.2" clip-path="url(#compile-check-line-7)">
+</text><text class="compile-check-r2" x="0" y="215.2" textLength="732" clip-path="url(#compile-check-line-8)">java.io.IOException;&#160;must&#160;be&#160;caught&#160;or&#160;declared&#160;to&#160;be&#160;thrown</text><text class="compile-check-r2" x="1220" y="215.2" textLength="12.2" clip-path="url(#compile-check-line-8)">
+</text><text class="compile-check-r7" x="48.8" y="239.6" textLength="12.2" clip-path="url(#compile-check-line-9)">7</text><text class="compile-check-r2" x="61" y="239.6" textLength="1012.6" clip-path="url(#compile-check-line-9)">:&#160;unreported&#160;exception&#160;java.io.IOException;&#160;must&#160;be&#160;caught&#160;or&#160;declared&#160;to&#160;be&#160;thrown</text><text class="compile-check-r2" x="1220" y="239.6" textLength="12.2" clip-path="url(#compile-check-line-9)">
+</text><text class="compile-check-r2" x="0" y="264" textLength="256.2" clip-path="url(#compile-check-line-10)">&#160;&#160;vineflower&#160;archive&#160;</text><text class="compile-check-r4" x="256.2" y="264" textLength="24.4" clip-path="url(#compile-check-line-10)">rc</text><text class="compile-check-r2" x="280.6" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">=</text><text class="compile-check-r7" x="292.8" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">0</text><text class="compile-check-r4" x="317.2" y="264" textLength="109.8" clip-path="url(#compile-check-line-10)">timed_out</text><text class="compile-check-r2" x="427" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">=</text><text class="compile-check-r8" x="439.2" y="264" textLength="61" clip-path="url(#compile-check-line-10)">False</text><text class="compile-check-r4" x="512.4" y="264" textLength="122" clip-path="url(#compile-check-line-10)">java_files</text><text class="compile-check-r2" x="634.4" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">=</text><text class="compile-check-r7" x="646.6" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">1</text><text class="compile-check-r4" x="671" y="264" textLength="85.4" clip-path="url(#compile-check-line-10)">stubbed</text><text class="compile-check-r2" x="756.4" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">=</text><text class="compile-check-r7" x="768.6" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">0</text><text class="compile-check-r4" x="793" y="264" textLength="85.4" clip-path="url(#compile-check-line-10)">flagged</text><text class="compile-check-r2" x="878.4" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">=</text><text class="compile-check-r7" x="890.6" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">1</text><text class="compile-check-r4" x="915" y="264" textLength="134.2" clip-path="url(#compile-check-line-10)">peak_rss_mb</text><text class="compile-check-r2" x="1049.2" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">=</text><text class="compile-check-r7" x="1061.4" y="264" textLength="36.6" clip-path="url(#compile-check-line-10)">116</text><text class="compile-check-r2" x="1220" y="264" textLength="12.2" clip-path="url(#compile-check-line-10)">
+</text><text class="compile-check-r4" x="0" y="288.4" textLength="85.4" clip-path="url(#compile-check-line-11)">heap_mb</text><text class="compile-check-r2" x="85.4" y="288.4" textLength="12.2" clip-path="url(#compile-check-line-11)">=</text><text class="compile-check-r7" x="97.6" y="288.4" textLength="48.8" clip-path="url(#compile-check-line-11)">1708</text><text class="compile-check-r4" x="158.6" y="288.4" textLength="158.6" clip-path="url(#compile-check-line-11)">out_of_memory</text><text class="compile-check-r2" x="317.2" y="288.4" textLength="12.2" clip-path="url(#compile-check-line-11)">=</text><text class="compile-check-r8" x="329.4" y="288.4" textLength="61" clip-path="url(#compile-check-line-11)">False</text><text class="compile-check-r2" x="1220" y="288.4" textLength="12.2" clip-path="url(#compile-check-line-11)">
+</text><text class="compile-check-r2" x="0" y="312.8" textLength="146.4" clip-path="url(#compile-check-line-12)">&#160;&#160;cfr&#160;class&#160;</text><text class="compile-check-r4" x="146.4" y="312.8" textLength="24.4" clip-path="url(#compile-check-line-12)">rc</text><text class="compile-check-r2" x="170.8" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">=</text><text class="compile-check-r7" x="183" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">0</text><text class="compile-check-r4" x="207.4" y="312.8" textLength="109.8" clip-path="url(#compile-check-line-12)">timed_out</text><text class="compile-check-r2" x="317.2" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">=</text><text class="compile-check-r8" x="329.4" y="312.8" textLength="61" clip-path="url(#compile-check-line-12)">False</text><text class="compile-check-r4" x="402.6" y="312.8" textLength="122" clip-path="url(#compile-check-line-12)">java_files</text><text class="compile-check-r2" x="524.6" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">=</text><text class="compile-check-r7" x="536.8" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">1</text><text class="compile-check-r4" x="561.2" y="312.8" textLength="85.4" clip-path="url(#compile-check-line-12)">stubbed</text><text class="compile-check-r2" x="646.6" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">=</text><text class="compile-check-r7" x="658.8" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">0</text><text class="compile-check-r4" x="683.2" y="312.8" textLength="85.4" clip-path="url(#compile-check-line-12)">flagged</text><text class="compile-check-r2" x="768.6" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">=</text><text class="compile-check-r7" x="780.8" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">1</text><text class="compile-check-r4" x="805.2" y="312.8" textLength="134.2" clip-path="url(#compile-check-line-12)">peak_rss_mb</text><text class="compile-check-r2" x="939.4" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">=</text><text class="compile-check-r6" x="951.6" y="312.8" textLength="48.8" clip-path="url(#compile-check-line-12)">None</text><text class="compile-check-r4" x="1012.6" y="312.8" textLength="85.4" clip-path="url(#compile-check-line-12)">heap_mb</text><text class="compile-check-r2" x="1098" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">=</text><text class="compile-check-r7" x="1110.2" y="312.8" textLength="48.8" clip-path="url(#compile-check-line-12)">1708</text><text class="compile-check-r2" x="1220" y="312.8" textLength="12.2" clip-path="url(#compile-check-line-12)">
+</text><text class="compile-check-r4" x="0" y="337.2" textLength="158.6" clip-path="url(#compile-check-line-13)">out_of_memory</text><text class="compile-check-r2" x="158.6" y="337.2" textLength="12.2" clip-path="url(#compile-check-line-13)">=</text><text class="compile-check-r8" x="170.8" y="337.2" textLength="61" clip-path="url(#compile-check-line-13)">False</text><text class="compile-check-r2" x="1220" y="337.2" textLength="12.2" clip-path="url(#compile-check-line-13)">
+</text>
+    </g>
+    </g>
+</svg>
