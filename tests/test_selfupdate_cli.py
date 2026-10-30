@@ -1,9 +1,11 @@
 import copy
 import dataclasses
+import os
 import re
 import signal
 import sys
 import types
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -39,9 +41,11 @@ class Update:
         self.snapshot_modules = False
         self.modules = None
         self.cmds = []
+        self.envs = []
 
-    def run_uv(self, cmd):
+    def run_uv(self, cmd, env=None):
         self.cmds.append(cmd)
+        self.envs.append(env)
         if self.during is not None:
             self.seen_during.append(self.during())
         if self.snapshot_modules:
@@ -148,6 +152,19 @@ def test_update_passes_the_receipt_python(upd):
     upd.install = dataclasses.replace(upd.install, python="3.12")
     upd.invoke()
     assert upd.cmds[0][3:5] == ["--python", "3.12"]
+
+
+def test_update_gives_uv_the_folders_of_this_install(upd, monkeypatch, tmp_path):
+    # the shell of the update has other uv folders than the shell of the install: uv must update this install
+    monkeypatch.setenv("UV_TOOL_DIR", "/other/tools")
+    monkeypatch.setenv("UV_TOOL_BIN_DIR", "/other/bin")
+    monkeypatch.setenv("XDG_DATA_HOME", "/other/data")
+    upd.install = dataclasses.replace(upd.install, exe=tmp_path / "bin" / "decaf")
+    assert upd.invoke().exit_code == 0
+    env = upd.envs[0]
+    assert env["UV_TOOL_DIR"] == str(Path(sys.prefix).parent)  # the folder that holds the venv of this decaf
+    assert env["UV_TOOL_BIN_DIR"] == str(tmp_path / "bin")
+    assert env["XDG_DATA_HOME"] == "/other/data"  # the other variables come from the environment of decaf
 
 
 def test_receipt_without_the_new_rev(upd):
@@ -324,6 +341,11 @@ def test_no_new_imports_after_uv(upd, monkeypatch, tmp_path, windows, result, wr
 
 def test_run_uv_gives_the_exit_code():
     assert selfupdate.run_uv([sys.executable, "-c", "raise SystemExit(3)"]) == (3, False)
+
+
+def test_run_uv_gives_uv_the_environment():
+    child = "import os, sys; sys.exit(os.environ.get('DECAF_TEST_ENV') != 'set')"
+    assert selfupdate.run_uv([sys.executable, "-c", child], env={**os.environ, "DECAF_TEST_ENV": "set"}) == (0, False)
 
 
 def test_run_uv_raises_for_a_missing_program(tmp_path):

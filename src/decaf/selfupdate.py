@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -179,6 +179,19 @@ def uv_command(uv: str, release: Release, install: Install, *, windows: bool, ba
     return [uv, "tool", "install", *(["--python", python] if python is not None else []), release.spec]
 
 
+def uv_env(prefix: Path, install: Install, env: Mapping[str, str]) -> dict[str, str]:
+    """The environment of the uv child: `env` with the tool folder and the bin folder of the
+    active install. `prefix` is the venv of the active decaf in the tool folder.
+
+    uv reads these folders from UV_TOOL_DIR and UV_TOOL_BIN_DIR, else from XDG_DATA_HOME and
+    its defaults. With other values in the shell of the update, uv installs a second decaf.
+    """
+    child = {**env, "UV_TOOL_DIR": str(prefix.parent)}
+    if install.exe is not None:
+        child["UV_TOOL_BIN_DIR"] = str(install.exe.parent)
+    return child
+
+
 def move_exe_aside(exe: Path) -> Path | None:
     """Rename the exe to a free .old name, and give that path; None when `exe` is not a file.
     On Windows, uv cannot copy a new exe over an active one (astral-sh/uv#11930), but a
@@ -205,9 +218,10 @@ def restore_exe(exe: Path, aside: Path | None) -> None:
         aside.rename(exe)
 
 
-def run_uv(cmd: list[str]) -> tuple[int, bool]:
-    """Run uv with the stdout and the stderr of decaf. Give the exit code of uv, and True
-    when a Ctrl-C came. An OSError of Popen means that uv did not start.
+def run_uv(cmd: list[str], env: Mapping[str, str] | None = None) -> tuple[int, bool]:
+    """Run uv with the stdout and the stderr of decaf, in the environment `env`. Give the
+    exit code of uv, and True when a Ctrl-C came. An OSError of Popen means that uv did not
+    start.
 
     A Ctrl-C goes to uv too. While uv runs, the SIGINT handler only notes the Ctrl-C, so
     decaf waits for uv to end, then restores the exe and writes its text. SIG_IGN is not
@@ -216,7 +230,7 @@ def run_uv(cmd: list[str]) -> tuple[int, bool]:
     stops: list[int] = []
     old = signal.signal(signal.SIGINT, lambda signum, frame: stops.append(signum))
     try:
-        code = subprocess.Popen(cmd).wait()
+        code = subprocess.Popen(cmd, env=env).wait()
     finally:
         signal.signal(signal.SIGINT, old)
     return code, bool(stops)

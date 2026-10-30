@@ -136,6 +136,19 @@ def test_uv_command_windows_pins_the_venv_python(base, python, want):
         "uv", "tool", "install", *want, SPEC]
 
 
+@pytest.mark.parametrize("with_exe", [False, True])
+def test_uv_env_names_the_folders_of_this_install(tmp_path, with_exe):
+    # uv takes its tool folder and its bin folder from the environment: with the values of another
+    # shell, uv installs a second decaf in other folders and leaves this install as it is
+    env = {"PATH": "/bin", "UV_TOOL_DIR": "/other/tools", "UV_TOOL_BIN_DIR": "/other/bin"}
+    inst = selfupdate.Install("uv-tool", exe=tmp_path / "bin" / "decaf" if with_exe else None)
+    want = {**env, "UV_TOOL_DIR": str(tmp_path / "tools")}
+    if with_exe:
+        want["UV_TOOL_BIN_DIR"] = str(tmp_path / "bin")
+    assert selfupdate.uv_env(tmp_path / "tools" / "decaf", inst, env) == want
+    assert env["UV_TOOL_DIR"] == "/other/tools"  # a new dict: the environment of decaf stays as it is
+
+
 def test_base_python_needs_a_file(tmp_path, monkeypatch):
     # without a base Python file, uv_command on Windows uses the python pin of the receipt
     py = tmp_path / "python.exe"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import os
 import shlex
 import shutil
 import signal
@@ -780,6 +781,7 @@ def self_update(
         windows = selfupdate.WINDOWS
         cmd = selfupdate.uv_command(uv, release, install, windows=windows,
                                     base=selfupdate.base_python() if windows else None)
+        env = selfupdate.uv_env(Path(sys.prefix), install, os.environ)  # the folders of this install, not of the shell (#155)
         # uv can replace the files of decaf and of its packages, so a later import can get new
         # code. After uv starts, decaf imports nothing: it makes each text here, writes it with
         # print(), and leaves with typer.Exit (#155).
@@ -798,7 +800,7 @@ def self_update(
         by_hand = f"\nrename {aside} to {install.exe} by hand"
 
         try:
-            code, interrupted = selfupdate.run_uv(cmd)
+            code, interrupted = selfupdate.run_uv(cmd, env=env)
         except OSError as exc:  # for example, antivirus software blocks uv.exe
             text, exit_code = f"{no_start}{exc}", 1
         else:
