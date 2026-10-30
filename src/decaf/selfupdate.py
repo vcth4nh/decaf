@@ -184,9 +184,10 @@ def uv_env(prefix: Path, install: Install, env: Mapping[str, str]) -> dict[str, 
     """The environment of the uv child: `env` with the tool folder and the bin folder of the
     active install. `prefix` is the venv of the active decaf in the tool folder.
 
-    uv reads the tool folder from UV_TOOL_DIR, else from XDG_DATA_HOME, and the bin folder from
-    UV_TOOL_BIN_DIR, else from XDG_BIN_HOME, else from XDG_DATA_HOME. Without these variables,
-    uv uses its defaults. With other values in the shell of the update, uv installs a second decaf.
+    uv reads the tool folder from UV_TOOL_DIR, else from XDG_DATA_HOME on Unix. It reads the
+    bin folder from UV_TOOL_BIN_DIR, else from XDG_BIN_HOME, else from XDG_DATA_HOME/../bin.
+    Without these variables, uv uses its defaults. With other values in the shell of the
+    update, uv installs a second decaf.
     """
     child = {**env, "UV_TOOL_DIR": str(prefix.parent)}
     if install.exe is not None:

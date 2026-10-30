@@ -263,16 +263,18 @@ def test_windows_without_the_exe_still_updates(upd, monkeypatch, tmp_path):
     assert upd.invoke().exit_code == 0 and len(upd.cmds) == 1
 
 
-def test_exe_that_cannot_move_stops_the_update(upd, monkeypatch, tmp_path):
-    # without the rename, uv cannot replace the active exe on Windows: uv must not start
+@pytest.mark.parametrize("owner,name", [(selfupdate, "aside_path"), (Path, "rename")], ids=["lookup", "rename"])
+def test_exe_that_cannot_move_stops_the_update(upd, monkeypatch, tmp_path, owner, name):
+    # without the rename, uv cannot replace the active exe on Windows: uv must not start. The lookup of
+    # the .old path can fail too: is_file() and exists() can raise PermissionError
     exe = tmp_path / "decaf.exe"
     exe.write_bytes(b"old")
     monkeypatch.setattr(selfupdate, "WINDOWS", True)
 
-    def in_use(self, target):
+    def in_use(*args):
         raise PermissionError("in use")
 
-    monkeypatch.setattr(Path, "rename", in_use)
+    monkeypatch.setattr(owner, name, in_use)
     upd.install = dataclasses.replace(upd.install, exe=exe)
     r = upd.invoke()
     assert r.exit_code == 1 and upd.cmds == []
@@ -329,9 +331,30 @@ def test_ctrl_c_in_the_exe_rename(upd, monkeypatch, tmp_path, restore_works):
     assert r.exit_code == 130 and "error: the update stopped. Run `decaf self-update` again" in r.output
     assert upd.cmds == []
     if restore_works:
-        assert exe.exists() and exe.read_bytes() == b"old"
+        assert exe.exists() and exe.read_bytes() == b"old" and "by hand" not in r.output
     else:
         assert r.output.endswith(f"\nrename {tmp_path / 'decaf.exe.old'} to {exe} by hand\n")
+
+
+def test_ctrl_c_before_the_exe_rename(upd, monkeypatch, tmp_path):
+    # a Ctrl-C at the start of Path.rename, before the OS call: aside is set, but the exe keeps its
+    # name, so the restore does nothing and the text names no .old file
+    exe = tmp_path / "decaf.exe"
+    exe.write_bytes(b"old")
+    monkeypatch.setattr(selfupdate, "WINDOWS", True)
+    real_rename = Path.rename
+
+    def ctrl_c_then_rename(self, target):
+        if self == exe:
+            raise KeyboardInterrupt
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", ctrl_c_then_rename)
+    upd.install = dataclasses.replace(upd.install, exe=exe)
+    r = upd.invoke()
+    assert r.exit_code == 130 and upd.cmds == []
+    assert "error: the update stopped" in r.output and "by hand" not in r.output
+    assert exe.read_bytes() == b"old" and not (tmp_path / "decaf.exe.old").exists()
 
 
 def test_ctrl_c_during_uv(upd, monkeypatch, tmp_path):
