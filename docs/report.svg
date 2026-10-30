@@ -1,0 +1,96 @@
+<svg role="img" width="1238" height="367.2" class="rich-terminal" viewBox="0 0 1238 367.2" xmlns="http://www.w3.org/2000/svg">
+    <title>decaf / report excerpts</title>
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    .report-matrix {
+        font-family: "DejaVu Sans Mono", monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .report-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .report-r1 { fill: #89b4fa;font-weight: bold }
+.report-r2 { fill: #cdd6f4 }
+.report-r3 { fill: #a6e3a1;font-weight: bold }
+.report-r4 { fill: #878ca4 }
+.report-r5 { fill: #94e2d5;font-weight: bold }
+.report-r6 { fill: #cdd6f4;font-weight: bold }
+.report-r7 { fill: #cba6f7 }
+    </style>
+
+    <defs>
+    <clipPath id="report-clip-terminal">
+      <rect x="0" y="0" width="1219.0" height="316.2" />
+    </clipPath>
+    <clipPath id="report-line-0">
+    <rect x="0" y="1.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-1">
+    <rect x="0" y="25.9" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-2">
+    <rect x="0" y="50.3" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-3">
+    <rect x="0" y="74.7" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-4">
+    <rect x="0" y="99.1" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-5">
+    <rect x="0" y="123.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-6">
+    <rect x="0" y="147.9" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-7">
+    <rect x="0" y="172.3" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-8">
+    <rect x="0" y="196.7" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-9">
+    <rect x="0" y="221.1" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-10">
+    <rect x="0" y="245.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="report-line-11">
+    <rect x="0" y="269.9" width="1220" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#1e1e2e" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1236" height="365.2" rx="8"/><text class="report-title" fill="#cdd6f4" text-anchor="middle" x="618" y="27">decaf&#160;/&#160;report&#160;excerpts</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+
+    <g transform="translate(9, 41)" clip-path="url(#report-clip-terminal)">
+
+    <g class="report-matrix">
+    <text class="report-r1" x="0" y="20" textLength="256.2" clip-path="url(#report-line-0)">$&#160;decaf&#160;report&#160;mirror</text><text class="report-r2" x="1220" y="20" textLength="12.2" clip-path="url(#report-line-0)">
+</text><text class="report-r3" x="0" y="44.4" textLength="183" clip-path="url(#report-line-1)">Completed&#160;in&#160;5s</text><text class="report-r2" x="1220" y="44.4" textLength="12.2" clip-path="url(#report-line-1)">
+</text><text class="report-r2" x="1220" y="68.8" textLength="12.2" clip-path="url(#report-line-2)">
+</text><text class="report-r4" x="0" y="93.2" textLength="109.8" clip-path="url(#report-line-3)">Artifacts</text><text class="report-r5" x="134.2" y="93.2" textLength="12.2" clip-path="url(#report-line-3)">2</text><text class="report-r2" x="146.4" y="93.2" textLength="158.6" clip-path="url(#report-line-3)">&#160;processed&#160;·&#160;</text><text class="report-r5" x="305" y="93.2" textLength="12.2" clip-path="url(#report-line-3)">2</text><text class="report-r2" x="317.2" y="93.2" textLength="109.8" clip-path="url(#report-line-3)">&#160;complete</text><text class="report-r2" x="1220" y="93.2" textLength="12.2" clip-path="url(#report-line-3)">
+</text><text class="report-r4" x="0" y="117.6" textLength="109.8" clip-path="url(#report-line-4)">Sources&#160;&#160;</text><text class="report-r5" x="134.2" y="117.6" textLength="12.2" clip-path="url(#report-line-4)">0</text><text class="report-r2" x="146.4" y="117.6" textLength="109.8" clip-path="url(#report-line-4)">&#160;Maven&#160;·&#160;</text><text class="report-r5" x="256.2" y="117.6" textLength="12.2" clip-path="url(#report-line-4)">2</text><text class="report-r2" x="268.4" y="117.6" textLength="170.8" clip-path="url(#report-line-4)">&#160;decompiled&#160;·&#160;</text><text class="report-r5" x="439.2" y="117.6" textLength="12.2" clip-path="url(#report-line-4)">0</text><text class="report-r2" x="451.4" y="117.6" textLength="122" clip-path="url(#report-line-4)">&#160;extracted</text><text class="report-r2" x="1220" y="117.6" textLength="12.2" clip-path="url(#report-line-4)">
+</text><text class="report-r4" x="0" y="142" textLength="109.8" clip-path="url(#report-line-5)">Memory&#160;&#160;&#160;</text><text class="report-r2" x="109.8" y="142" textLength="109.8" clip-path="url(#report-line-5)">&#160;&#160;budget&#160;</text><text class="report-r5" x="219.6" y="142" textLength="36.6" clip-path="url(#report-line-5)">2.0</text><text class="report-r2" x="256.2" y="142" textLength="231.8" clip-path="url(#report-line-5)">&#160;GB&#160;·&#160;largest&#160;peak&#160;</text><text class="report-r5" x="488" y="142" textLength="36.6" clip-path="url(#report-line-5)">0.1</text><text class="report-r2" x="524.6" y="142" textLength="48.8" clip-path="url(#report-line-5)">&#160;GB&#160;</text><text class="report-r6" x="573.4" y="142" textLength="12.2" clip-path="url(#report-line-5)">(</text><text class="report-r2" x="585.6" y="142" textLength="97.6" clip-path="url(#report-line-5)">app.war!</text><text class="report-r7" x="683.2" y="142" textLength="158.6" clip-path="url(#report-line-5)">/WEB-INF/lib/</text><text class="report-r7" x="841.8" y="142" textLength="134.2" clip-path="url(#report-line-5)">greeter.jar</text><text class="report-r2" x="976" y="142" textLength="146.4" clip-path="url(#report-line-5)">,&#160;vineflower</text><text class="report-r6" x="1122.4" y="142" textLength="12.2" clip-path="url(#report-line-5)">)</text><text class="report-r2" x="1220" y="142" textLength="12.2" clip-path="url(#report-line-5)">
+</text><text class="report-r2" x="1220" y="166.4" textLength="12.2" clip-path="url(#report-line-6)">
+</text><text class="report-r4" x="0" y="190.8" textLength="73.2" clip-path="url(#report-line-7)">Output</text><text class="report-r2" x="73.2" y="190.8" textLength="97.6" clip-path="url(#report-line-7)">&#160;&#160;mirror</text><text class="report-r2" x="1220" y="190.8" textLength="12.2" clip-path="url(#report-line-7)">
+</text><text class="report-r4" x="0" y="215.2" textLength="73.2" clip-path="url(#report-line-8)">Report</text><text class="report-r2" x="73.2" y="215.2" textLength="317.2" clip-path="url(#report-line-8)">&#160;&#160;mirror/decaf-report.json</text><text class="report-r2" x="1220" y="215.2" textLength="12.2" clip-path="url(#report-line-8)">
+</text><text class="report-r2" x="1220" y="239.6" textLength="12.2" clip-path="url(#report-line-9)">
+</text><text class="report-r1" x="0" y="264" textLength="366" clip-path="url(#report-line-10)">$&#160;decaf&#160;report&#160;mirror&#160;--memory</text><text class="report-r2" x="1220" y="264" textLength="12.2" clip-path="url(#report-line-10)">
+</text><text class="report-r5" x="24.4" y="288.4" textLength="36.6" clip-path="url(#report-line-11)">0.1</text><text class="report-r2" x="61" y="288.4" textLength="122" clip-path="url(#report-line-11)">&#160;GB&#160;&#160;heap&#160;</text><text class="report-r5" x="183" y="288.4" textLength="36.6" clip-path="url(#report-line-11)">1.7</text><text class="report-r2" x="219.6" y="288.4" textLength="414.8" clip-path="url(#report-line-11)">&#160;GB&#160;&#160;&#160;vineflower&#160;archive&#160;&#160;app.war!</text><text class="report-r7" x="634.4" y="288.4" textLength="158.6" clip-path="url(#report-line-11)">/WEB-INF/lib/</text><text class="report-r7" x="793" y="288.4" textLength="134.2" clip-path="url(#report-line-11)">greeter.jar</text><text class="report-r2" x="1220" y="288.4" textLength="12.2" clip-path="url(#report-line-11)">
+</text><text class="report-r5" x="24.4" y="312.8" textLength="36.6" clip-path="url(#report-line-12)">0.1</text><text class="report-r2" x="61" y="312.8" textLength="122" clip-path="url(#report-line-12)">&#160;GB&#160;&#160;heap&#160;</text><text class="report-r5" x="183" y="312.8" textLength="36.6" clip-path="url(#report-line-12)">1.7</text><text class="report-r2" x="219.6" y="312.8" textLength="402.6" clip-path="url(#report-line-12)">&#160;GB&#160;&#160;&#160;vineflower&#160;archive&#160;&#160;app.war</text><text class="report-r2" x="1220" y="312.8" textLength="12.2" clip-path="url(#report-line-12)">
+</text>
+    </g>
+    </g>
+</svg>

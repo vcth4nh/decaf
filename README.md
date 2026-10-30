@@ -1,32 +1,28 @@
 # decaf
 
-All-in-one Java decompiler CLI. Point it at a folder; it decompiles every
-`.jar` / `.war` / `.ear` / `.aar` / loose `.class` it finds (including archives
-nested inside archives — one level deep by default, `--max-depth` to change)
-into a source tree that mirrors your input, or one merged package tree with
-`--merge`.
+decaf turns Java archives and loose `.class` files into source trees. It
+scans folders for `.jar`, `.war`, `.ear`, and `.aar` files, including nested
+archives (one level deep by default; change it with `--max-depth`). Sources
+mirror your input, or form one merged package tree with `--merge`.
 
-![decaf demo — sources-first resolution and live decompile progress](docs/demo.gif)
+![decaf decompiling a sample WAR, checking its Java sources, and inspecting the report](docs/demo.gif)
 
-- **Sources first:** artifacts that resolve to a Maven GAV (embedded
-  `pom.properties` or coordinates guessed from the filename/manifest, each
-  proven against the repo's `.jar.sha1`, or a SHA-1 lookup on Maven Central)
-  get their real `-sources.jar` downloaded instead of decompiled. The
-  report records how each artifact resolved — or why it didn't. Transient
-  network errors are retried with backoff and never mistaken for missing
-  sources; when resolution degrades to decompilation over a network
-  failure, decaf warns loudly and tags the report (`sources_miss:
-  "network: …"`, `totals.network_misses`). Lookup verdicts are cached
-  on disk as well — sha1→GAV matches forever, "no sources published"
-  answers for a week — so warm re-runs skip the index and probe traffic
-  entirely, and a network hiccup can't hide sources that are already
-  cached. `--fresh-maven` re-derives verdicts; `decaf cache clean`
-  wipes cached sources and verdicts.
+- **Sources first:** decaf downloads published `-sources.jar` files when it
+  can match an artifact to Maven coordinates (group, artifact, version).
+  Coordinates from `pom.properties` or filename/manifest guesses must match
+  the repository's `.jar.sha1`; a SHA-1 lookup on Maven Central can also
+  resolve them. The report records each match or miss. Network errors are
+  retried with backoff; falling back to decompilation after a network failure
+  produces a warning and report entries (`sources_miss: "network: …"`,
+  `totals.network_misses`). SHA-1 matches are cached indefinitely and verified
+  misses for a week, so later runs can reuse cached sources without a lookup.
+  `--fresh-maven` rechecks verdicts; `decaf cache clean` removes cached
+  sources and verdicts.
 - **Five engines, automatic fallback:** Vineflower → CFR → Fernflower →
   Procyon → JD-CLI. If an engine crashes, times out, misses classes, or
   writes a stub in place of a method body, the next one takes over
   (whole-archive and per-class retries).
-- **Compile check:** decaf compiles each decompiled file with `javac` and
+- **Compile check:** decaf checks decompiled Java files with `javac` and
   gives a class with decompiler errors to the next engine (see
   [Compile check](#compile-check)).
 - **Engines auto-download** on first use (pinned versions, sha256-verified)
@@ -36,7 +32,7 @@ into a source tree that mirrors your input, or one merged package tree with
 
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - Java on PATH that can run the engines that you use. `decaf engines list`
-  shows the Java that each engine needs. When the Java is too old for the
+  shows their compatibility with your Java. When Java is too old for the
   primary engine, the run stops and gives a hint.
 - A JDK (with `javac`) for the compile check. With a JRE only, decaf runs
   without the check and prints one note.
@@ -77,6 +73,8 @@ npx skills add vcth4nh/decaf
 
 ## Usage
 
+Repository URLs in the examples are placeholders; replace them with your own.
+
 ```bash
 decaf ./libs                        # one folder per archive under ./decaf-out
 decaf app.war -o out --merge        # single merged source tree in out/src
@@ -90,30 +88,32 @@ decaf ./libs --max-depth 2          # also unpack jars nested two archives deep
 decaf ./libs --repo https://nexus.mycorp.com/repository/maven-public
 ```
 
-Exit codes: `0` all artifacts succeeded · `1` some failed (see
+Use a new or empty output directory, or pass `--force` to write into an
+existing one. `--force` does not remove files left by earlier runs.
+
+Exit codes: `0` no artifacts failed · `1` some failed (see
 `decaf-out/decaf-report.json`) · `2` usage/environment error · `130`
 interrupted by Ctrl-C, SIGTERM, or SIGHUP (under `nohup`, SIGHUP stays
-ignored). An interrupted run still writes its report (status
-`interrupted`), and a run that an error stops writes it with the status
-`aborted`.
+ignored). Interrupted runs write a report with status `interrupted`;
+errors that stop a run set `aborted`.
+
+Partial results, skipped archives, and merge collisions can still exit `0`.
+Check the report's `totals.partial`, `totals.skipped`, and `totals.collisions`
+when completeness matters.
 
 `--format json` prints the run report as one JSON document to stdout after
 the run (byte-identical to `decaf-report.json`); `--format ndjson` streams
-one JSON object per line as the run progresses instead — `scan`, `artifact`
+one JSON object per line as the run progresses: `scan`, `artifact`
 (per completion), `warning`, then a final `summary` line carrying `status`
-and the report path. Both modes send all human narration (status lines, the
-ending block) to stderr instead of stdout, so stdout stays machine-parseable
-even on a usage error (empty stdout, exit `2`); `-q`/`-v` still govern that
-stderr narration exactly as in the default `human` format. Exit codes are
-unchanged across all three formats.
+and the report path. Both modes send narration to stderr, keeping stdout
+machine-parseable (empty on usage errors, exit `2`). `-q`/`-v` control stderr
+narration. Exit codes are the same in all three formats.
 
 Everything after a literal `--` is passed verbatim to the engine invocation
-— the escape hatch for the engines' own option surfaces (CFR's
-`--renameillegalidents true`, fernflower's `-dgs=1`, …). It requires
+(CFR's `--renameillegalidents true`, Fernflower's `-dgs=1`, …). It requires
 `--no-fallback`: option dialects are engine-specific, and a fallback engine
-would not understand them. Passthrough tokens are yours — decaf does not
-validate them, and colliding with the flags decaf manages itself (like CFR's
-`--outputdir`) is unsupported.
+would not understand them. decaf does not validate these tokens; colliding
+with flags decaf manages itself (like CFR's `--outputdir`) is unsupported.
 
 Archive nesting is capped by `--max-depth` (default 1: jars inside a war or
 fat jar are processed, but not jars inside those). Deeper archives are listed
@@ -123,7 +123,7 @@ does, and warns when the two are not the same.
 
 CPU use is budgeted. On Linux the budget is enforced with CPU affinity:
 decaf pins itself to the first `cpus` cores and every engine JVM inherits
-the mask, so the rest of the machine stays genuinely free. Each JVM is also
+the mask. Each JVM is also
 started with `-XX:ActiveProcessorCount = cpus ÷ jobs` to size its thread
 pools (on other platforms this hint is the only limit). The default budget
 is all the cores that decaf may use (its CPU affinity, for example from
@@ -137,14 +137,14 @@ decompile slots.
 
 Memory use is budgeted too. All engine JVMs together get one heap budget:
 80% of the RAM by default (or of a lower memory limit of decaf's cgroup or a
-parent cgroup, for example in a container or a systemd scope),
-`--memory 8g` to set it, `--memory 0` to turn the cap off (each JVM then takes
-the JVM default, 25% of the RAM). The budget is split in equal shares, one for
-each job; a whale (3000 or more classes) gets two shares, and `-j` is lowered
+parent cgroup, for example in a container or a systemd scope).
+Use `--memory 8g` to set it or `--memory 0` to let the JVM choose its heap. The
+budget is split in equal shares, one for each job; an archive with 3000 or
+more classes (a "whale") gets two shares, and `-j` is lowered
 when a share would fall below 1 GiB of heap. Each heap is its share less the
 JVM's own memory: 300 MB plus 2% of the share. With the default budget, no JVM
-gets more heap than the JVM default either, so a whale or a low `-j` never
-gets more than before; an explicit `--memory` uses the plain shares. Before
+gets more than 25% of the available RAM; an explicit `--memory` uses the
+plain shares. This caps Java heaps, not total process memory. Before
 the decompile starts, decaf prints the split and warns when an artifact
 probably needs more heap than its share. The report records the peak memory
 (on Linux, unknown for a peak near or below the memory of decaf)
@@ -168,33 +168,36 @@ decaf report out --network-fallbacks  # artifacts that lost sources to network f
 decaf report out --memory             # the ten engine JVMs with the largest peak memory
 ```
 
-`decaf report` re-renders a `decaf-report.json` offline, without re-running anything —
-no flags reprints the same outcome-led ending shown at the end of a run. `PATH` may be
-the output directory or the JSON file itself (default: `decaf-out`).
+`decaf report` reads `decaf-report.json` offline. With no flags, it prints
+the run summary. `PATH` may be the output directory or the JSON file itself
+(default: `decaf-out`).
+
+![Report excerpts from a sample WAR, showing completed artifacts, source counts, heap limits, and measured memory peaks](docs/report.svg)
 
 ## Output layouts
 
 **Mirror (default):** the output mirrors the input tree, one directory per
 archive: `in/libs/app.war` → `out/libs/app.war/WEB-INF/lib/dep.jar/<sources>`.
-The tree is faithful to the input — every non-class file is carried over
-from the original archive byte-for-byte (even when the sources came from
-Maven, or when every engine failed), `.class` files are replaced by
-decompiled `.java`/`.kt`, and nested archives become directories. Archives
-nested beyond `--max-depth` are copied through unchanged as files.
+Non-class files are copied from the original archive byte-for-byte
+(even when sources came from Maven or every engine failed). `.class` files
+are replaced by decompiled `.java`/`.kt`, and nested archives become
+directories. Archives nested beyond `--max-depth` are copied through unchanged as files.
 `--no-resource` keeps the mirrored layout but writes decompiled/extracted
-sources only. Carve-outs: corrupt archives are reported but not copied,
-and a stray `.java`/`.kt` shipped inside a binary jar is dropped in favor
-of the decompiler's output.
+sources only. Corrupt archives are reported but not copied, damaged entries
+are skipped, and a stray `.java`/`.kt` shipped inside a binary jar is dropped
+in favor of the decompiler's output.
 
 **Merged (`--merge`):** every artifact's source files (`.java`/`.kt`) are
-merged into `OUTPUT/src/` by package — ready to open in an IDE. Duplicate classes are
+merged into `OUTPUT/src/` by package. Duplicate classes are
 deduped; conflicting duplicates are first-wins (deterministic by input path
 order) and recorded in the report. Container prefixes like `WEB-INF/classes/`
 are stripped. Resources are skipped (counted in the report).
 
+![The same sample WAR in mirror and merged layouts: mirror keeps the nested JAR and web.xml; merge puts both Java files under src/demo](docs/output-layouts.svg)
+
 ## Compile check
 
-After an engine writes a class, decaf compiles its source file alone with
+After an engine writes a Java class, decaf checks its source file alone with
 `javac` and writes no class files. This finds errors that the decompiler made,
 for example a variable that the engine renamed in its uses but not in its
 declaration. A class with a parse, name, or flow error goes to the next engine
@@ -223,13 +226,13 @@ For each flagged and noted file,
 the report gives the javac errors in line order (at most 100). It also lists
 the files that the check could not examine under `unchecked`, with the reason.
 `decaf report OUTPUT --artifact NAME` shows these lists.
+Kotlin `.kt` output is `unchecked`; Maven sources are not checked.
 
 The classpath of the check is the input itself: the archive, the other
 archives of the same war, fat jar, or input folder, and their
-`WEB-INF/classes` or `BOOT-INF/classes`. A file that refers to a class outside
-this classpath is not checked (`unchecked`), so an absent dependency never
-causes a false flag. Thus the check examines most files of a war or a fat jar,
-but few files of a single library jar without its dependencies.
+`WEB-INF/classes` or `BOOT-INF/classes`. Missing dependencies usually make a
+file `unchecked`, but syntax errors still flag it. Supplying the dependency
+jars lets the checker examine more files.
 
 decaf uses the `javac` of the `java` on PATH. It must be at least as new as
 the class files: for newer class files, decaf prints the Java version that the
@@ -272,12 +275,15 @@ no upstream sources: decaf decompiles it.
 
 ## Engines
 
+These are the built-in pins and their minimum Java versions. Config
+overrides can require newer Java; `decaf engines list` checks the active pins.
+
 | Engine | Version | Min Java | License |
 |---|---|---|---|
 | [Vineflower](https://github.com/Vineflower/vineflower) | 1.12.0 | 17 | Apache-2.0 |
 | [CFR](https://github.com/leibnitz27/cfr) | 0.152 | 11 | MIT |
-| [Procyon](https://github.com/mstrobel/procyon) | 0.6.0 | 11 | Apache-2.0 |
 | [Fernflower](https://github.com/JetBrains/intellij-community/tree/master/plugins/java-decompiler/engine) (JetBrains `java-decompiler-engine`) | 253.33813.25 | 21 | Apache-2.0 |
+| [Procyon](https://github.com/mstrobel/procyon) | 0.6.0 | 11 | Apache-2.0 |
 | [JD-CLI](https://github.com/intoolswetrust/jd-cli) | 1.2.0 | 11 | GPL-3.0 |
 
 A multi-release jar can have more versions of a class under
@@ -301,8 +307,9 @@ decaf engines update --reset   # back to built-in pins
 ```
 
 `update` verifies downloads against upstream-published checksums (sha256, or
-sha1 with a warning when that's all the repo offers; an engine publishing no checksum at all fails closed — reported with a red ✗ and exit code 1 — keeping its current pin) and records the new pin under `[engines.NAME]`
-in your config file — note that rewriting drops hand-written comments there.
+sha1 with a warning when that's all the repo offers). Without a checksum, it
+keeps the current pin, prints a red ✗, and exits 1. New pins go under
+`[engines.NAME]` in your config file; rewriting it drops hand-written comments.
 Every later run verifies the cached jar against that pin, exactly like the
 built-in ones. Like folders named `engines`, `cache`, or `report`, a folder literally
 named `run` needs an explicit path (`decaf ./run`).
@@ -312,10 +319,10 @@ read the Java that a cached engine jar needs from its class files. A fallback
 engine that needs a newer Java is skipped with a warning, and `update` warns
 when the java on PATH is too old for the new pin.
 
-On Java 19+, the engine JVMs keep CDS archives (`.jsa`) next to the engine
-jars, so that later runs start faster. `clean --stale` keeps the archives of
-the active pins. With a read-only engine cache, decaf runs the JVMs without
-these archives.
+On Java 19+, engine JVMs keep class-data-sharing (CDS) archives (`.jsa`) next
+to the engine jars so that later runs start faster. `clean --stale` keeps
+the archives of active pins. With a read-only engine cache, decaf runs the
+JVMs without these archives.
 
 ## Development
 
@@ -324,6 +331,11 @@ uv sync
 uv run pytest                      # fast offline suite
 uv run pytest -m "slow or network" # + real-engine and live-Maven integration
 ```
+
+Regenerate the README's SVGs with `uv run python docs/render_media.py`.
+Add `--gif` to record the demo with [VHS](https://github.com/charmbracelet/vhs).
+The script compiles a sample WAR and runs the built-in Vineflower pin,
+downloading it if needed.
 
 ## Credits
 

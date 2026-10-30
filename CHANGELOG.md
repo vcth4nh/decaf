@@ -1,7 +1,5 @@
 # Changelog
 
-All notable changes to decaf are documented here.
-
 ## [Unreleased]
 
 ### Added
@@ -212,8 +210,8 @@ All notable changes to decaf are documented here.
   its class files, so a fallback engine that needs a newer Java is skipped.
   `engines update` now warns when the java on PATH is too old for a new pin.
   When the Java is too old for the primary engine, the error now gives a
-  hint. The README no longer gives the Java version of each engine, because
-  these versions change; `decaf engines list` shows them.
+  hint. The README distinguishes built-in Java requirements from those of
+  updated pins; `decaf engines list` checks the active pins.
 - The engine runs had smaller faults (#113). With a read-only engine cache,
   each JVM exited with code 1 after its work, because it could not write its
   CDS archive. Thus each batch ran two times. Now decaf turns CDS off when it
@@ -233,13 +231,13 @@ All notable changes to decaf are documented here.
   default budget counted all the cores of the host, also when decaf could
   use only some of them, for example under `taskset` or in a container with
   a cpuset. Then each JVM got more threads than CPUs. Now the default counts
-  the CPUs of decaf's affinity. While a whale waited for its second free
-  slot, each freed slot went to a small jar, so the whale could wait until
-  no small jars were left. Now the whale gets each slot that a small jar
-  frees. A small jar still takes a free slot when only whales run, because
-  the waiting whale needs the end of one of them.
+  the CPUs of decaf's affinity. While a large archive (3000 or more classes)
+  waited for its second free slot, each freed slot went to a small jar, so it
+  could wait until no small jars were left. Now it gets each slot a small
+  jar frees. A small jar still takes a free slot when only large archives
+  run, because the waiting archive needs one of them to finish.
 - The memory notes had gaps (#114). A jar under 3000 classes, which goes
-  into a batch, got no heap estimate. CFR and Procyon run one JVM for each
+  into a batch, got no heap estimate. CFR and Procyon ran one JVM for each
   class of a class folder, but the estimate used the size of the whole
   folder, so it gave a false warning. Now each jar gets the estimate, and
   for one JVM for each class, the estimate uses the largest class. One batch
@@ -394,8 +392,8 @@ All notable changes to decaf are documented here.
 
 - Engine JVMs now get `-Xmx` from a budget of 80% of the RAM by default (or
   of a lower memory limit of decaf's cgroup or a parent cgroup), split in
-  equal shares (a whale gets two, and `-j` is lowered when a share
-  would fall below 1 GiB). Each heap is its share less 300 MB plus 2% of the
+  equal shares (an archive with 3000 or more classes gets two, and `-j` is
+  lowered when a share would fall below 1 GiB). Each heap is its share less 300 MB plus 2% of the
   share for the JVM itself. With the default budget, no JVM gets more heap
   than the JVM default (25% of the RAM). Before, each JVM could take 25% of
   the RAM, so four jobs could fill it. An `-Xms` in `JAVA_TOOL_OPTIONS` or
@@ -440,8 +438,9 @@ All notable changes to decaf are documented here.
 
 ### Fixed
 
-- Artifact names, GAVs, and failure text with `[bracketed]` content render
-  verbatim in status lines and `decaf report --artifact` detail instead of
+- Artifact names, Maven coordinates (group, artifact, version), and failure
+  text with `[bracketed]` content render verbatim in status lines and
+  `decaf report --artifact` detail instead of
   being swallowed or crashing rendering; `:id:`-style artifactIds no longer
   turn into emoji (#89).
 - `decaf report` tolerates reports with `null`/mistyped `settings`, `totals`,
@@ -450,7 +449,7 @@ All notable changes to decaf are documented here.
   artifact once (#89).
 - HTTP 401/403 during a sources download or a candidate probe no longer
   records a 7-day negative verdict: the miss is tagged network-degraded
-  (`!` marker) and resolution is re-attempted next run — bad credentials
+  (`!` marker) and resolution is re-attempted next run, so bad credentials
   can't poison the verdict cache through either path (#89).
 - Uppercase `.JAVA`/`.KT` entries in sources jars are now counted and
   written by both output writers (extraction already kept them) (#89).
@@ -462,7 +461,7 @@ All notable changes to decaf are documented here.
 
 ### Added
 
-- `decaf report` — offline inspector over `decaf-report.json`: default
+- `decaf report`: offline inspector over `decaf-report.json`, with a default
   outcome view, `--problems`, `--artifact GLOB`, `--network-fallbacks`.
   Reads reports from any decaf version. A folder literally named `report`
   now needs `decaf ./report` (#84).
@@ -483,14 +482,14 @@ All notable changes to decaf are documented here.
 
 ### Fixed
 
-- Partial results are marked honestly: a yellow `!` (instead of a green `✓`)
+- A yellow `!` (instead of a green `✓`)
   flags artifacts with missing classes or sources lost to network failures;
   the summary and report gain a `partial` count (#83).
 - The failure recap says `…and N more failures (see report)` instead of
   silently truncating at 20 (#83).
 - Every run prints its output and `decaf-report.json` paths, and interrupted
-  runs report `completed/discovered` artifacts — the report gains an additive
-  `discovered` field so a partial run can't pass for a complete one (#83).
+  runs report `completed/discovered` artifacts. The report gains an additive
+  `discovered` field to distinguish partial runs (#83).
 - Fallback engines dropped for Java incompatibility are named in a warning
   instead of vanishing silently (#83).
 
@@ -505,15 +504,15 @@ All notable changes to decaf are documented here.
 
 ### Added
 
-- Batched decompiles report live per-member progress: batch rows are labeled
-  `batch of N` and update in place while the batch JVM runs — `87/123 classes`
-  for tree-writing engines, `queued in batch`/`decompiling`/`done, pending split`
-  for fernflower — without resetting the per-attempt elapsed clock (#71).
+- Batched decompiles report live per-member progress: rows labeled `batch of N`
+  update in place without resetting the per-attempt clock. They show
+  `87/123 classes` for tree-writing engines and
+  `queued in batch`/`decompiling`/`done, pending split` for fernflower (#71).
 - Raw engine options pass through after `--`: everything after the separator
   is handed verbatim to the engine invocation, solo and batched alike
   (`decaf ./libs --engine cfr --no-fallback -- --renameillegalidents true`).
   Requires `--no-fallback`, since option dialects are engine-specific.
-  Tokens are user-owned — decaf does not validate them, and colliding with
+  decaf does not validate these tokens, and colliding with
   decaf-managed flags is unsupported. Echoed as `engine_args` in the report
   settings (#70).
 
@@ -537,7 +536,7 @@ All notable changes to decaf are documented here.
   that solo runs preserve: the post-batch split now attributes metadata
   sources to the member whose archive contains the matching class, and two
   members claiming the same metadata file (two modular jars, or two jars
-  sharing a package) never share a batch — batch output is now identical to
+  sharing a package) never share a batch, so batch output is now identical to
   solo output (#75).
 
 ## [1.7.0] - 2026-07-24
@@ -551,14 +550,13 @@ All notable changes to decaf are documented here.
 
 ### Changed
 
-- Live stage-1 rows now show truthful sub-states — `scanning`,
+- Live preparation rows now show sub-states (`scanning`,
   `copying resources`, `resolving`, `downloading`, `extracting`,
-  `copying classes` — instead of a blanket `fetching`; `downloading`
+  `copying classes`) instead of a blanket `fetching`; `downloading`
   appears only while a network GET is actually running, so warm cached
   runs no longer imply network traffic (#65).
 - Routine cached-maven ✓ lines render dim, so decompiled, extracted, and
-  failed artifacts stand out in scrollback. Emphasis only — still exactly
-  one line per jar (#65).
+  failed artifacts stand out in scrollback. Each jar still gets one line (#65).
 
 ## [1.6.0] - 2026-07-23
 
@@ -577,8 +575,8 @@ All notable changes to decaf are documented here.
 - The `OK` summary row gains a `resource-only N` part when resource-only jars
   were mirrored, so its breakdown keeps summing to the total (#57).
 - Maven lookup verdicts are cached on disk (`<user cache>/decaf/verdicts/`):
-  positive sha1→GAV matches are kept forever, negative verdicts ("not in
-  the index", "no sources published") for 7 days, and only network-clean
+  positive SHA-1-to-Maven-coordinate matches are kept forever, negative
+  verdicts ("not in the index", "no sources published") for 7 days, and only network-clean
   misses are ever recorded. Warm re-runs skip all index and probe traffic,
   and network failures can no longer force decompilation of artifacts
   whose sources are already cached on disk (#52).
@@ -635,8 +633,8 @@ All notable changes to decaf are documented here.
   both mirror and merge modes, and `java_files` counts include them (#53).
 - Fallback order now tries Fernflower before Procyon (Vineflower → CFR →
   Fernflower → Procyon → JD-CLI). On a 19,453-class obfuscated jar, Procyon
-  wedged on a single class — burning CPU for 12+ minutes with no output
-  after completing 3,668 classes — while Fernflower decompiled the archive
+  wedged on a single class, using CPU for 12+ minutes with no output
+  after completing 3,668 classes, while Fernflower decompiled the archive
   in full and produced the fewest defects of any engine measured (0 parse
   errors; 61% of a 400-class sample had a javac error attributable to the
   decompiler, versus 62% for Procyon run per-class with a timeout, 67% for
@@ -654,7 +652,7 @@ All notable changes to decaf are documented here.
 - A pathological `Retry-After` header whose value passes `isdigit()` but not
   `float()` (e.g. "²") no longer crashes the artifact with a traceback.
 - The run summary's network line now says artifacts "fell back to
-  decompilation" instead of claiming they were all decompiled — the count
+  decompilation" instead of claiming they were all decompiled; the count
   includes artifacts whose fallback decompilation then failed.
 
 ## [1.4.0] - 2026-07-21
@@ -664,9 +662,9 @@ All notable changes to decaf are documented here.
 - Transient network errors (timeouts, connection errors, HTTP 429/5xx) during
   Maven sources resolution are retried with backoff (3 attempts, `Retry-After`
   honored on 429/503). Falling back to decompilation over a network failure now
-  warns loudly without `-v` — one warning per endpoint condition, a run-summary
-  count, and an additive `totals["network_misses"]` report field — and a
-  per-host circuit breaker gives up loudly after 3 consecutive affected
+  prints one warning per endpoint condition without `-v`, a run-summary
+  count, and an additive `totals["network_misses"]` report field. A
+  per-host circuit breaker stops requests after 3 consecutive affected
   artifacts so fully-offline runs stay fast.
 
 ### Changed
@@ -696,7 +694,7 @@ All notable changes to decaf are documented here.
 - Package-prefix groupId guessing now strips war/Spring Boot container roots
   (`WEB-INF/classes/`, `BOOT-INF/classes/`), so war-layout archives produce
   real candidates instead of junk like `WEB-INF.classes.…`.
-- Repeated artifactIds in one run no longer re-query the legacy index — the
+- Repeated artifactIds in one run no longer re-query the legacy index; the
   per-artifactId lookup is memoized for the run.
 
 ### Fixed
@@ -714,7 +712,7 @@ All notable changes to decaf are documented here.
 - Sources resolution no longer depends on the frozen legacy SHA-1 index:
   when it misses, decaf guesses candidate Maven coordinates from the
   artifact's filename, manifest, and package prefixes, and verifies each
-  against the repository's `.jar.sha1` before fetching — so artifacts newer
+  against the repository's `.jar.sha1` before fetching, so artifacts newer
   than the index freeze (mid-2025) resolve to real sources again, and forks
   or patched jars are never mismatched. The run report gains `resolved_by`
   and `sources_miss` fields, and `-v` prints one `maven <artifact>: …` line
@@ -741,8 +739,8 @@ All notable changes to decaf are documented here.
 
 ### Fixed
 
-- `--cpus` is now actually enforced on Linux: decaf pins itself — and thus
-  every engine JVM — to that many cores via CPU affinity. Previously
+- `--cpus` is now enforced on Linux: decaf pins itself and
+  every engine JVM to that many cores via CPU affinity. Previously
   `-XX:ActiveProcessorCount` only sized JVM thread pools, and JIT/GC warmup
   burst well past the budget. On macOS/Windows the budget stays hint-only.
 - If decaf itself dies uncatchably (`kill -9`, OOM-kill), the kernel now
@@ -775,8 +773,8 @@ First public release.
 - Recursive decompilation of `.jar` / `.war` / `.ear` / `.aar` and loose
   `.class` trees, including archives nested inside archives (`--max-depth`,
   default 1; deeper archives are reported as skipped, never silently dropped).
-- Five decompiler engines with automatic fallback — Vineflower, CFR, Procyon,
-  Fernflower, JD-CLI — retrying at whole-archive and per-class level. Engines
+- Five decompiler engines with automatic fallback (Vineflower, CFR, Procyon,
+  Fernflower, JD-CLI), retrying at whole-archive and per-class level. Engines
   auto-download on first use (version-pinned, sha256-verified).
 - Maven sources-first resolution: embedded `pom.properties` or SHA-1 lookup on
   Maven Central, so artifacts with published sources are fetched instead of
@@ -793,6 +791,11 @@ First public release.
 - Exit codes: `0` all succeeded · `1` some failed · `2` usage/environment
   error · `130` interrupted.
 
+[Unreleased]: https://github.com/vcth4nh/decaf/compare/v1.11.0...HEAD
+[1.11.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.11.0
+[1.10.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.10.0
+[1.9.1]: https://github.com/vcth4nh/decaf/releases/tag/v1.9.1
+[1.9.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.9.0
 [1.8.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.8.0
 [1.7.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.7.0
 [1.6.0]: https://github.com/vcth4nh/decaf/releases/tag/v1.6.0
