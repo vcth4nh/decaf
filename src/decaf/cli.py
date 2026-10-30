@@ -768,6 +768,7 @@ def self_update(
         rerun = f"Run this command in a new terminal after decaf ends:\n  {shown}"
         stopped = "error: the update stopped. Run `decaf self-update` again"
         no_rev = f"error: uv ended, but the receipt does not show {release.tag}"
+        no_start = "error: cannot start uv: "
         done = f"decaf {cur} -> {release.text}\n{release.url}"
         aside = None
         if windows and install.exe is not None:  # uv cannot replace an active exe on Windows
@@ -777,16 +778,20 @@ def self_update(
                 raise _fail(f"cannot move {install.exe} aside: {exc}", code=1)
         by_hand = f"\nrename {aside} to {install.exe} by hand"
 
-        code, interrupted = selfupdate.run_uv(cmd)
-        if interrupted:
-            text, exit_code = stopped, 130
-        elif code != 0:
-            text, exit_code = f"error: uv exited with code {code}. {rerun}", 1
-        elif selfupdate.receipt_rev(install.receipt) != release.tag:
-            text, exit_code = no_rev, 1
+        try:
+            code, interrupted = selfupdate.run_uv(cmd)
+        except OSError as exc:  # for example, antivirus software blocks uv.exe
+            text, exit_code = f"{no_start}{exc}", 1
         else:
-            print(done)
-            raise typer.Exit(code=0)
+            if code == 0:  # uv finished the install, also after a Ctrl-C: the receipt decides
+                if selfupdate.receipt_rev(install.receipt) == release.tag:
+                    print(done)
+                    raise typer.Exit(code=0)
+                text, exit_code = no_rev, 1
+            elif interrupted:
+                text, exit_code = stopped, 130
+            else:
+                text, exit_code = f"error: uv exited with code {code}. {rerun}", 1
         try:
             selfupdate.restore_exe(install.exe, aside)  # no-op when decaf moved no exe
         except OSError:

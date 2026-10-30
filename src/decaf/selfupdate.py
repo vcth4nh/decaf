@@ -203,7 +203,7 @@ def restore_exe(exe: Path, aside: Path | None) -> None:
 
 def run_uv(cmd: list[str]) -> tuple[int, bool]:
     """Run uv with the stdout and the stderr of decaf. Give the exit code of uv, and True
-    when a Ctrl-C came.
+    when a Ctrl-C came. An OSError of Popen means that uv did not start.
 
     A Ctrl-C goes to uv too. While uv runs, the SIGINT handler only notes the Ctrl-C, so
     decaf waits for uv to end, then restores the exe and writes its text. SIG_IGN is not

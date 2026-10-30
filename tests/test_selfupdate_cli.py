@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import re
 import signal
@@ -20,6 +21,7 @@ GIT_RECEIPT = (
     'entrypoints = [{ name = "decaf", install-path = "/home/u/.local/bin/decaf", from = "decaf" }]\n'
 )
 SPEC = "git+https://github.com/vcth4nh/decaf@v1.12.0"
+NO_UV = FileNotFoundError(2, "No such file or directory", "/usr/bin/uv")  # what Popen raises for a missing uv
 
 
 class Update:
@@ -44,6 +46,8 @@ class Update:
             self.seen_during.append(self.during())
         if self.snapshot_modules:
             self.modules = set(sys.modules)
+        if isinstance(self.result, OSError):  # uv did not start
+            raise copy.copy(self.result)  # a new exception: no traceback of an earlier test
         if self.write_receipt:  # a uv install writes the rev of the new release
             self.receipt.write_text(GIT_RECEIPT.replace("rev=v1.11.0", "rev=v1.12.0"))
         return self.result
@@ -248,6 +252,7 @@ def test_exe_that_cannot_move_stops_the_update(upd, monkeypatch, tmp_path):
     ((1, False), True, "error: uv exited with code 1.", 1),
     ((130, True), True, "error: the update stopped.", 130),
     ((0, False), False, "error: uv ended, but the receipt does not show v1.12.0", 1),
+    (NO_UV, True, "error: cannot start uv: ", 1),
 ])
 def test_exe_that_cannot_return_names_both_paths(upd, monkeypatch, tmp_path, result, write_receipt, text, code):
     # the old exe keeps its .old name, so decaf has no command until the user renames it
@@ -276,11 +281,37 @@ def test_ctrl_c_during_uv(upd, monkeypatch, tmp_path):
     assert r.exit_code == 130 and "the update stopped" in r.output and exe.read_bytes() == b"old"
 
 
+@pytest.mark.parametrize("write_receipt,code,text", [
+    (True, 0, "decaf 1.11.0 -> 1.12.0\nhttps://github.com/vcth4nh/decaf/releases/tag/v1.12.0"),
+    (False, 1, "error: uv ended, but the receipt does not show v1.12.0"),
+])
+def test_ctrl_c_after_which_uv_ends_with_code_0(upd, write_receipt, code, text):
+    # uv ended with code 0, so it finished the install: the receipt decides, not the Ctrl-C
+    upd.result, upd.write_receipt = (0, True), write_receipt
+    r = upd.invoke()
+    assert r.exit_code == code and text in r.output and "the update stopped" not in r.output
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_uv_that_cannot_start(upd, monkeypatch, tmp_path, windows):
+    # for example, antivirus software blocks uv.exe: one line, no traceback, and the exe gets its name back
+    exe = tmp_path / "decaf.exe"
+    exe.write_bytes(b"old")
+    monkeypatch.setattr(selfupdate, "WINDOWS", windows)
+    upd.install = dataclasses.replace(upd.install, exe=exe)
+    upd.during = exe.exists
+    upd.result = NO_UV
+    r = upd.invoke()
+    assert r.exit_code == 1 and "error: cannot start uv: [Errno 2] No such file or directory: '/usr/bin/uv'" in r.output
+    assert upd.seen_during == [not windows] and exe.read_bytes() == b"old"  # Windows: moved aside, then back
+
+
 @pytest.mark.parametrize("windows", [False, True])
 @pytest.mark.parametrize("result,write_receipt", [((0, False), True), ((2, False), True), ((130, True), True),
-                                                  ((0, False), False)])
+                                                  ((0, False), False), (NO_UV, True)])
 def test_no_new_imports_after_uv(upd, monkeypatch, tmp_path, windows, result, write_receipt):
-    # uv can replace the files of a later import, so no exit path may import: done, failure, Ctrl-C, no rev
+    # uv can replace the files of a later import, so no exit path may import: done, failure, Ctrl-C,
+    # no rev, and a uv that cannot start
     exe = tmp_path / "decaf.exe"
     exe.write_bytes(b"old")
     monkeypatch.setattr(selfupdate, "WINDOWS", windows)  # True: the exe rename and its restore run too
@@ -293,6 +324,14 @@ def test_no_new_imports_after_uv(upd, monkeypatch, tmp_path, windows, result, wr
 
 def test_run_uv_gives_the_exit_code():
     assert selfupdate.run_uv([sys.executable, "-c", "raise SystemExit(3)"]) == (3, False)
+
+
+def test_run_uv_raises_for_a_missing_program(tmp_path):
+    # the command catches this OSError of Popen; the Ctrl-C handler of decaf must come back
+    before = signal.getsignal(signal.SIGINT)
+    with pytest.raises(OSError):
+        selfupdate.run_uv([str(tmp_path / "no-uv")])
+    assert signal.getsignal(signal.SIGINT) is before
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="os.kill cannot send SIGINT to one process on Windows")
