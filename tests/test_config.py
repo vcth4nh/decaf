@@ -254,3 +254,31 @@ def test_an_http_central_entry_keeps_the_https_central(tmp_path: Path):
     f = tmp_path / "config.toml"
     f.write_text('repositories = ["http://repo1.maven.org/maven2"]\n')
     assert load_config(f).repositories == ("http://repo1.maven.org/maven2", "https://repo1.maven.org/maven2")
+
+
+def test_update_check_defaults_to_true(tmp_path: Path):
+    f = tmp_path / "config.toml"
+    f.write_text("repositories = []\n")
+    assert load_config(f).update_check is True
+
+
+def test_update_check_false(tmp_path: Path):
+    f = tmp_path / "config.toml"
+    f.write_text("update_check = false\n")
+    assert load_config(f).update_check is False
+
+
+def test_update_check_must_be_a_bool(tmp_path: Path):
+    f = tmp_path / "config.toml"
+    f.write_text('update_check = "no"\n')
+    with pytest.raises(ConfigError, match="update_check must be true or false"):
+        load_config(f)
+
+
+def test_write_engine_pins_keeps_update_check(tmp_path: Path):
+    f = tmp_path / "config.toml"
+    f.write_text("update_check = false\n")
+    pin = {"version": "0.153", "url": "https://x.test/cfr.jar", "sha256": "a" * 64}
+    config.write_engine_pins(f, {"cfr": pin})
+    cfg = load_config(f)
+    assert cfg.update_check is False and cfg.engine_overrides == {"cfr": pin}

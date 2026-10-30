@@ -10,6 +10,20 @@ All notable changes to decaf are documented here.
   which decaf command fits which task, what a run writes, how long it takes,
   and how to read the report. `npx skills add vcth4nh/decaf` installs it,
   `decaf --help` hints at it, and the README has a section for it.
+- `decaf self-update` installs the latest GitHub release into a non-editable
+  install that `uv tool install` made, and `decaf self-update --check` only
+  shows it (#155). For an editable install, decaf tells you to update the
+  folder with `git pull`. For a pip, pipx, or uvx install, decaf prints the
+  command. On Windows, decaf renames its active `decaf.exe` first, because uv
+  cannot replace an active exe, and it gives uv the Python of its own venv, so
+  uv keeps the venv.
+- A run takes a shared lock on `decaf.lock` in the cache folder, and
+  `decaf self-update` takes the exclusive lock (#155). An update does not start
+  while a run is active, and a run does not start while an update is active
+  (exit 2).
+- At the end of a run on a terminal, decaf prints one line when a newer release
+  exists (#155). decaf asks GitHub at most one time each day, in the background,
+  and `update_check = false` in the config file turns the line off.
 
 ### Changed
 

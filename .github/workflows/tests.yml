@@ -20,4 +20,4 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: uv sync
-      - run: uv run pytest
+      - run: uv run pytest -rs

@@ -1,6 +1,7 @@
 import json
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 import decaf.cli as cli
+from decaf import engines, runlock, selfupdate
 from decaf.cli import app
 from decaf.pipeline import ArtifactReport, EngineAttempt, RunReport, compute_totals
 
@@ -1499,3 +1501,106 @@ def test_report_memory_lists_the_peaks(tmp_path: Path):
     result = runner.invoke(app, ["report", str(out), "--memory"])
     assert result.exit_code == 0
     assert "5.1 GB  heap 6.1 GB   vineflower archive  w.jar" in ANSI.sub("", result.output)
+
+
+def test_run_stops_while_an_update_holds_the_lock(tmp_path, make_jar, monkeypatch, lock_holder):
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    with lock_holder(tmp_path / "cache" / "decaf.lock", exclusive=True):
+        result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 2
+    assert "decaf is updating: run again when it ends" in result.output
+    assert not (tmp_path / "out").exists()
+
+
+def test_run_holds_a_shared_lock_and_frees_it(tmp_path, make_jar, monkeypatch):
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    lock = tmp_path / "cache" / "decaf.lock"
+    seen = {}
+
+    def fake_run(settings, **kw):
+        with pytest.raises(runlock.LockBusy):
+            runlock.acquire(exclusive=True, path=lock)
+        runlock.acquire(exclusive=False, path=lock).release()  # the lock is shared: a second run can start
+        seen["busy"] = True
+        return ok_report()
+
+    monkeypatch.setattr(cli, "run", fake_run)
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0 and seen == {"busy": True}
+    runlock.acquire(exclusive=True, path=lock).release()  # the run freed it
+
+
+def test_run_goes_on_without_a_usable_lock_file(tmp_path, make_jar, monkeypatch):
+    (tmp_path / "file").write_text("x")
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "file" / "cache")
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    result = runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out")])
+    assert result.exit_code == 0
+
+
+def _notice_run(tmp_path, make_jar, monkeypatch, github, *, terminal=True, args=(), cfg_text="", thread=False):
+    monkeypatch.setattr(engines, "cache_root", lambda: tmp_path / "cache")
+    monkeypatch.setattr(cli, "__version__", "1.11.0")
+    monkeypatch.setattr(cli, "_is_terminal", lambda: terminal)
+    monkeypatch.setattr(cli, "run", lambda settings, **kw: ok_report())
+    if not thread:
+        monkeypatch.setattr(selfupdate.NoticeCheck, "start", lambda self: self._run())  # no thread
+    monkeypatch.setattr(selfupdate, "client", lambda: github(tag="v1.12.0"))
+    make_jar("a.jar", {"A.class": b"x"}, base=tmp_path / "in")
+    (tmp_path / "c.toml").write_text(cfg_text)  # not the user config: it can hold update_check = false
+    return runner.invoke(app, [str(tmp_path / "in"), "-o", str(tmp_path / "out"),
+                               "--config", str(tmp_path / "c.toml"), *args])
+
+
+NOTICE = "decaf 1.12.0 is available (this is 1.11.0). Run `decaf self-update` to install it."
+
+
+def test_run_prints_the_notice_on_a_terminal(tmp_path, make_jar, monkeypatch, github):
+    r = _notice_run(tmp_path, make_jar, monkeypatch, github)
+    assert r.exit_code == 0 and NOTICE in ANSI.sub("", r.output)
+
+
+@pytest.mark.parametrize("kw", [
+    {"terminal": False},
+    {"cfg_text": "update_check = false\n"},
+    {"args": ["-q"]},
+    {"args": ["--format", "json"]},
+    {"args": ["--format", "ndjson"]},
+])
+def test_run_has_no_notice(tmp_path, make_jar, monkeypatch, github, kw):
+    r = _notice_run(tmp_path, make_jar, monkeypatch, github, **kw)
+    assert r.exit_code == 0 and "is available" not in r.output
+    assert not (tmp_path / "cache" / "update-check.json").exists()  # no request, no file
+
+
+def test_run_does_not_wait_for_the_check(tmp_path, make_jar, monkeypatch, github):
+    # GitHub answers only after the run: the run ends without the line, and does not wait
+    gate = threading.Event()
+
+    def slow(http, timeout):
+        gate.wait(10)
+        return selfupdate.Release((1, 12, 0))
+
+    monkeypatch.setattr(selfupdate, "fetch_latest", slow)
+    try:
+        r = _notice_run(tmp_path, make_jar, monkeypatch, github, thread=True)
+    finally:
+        gate.set()
+    assert r.exit_code == 0 and "is available" not in r.output
+
+
+def test_is_terminal_without_stdout(monkeypatch):
+    # Python sets sys.stdout to None when decaf starts with fd 1 closed (decaf IN >&-): a hint must not stop the run
+    monkeypatch.setattr(sys, "stdout", None)
+    assert cli._is_terminal() is False
+
+
+def test_is_terminal_with_a_closed_stdout(monkeypatch, tmp_path):
+    # isatty() of a closed stream raises ValueError: a hint must not stop the run
+    stream = (tmp_path / "out.txt").open("w")
+    stream.close()
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert cli._is_terminal() is False
