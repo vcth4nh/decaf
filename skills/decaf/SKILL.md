@@ -1,6 +1,6 @@
 ---
 name: decaf
-description: Use when a task needs the Java source of a .jar, .war, .ear, .aar, or .class file and the decaf CLI is available - reading a dependency or vendor jar, reviewing a deployed app, grepping an app and its libraries, or recovering lost sources. Tells which decaf command fits which task, what a run writes and how long it takes, what the exit codes and the report mean, and what to trust without re-checking the bytecode.
+description: Use when a task needs the Java source of a .jar, .war, .ear, .aar, or .class file and the decaf CLI is available - reading a dependency or vendor jar, reviewing a deployed app, grepping an app and its libraries, or recovering lost sources. Tells which decaf command fits which task, what a run writes and how long it takes, what the exit codes and the report mean, and when to verify decompiled logic against the bytecode.
 compatibility: Requires decaf on PATH (uv tool install git+https://github.com/vcth4nh/decaf) and a JDK on PATH (Java 17+ for the default engine, javac for the compile check). Network access to Maven Central and GitHub is optional - it gives original sources and the first engine download.
 ---
 
@@ -22,7 +22,8 @@ Typical flow:
    is under `out/src/<package path>/`. When you do not know the archive of a class, use
    `find out -name '<Class>.java'`.
 4. On `✗`, `!`, or exit 1: `decaf report out --problems`.
-5. For the detail of one artifact (engine attempts, check counts, flagged and noted files):
+5. For the detail of one artifact (engine attempts, check counts, flagged and noted files,
+   described under [Read the result](#read-the-result)):
    `decaf report out --artifact '*NAME*'`, with NAME as the ending prints it.
 
 ## What decaf does
@@ -63,8 +64,9 @@ Typical flow:
 - A non-empty OUT stops the run with exit 2 and `error: output out is not empty (use --force
   to write anyway)`. Use a new folder, or `--force`, which writes into the folder as it is.
 - The mirror layout (default) copies every resource byte-for-byte (manifests, `web.xml`,
-  licenses, `pom.xml`) and turns a nested archive into a folder named after it. A failed
-  artifact gets no folder. `--no-resource` keeps the layout and drops the resources.
+  licenses, `pom.xml`) and turns a nested archive into a folder named after it. Resources
+  are copied before decompilation, so an artifact whose engines all fail can still have
+  a folder with resources. `--no-resource` keeps the layout and drops the resources.
 - `--merge` writes `.java` and `.kt` files only, under `out/src/`. You lose which archive a
   file came from; duplicate classes are deduped, the first in input order wins, and the
   report counts the conflicts (`collisions`); container prefixes such as `WEB-INF/classes/`
@@ -140,20 +142,23 @@ Typical flow:
   asks for a higher `--timeout`, `out_of_memory` for a higher `--memory`), `case collision`
   (the output tree ignores case; use a case-sensitive volume for OUT and `TMPDIR`),
   `interrupted`.
-- **`✓` reports completeness, not the check.** A `✓` artifact has every class and no
-  flagged file; the check result is in the report:
+- **`✓` means no reported gaps or flags.** It can still have noted or unchecked files,
+  or no compile check at all. Inspect `check` in the report: `null` means no check ran,
+  for example with `--no-check` or an unavailable checker.
   - **flagged**: a parse, name, or flow error that no engine fixed. The file of the first
     engine stays and the artifact is partial (`!`). Read a flagged file with care; verify
     its logic against the bytecode (`javap -c -p` on the class in the original archive) when
     a decision depends on it.
-  - **noted**: type errors only, for example a lost generic argument (`List var2` for
-    `List<String>`, which also gives errors at the uses of `var2`), or a checked exception
-    that javac rejects in source. The logic is intact and the artifact stays `✓`. Classes
-    from Kotlin, Scala, Groovy, and Lombok land here often.
-  - **unchecked**: the file refers to a class outside the input, so javac gave no verdict.
-    No defect is known. A single library jar without its dependencies is mostly unchecked;
-    put its dependencies in the same input folder to get a fuller check. A war or a fat jar
-    is mostly checked.
+  - **noted**: type or other compiler errors that do not trigger a retry, for example a
+    lost generic argument (`List var2` for `List<String>`). Some errors from Kotlin, Scala,
+    or Groovy classes, such as undeclared checked exceptions, also land here. Noted errors
+    alone do not make the artifact partial.
+  - **unchecked**: the check gave no verdict. Read the file's `reason`, `first`, and
+    `needs_java` in `unchecked[]`. For `absent classes`, include the missing dependencies
+    in the input folder; for `newer class version`, use Java at least as new as
+    `needs_java`. A `timeout` may need a higher `--timeout`; inspect `first` for a
+    `javac crash`, and rerun after `interrupted`. `old source` and `kotlin` mean the
+    checker could not check that source with javac.
   - **stubbed**: an engine wrote a placeholder in place of a method body. decaf retries the
     class with the next engine and lists the stubs that remain (`stubs[]`); they make the
     artifact partial.
@@ -168,12 +173,12 @@ Typical flow:
   engine writes `module-info`. When completeness matters, run `unzip -l lib.jar | grep
   META-INF/versions`; `--engine cfr --no-maven` (or `--engine jd`) writes the variants to
   `out/lib.jar/META-INF/versions/N/<package path>/<Class>.java`.
-- **Trust.** A `✓` artifact needs no javap, recompile, or hash check from you: the check
-  compiled every checked file, and the Maven match compared the hash. An unchecked file got
-  no verdict; read it like any decompiled source and verify a line against the bytecode
-  only when a decision depends on it. Spend verification on flagged files and partial
-  artifacts; a failed artifact has no sources to verify. The output holds no class files:
-  for `javap` or a bytecode grep, unpack the original archive. One thing a source grep
+- **Trust.** The compile check finds Java diagnostics; it does not compare behavior with
+  the original bytecode. Even a file with no diagnostics can have incorrect logic. When a
+  decision depends on exact behavior, verify the relevant logic against the bytecode with
+  `javap -c -p`, regardless of the artifact's status. The Maven hash match identifies the
+  published binary whose sources were fetched. For `javap` or a bytecode grep, unpack the
+  original archive; the output holds no class files. One thing a source grep
   cannot give you: an exhaustive search for the users of an API, because a chained call such
   as `x.getDigest().digest(b)` has no type name in the source; grep the class files too
   (`grep -rl 'java/security/MessageDigest'` over the unpacked jar).
@@ -189,12 +194,14 @@ Typical flow:
 `flagged[]`, or a `sources_miss` that starts with `network:`, which is a network miss:
 the lookup failed and the jar was decompiled), `method`, `gav`, `repo`, `resolved_by`,
 `sources_miss`, `sources_cached`, `classes`, `java_files`, `missing_classes`, `collisions`,
-`failure`, `attempts[]` (`engine`, `level` = `archive` or `class`, `returncode`,
+`failure`, `attempts[]` (`engine`, `level` = `archive`, `class`, or `batch`, `returncode`,
 `timed_out`, `out_of_memory`, `stderr_tail`, `peak_rss_mb`), `check` (`checked`,
-`flagged`, `noted`, `unchecked`, `unchecked_reasons`), and the lists `flagged[]`,
-`noted[]`, `unchecked[]` (`path` under the artifact folder, `engine`, `first`,
-`messages`). `--format ndjson` streams one object per line with `event` = `scan`,
-`artifact`, `warning`, and one final `summary`.
+`flagged`, `noted`, `unchecked`, `unchecked_reasons`; `null` when no check ran), and the
+lists `flagged[]` and `noted[]` (`path` under the artifact folder, `engine`, `first`,
+`messages`). `unchecked[]` lists `path`, `engine`, `reason`, `needs_java`, and `first`;
+`needs_java` and `first` can be `null`. An attempt with `level: "batch"` ran in an engine
+JVM shared by several archives. `--format ndjson` streams one object per line with
+`event` = `scan`, `artifact`, `warning`, and one final `summary`.
 
 ## Common mistakes
 
@@ -204,7 +211,7 @@ the lookup failed and the jar was decompiled), `method`, `gav`, `repo`, `resolve
   `out/<archive>/<package path>/<Class>.java` (mirror) or `out/src/<package path>/<Class>.java`
   (merge).
 - Treating exit 1 as a failed run, or a `!` artifact as unusable.
-- Verifying a `✓` artifact again with javap, a recompile, or a SHA-1 comparison.
+- Treating `✓` or a clean compile check as proof that decompiled logic matches the bytecode.
 - Expecting `Outer$1.java`, or expecting `N classes` to equal the number of `.class` files.
 - `--artifact 'NAME*'` for a jar inside a war: the name starts with the war, use `'*NAME*'`.
 - Editing the output tree by hand: a later `--force` run rewrites it.
