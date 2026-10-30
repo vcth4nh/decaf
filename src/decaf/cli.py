@@ -478,8 +478,15 @@ class _RunDisplay:
 
 
 def _is_terminal() -> bool:
-    """stdout is a terminal. rich also takes FORCE_COLOR as a terminal, so the notice asks the stream (#155)."""
-    return sys.stdout.isatty()
+    """stdout is a terminal. rich also takes FORCE_COLOR as a terminal, so the notice asks the stream (#155).
+
+    A missing stdout (fd 1 closed at the start) and a closed stream count as no terminal: a hint never stops a run.
+    """
+    isatty = getattr(sys.stdout, "isatty", None)
+    try:
+        return isatty is not None and isatty()
+    except ValueError:  # a closed stream
+        return False
 
 
 @app.command(name="run")

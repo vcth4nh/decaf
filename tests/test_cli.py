@@ -1589,3 +1589,17 @@ def test_run_does_not_wait_for_the_check(tmp_path, make_jar, monkeypatch, github
     finally:
         gate.set()
     assert r.exit_code == 0 and "is available" not in r.output
+
+
+def test_is_terminal_without_stdout(monkeypatch):
+    # Python sets sys.stdout to None when decaf starts with fd 1 closed (decaf IN >&-): a hint must not stop the run
+    monkeypatch.setattr(sys, "stdout", None)
+    assert cli._is_terminal() is False
+
+
+def test_is_terminal_with_a_closed_stdout(monkeypatch, tmp_path):
+    # isatty() of a closed stream raises ValueError: a hint must not stop the run
+    stream = (tmp_path / "out.txt").open("w")
+    stream.close()
+    monkeypatch.setattr(sys, "stdout", stream)
+    assert cli._is_terminal() is False
