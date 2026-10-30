@@ -265,7 +265,8 @@ def test_uv_replaces_an_active_tool_exe_after_the_rename(tmp_path):
     if uv is None:
         pytest.skip("uv is not on PATH")
     env = {**os.environ, "UV_TOOL_DIR": str(tmp_path / "tools"), "UV_TOOL_BIN_DIR": str(tmp_path / "bin")}
-    subprocess.run([uv, "tool", "install", "--offline", str(_probe_wheel(tmp_path, "1.0"))], env=env, check=True)
+    subprocess.run([uv, "tool", "install", "--offline", str(_probe_wheel(tmp_path, "1.0"))], env=env, check=True,
+                   timeout=120)  # a hang must not hold the CI job
     exe = tmp_path / "bin" / "decafprobe.exe"
     venv = tmp_path / "tools" / "decafprobe"
     proc = subprocess.Popen([str(exe), "wait"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -273,12 +274,13 @@ def test_uv_replaces_an_active_tool_exe_after_the_rename(tmp_path):
         assert proc.stdout.readline().strip() == "1.0"
         (venv / "marker").write_text("x")
         base = subprocess.run([str(venv / "Scripts" / "python.exe"), "-c", "import sys; print(sys._base_executable)"],
-                              capture_output=True, text=True, check=True).stdout.strip()
+                              capture_output=True, text=True, check=True, timeout=120).stdout.strip()
         assert selfupdate.move_exe_aside(exe) == tmp_path / "bin" / "decafprobe.exe.old"
         r = subprocess.run([uv, "tool", "install", "--offline", "--python", base, str(_probe_wheel(tmp_path, "2.0"))],
-                           env=env, capture_output=True, encoding="utf-8", errors="replace")  # uv writes UTF-8
+                           env=env, capture_output=True, encoding="utf-8", errors="replace", timeout=120)  # uv writes UTF-8
         assert r.returncode == 0, r.stderr
-        assert subprocess.run([str(exe)], capture_output=True, text=True, check=True).stdout.strip() == "2.0"
+        assert proc.poll() is None  # the old exe was active during the whole install
+        assert subprocess.run([str(exe)], capture_output=True, text=True, check=True, timeout=120).stdout.strip() == "2.0"
         assert (venv / "marker").exists()  # uv kept the venv
     finally:
         proc.stdin.close()

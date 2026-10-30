@@ -1521,6 +1521,7 @@ def test_run_holds_a_shared_lock_and_frees_it(tmp_path, make_jar, monkeypatch):
     def fake_run(settings, **kw):
         with pytest.raises(runlock.LockBusy):
             runlock.acquire(exclusive=True, path=lock)
+        runlock.acquire(exclusive=False, path=lock).release()  # the lock is shared: a second run can start
         seen["busy"] = True
         return ok_report()
 

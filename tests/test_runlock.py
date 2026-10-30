@@ -32,7 +32,8 @@ def test_exclusive_holder_blocks_shared(tmp_path, lock_holder):
             runlock.acquire(exclusive=False, path=path)
 
 
-def test_two_shared_holders_coexist(tmp_path, lock_holder):  # Review Focus 4
+def test_two_shared_holders_coexist(tmp_path, lock_holder):
+    # two runs at the same time are normal use: both get the shared lock
     path = tmp_path / "decaf.lock"
     with lock_holder(path, exclusive=False):
         lock = runlock.acquire(exclusive=False, path=path)
@@ -52,7 +53,8 @@ def test_unusable_lock_folder_gives_none(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="flock is POSIX only")
-def test_no_lock_support_gives_none(tmp_path, monkeypatch):  # Review Focus 3
+def test_no_lock_support_gives_none(tmp_path, monkeypatch):
+    # a cache folder on NFS can have no lock support (ENOLCK): acquire gives None, and the run goes on
     def no_locks(fd, op):
         raise OSError(errno.ENOLCK, "No locks available")
 
