@@ -2112,6 +2112,15 @@ def test_same_key_sibling_in_one_output_is_not_deleted(make_jar, tmp_path: Path)
     assert [f["path"] for f in report.flagged] == ["WEB-INF/classes/com/x/A.java"]
 
 
+def test_same_key_sibling_in_one_output_is_not_held_for_the_flag_of_its_sibling(make_jar, tmp_path: Path):
+    """Here the clean sibling sorts first (Windows sorts the test above this way). The flag of the other file
+    must not hold it, and the flagged file stays reported (#150)."""
+    files = {"vineflower": {"WEB-INF/classes/com/x/A.java": "// ENV", "com/x/A.java": "// FLAG"}}
+    report, written = _run_mr(make_jar, tmp_path, files, fallback=False)
+    assert written == {"WEB-INF/classes/com/x/A.java": "// ENV", "com/x/A.java": "// FLAG"}
+    assert [f["path"] for f in report.flagged] == ["com/x/A.java"]
+
+
 def test_same_key_files_of_one_output_are_both_written(make_jar, tmp_path: Path):
     """Only a file of an earlier output makes a file with the same key go (#107)."""
     files = {"vineflower": {"WEB-INF/classes/com/x/A.java": "class A { /* w */ }", "com/x/A.java": "class A {}"}}

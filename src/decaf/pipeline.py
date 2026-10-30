@@ -942,9 +942,12 @@ def _apply_hold(
     waiting = {top(key) for _, _, key, _, r in files if top(key) != key and r is not None and r.status == "flagged"}
     if waiting:  # a flagged file of an inner class holds only a new family
         waiting -= {top(k) for k in held.files.keys() | held.written}
+    # a clean file with the key of a stubbed or flagged file of the same output is written, so no family waits then
+    clean_now = {key for _, _, key, stub, r in files if stub is None and (r is None or r.status != "flagged")}
     waiting |= {  # a stubbed or flagged file of an outer class holds its family, from any output (#150)
         key for _, _, key, stub, r in files
-        if top(key) == key and key not in held.written and (stub is not None or (r is not None and r.status == "flagged"))
+        if top(key) == key and key not in held.written and key not in clean_now
+        and (stub is not None or (r is not None and r.status == "flagged"))
     }
     for family in list(held.waiting):
         mine = [  # a file of a class that an earlier output wrote goes (#107), so it does not count
