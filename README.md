@@ -72,12 +72,15 @@ decaf self-update --check  # only show whether a newer release exists
 
 `decaf self-update` reads the latest release on GitHub. When the release is newer, decaf
 runs `uv tool install git+https://github.com/vcth4nh/decaf@vX.Y.Z` and shows the uv output.
-Only an install that `uv tool install` made can update itself. For a pip, pipx, uvx, or
-checkout install, decaf prints the command to run.
+Only an install that `uv tool install` made can update itself. An install from a local
+folder (`uv tool install .`) also moves to the GitHub release. For a pip, pipx, or uvx
+install, decaf prints the command to run. For an editable install, decaf tells you to
+update the folder with `git pull`.
 
 The update does not start while a decaf run is active, and a run does not start while an
 update is active (exit 2). On Windows, decaf renames its active `decaf.exe` to
-`decaf.exe.old` before the install, and the next `decaf self-update` deletes the old file.
+`decaf.exe.old` before the install. The next update that installs a release deletes the
+old file.
 
 At the end of a run on a terminal, decaf prints one line when a newer release exists. It
 asks GitHub at most one time each day, and the run does not wait for the answer. To turn
