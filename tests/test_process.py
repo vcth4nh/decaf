@@ -2470,3 +2470,80 @@ def test_a_held_file_of_an_outer_class_makes_its_family_wait_without_the_check(m
     }, check=False)
     assert written == {_A: "class A { /* cfr */ }"}
     assert report.stubs == [] and report.missing_classes == 0 and report.java_files == 1
+
+
+def test_a_file_that_an_earlier_output_wrote_fails_no_retry_family(make_jar, tmp_path: Path):
+    """Vineflower wrote A$1 alone, and CFR held A, so the family waits. The flagged A$1 of Fernflower goes
+    (#107), so it must not fail the retry family: the clean A of Fernflower replaces the held A."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A1: _A1_VF},
+        "cfr": {_A: "class A {} // FLAG cfr"},
+        "fernflower": {_A: "class A { /* ff */ }", _A1: "class A$1 {} // FLAG ff"},
+    })
+    assert written == {_A: "class A { /* ff */ }", _A1: _A1_VF}
+    assert report.flagged == []
+
+
+def test_a_held_file_of_an_outer_class_holds_the_family_of_its_copy(make_jar, tmp_path: Path):
+    """A war can have a class at the root and under WEB-INF/classes (#107). The file of an inner class rides
+    with the file of the outer class of its own copy."""
+    web = "WEB-INF/classes/"
+    jar = make_jar("app.jar", {
+        f"{root}com/x/{n}.class": _class_header(52) for root in ("", web) for n in ("A", "A$1")
+    })
+    runner = writing_runner({
+        "vineflower": {_A: _VF_STUB, _A1: _A1_VF, web + _A: _VF_STUB, web + _A1: "class A$1 { /* vf web */ }"},
+        "cfr": {_A: "class A { /* cfr */ }", web + _A: "class A { /* cfr web */ }"},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    written = {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
+    assert written == {_A: "class A { /* cfr */ }", web + _A: "class A { /* cfr web */ }"}
+    assert report.stubs == [] and report.missing_classes == 0
+
+
+def test_an_unchecked_retry_family_replaces_a_family_held_for_a_stub_in_its_outer_file(make_jar, tmp_path: Path):
+    """A stub in the file of the outer class is a known loss for the whole family: the unchecked A and A$1 of
+    CFR replace the stub A and the clean A$1 of Vineflower, as an unchecked file replaces a stub (#96)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: _VF_STUB, _A1: _A1_VF},
+        "cfr": {_A: "// ENV", _A1: "// ENV 1"},
+    })
+    assert written == {_A: "// ENV", _A1: "// ENV 1"}
+    assert report.stubs == []
+
+
+def test_a_waiting_family_settles_like_one_file(make_jar, tmp_path: Path):
+    """Two engines in a row flag A with an error that bytecode can cause legally (#108): A gets no more
+    retries, and its held family goes out at the end."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // SNEAKY:java.io.IOException", _A1: _A1_VF},
+        "cfr": {_A: "class A {} // SNEAKY:java.io.IOException cfr"},
+        "fernflower": {_A: "class A { /* ff */ }"},
+    })
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+    assert written == {_A: "class A {} // SNEAKY:java.io.IOException", _A1: _A1_VF}
+
+
+def test_after_ctrl_c_no_retry_file_replaces_a_family_held_for_a_stub(make_jar, tmp_path: Path):
+    """A file without a result replaces a stub, but not after Ctrl-C: then the check did not run (#112)."""
+    from decaf import engines, stubs
+    from decaf.pipeline import _apply_hold, _Held
+
+    jar = make_jar("app.jar", {f"com/x/{n}.class": _class_header(52) for n in ("A", "A$1")})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    held = _Held()
+    first, retry = tmp_path / "vf", tmp_path / "cfr"
+    for tree, files in ((first, {_A: _VF_STUB, _A1: _A1_VF}), (retry, {_A: "class A { /* cfr */ }"})):
+        for rel, text in files.items():
+            (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tree / rel).write_text(text)
+    _apply_hold(first, jar, {s.path: s for s in stubs.scan(first, "vineflower")}, None, "vineflower", held, ctx)
+    assert sorted(held.files) == ["com/x/A", "com/x/A$1"] and held.waiting == {"com/x/A"}
+    engines.PROCESSES.kill_all()
+    try:
+        _apply_hold(retry, jar, {}, None, "cfr", held, ctx)
+    finally:
+        engines.PROCESSES.reset()
+    assert sorted(held.files) == ["com/x/A", "com/x/A$1"] and list(retry.rglob("*.java")) == []

@@ -906,7 +906,8 @@ def _apply_hold(
     of the outer class, so no file of an inner class goes out alone (#150). Then the outer class
     gets a retry. A later output replaces a held family as a whole, when it has the file of the
     outer class and each of its files of the family is good, as for one file: no stub, not
-    flagged, and it passes the check or replaces a stub; else its files of the family go.
+    flagged, and it passes the check or replaces a stub; else its files of the family go. Only
+    a held file of an inner class whose family does not wait still follows the rule of one file.
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
@@ -915,15 +916,19 @@ def _apply_hold(
     versions = held.versions
 
     def top(key: str) -> str:
-        return outer_stem(key, versions) or key
+        """The key of the outer class of a key, or the key itself; a copy keeps its container root (#107)."""
+        stem = _strip_container(key)
+        outer = outer_stem(stem, versions)
+        return key[: len(key) - len(stem)] + outer if outer else key
 
     def good(key: str, stub: stubs.Stub | None, r: check.FileResult | None) -> bool:
         """Can this file take part in the replacement of a held family? As for one file: no stub, not
-        flagged, and it passes the check, or the held file of its key or of its outer class has a stub."""
+        flagged, and it passes the check, or it replaces a stub (a known loss): the held file of its key
+        or the held file of its outer class has one."""
         if stub is not None or (r is not None and r.status == "flagged"):
             return False
-        old = held.files.get(key) or held.files.get(top(key))
-        return (r is not None and r.passes) or (old is not None and old.stub is not None)
+        olds = (held.files.get(key), held.files.get(top(key)))
+        return (r is not None and r.passes) or any(old is not None and old.stub is not None for old in olds)
 
     files: list[tuple[Path, str, str, stubs.Stub | None, check.FileResult | None]] = []
     for p in sorted(tree.rglob("*")):
@@ -942,7 +947,9 @@ def _apply_hold(
         if top(key) == key and key not in held.written and (stub is not None or (r is not None and r.status == "flagged"))
     }
     for family in list(held.waiting):
-        mine = [(key, stub, r) for _, _, key, stub, r in files if top(key) == family]
+        mine = [  # a file of a class that an earlier output wrote goes (#107), so it does not count
+            (key, stub, r) for _, _, key, stub, r in files if top(key) == family and key not in held.written
+        ]
         if any(key == family for key, _, _ in mine) and not engines.PROCESSES.closed and all(
             good(key, stub, r) for key, stub, r in mine
         ):  # the files of this output replace the held files of the family
