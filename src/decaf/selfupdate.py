@@ -8,7 +8,6 @@ test reaches GitHub.
 
 from __future__ import annotations
 
-import importlib.metadata
 import json
 import os
 import re
@@ -100,6 +99,8 @@ class Install:
 
 def direct_url() -> str | None:
     """The direct_url.json text (PEP 610) of the installed decaf distribution."""
+    import importlib.metadata  # only here: at the top, each decaf process would pay its import time (#155)
+
     try:
         return importlib.metadata.distribution("decaf").read_text("direct_url.json")
     except importlib.metadata.PackageNotFoundError:
