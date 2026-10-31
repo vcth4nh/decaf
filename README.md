@@ -2,23 +2,8 @@
 
 Turn Java archives and loose `.class` files into source trees.
 
-- **Published sources first.** Recover original sources from Maven when they
-  match your binaries, with cached lookups for later runs.
-- **Five decompilers with automatic fallback.** Retry crashes, timeouts,
-  missing classes, and stubbed methods with the next engine.
-- **Compile checks.** Check decompiled Java with `javac` and retry classes
-  with decompiler errors. Keep unresolved diagnostics in the report.
-- **Batch processing.** Scan folders of JAR, WAR, EAR, and AAR files,
-  including nested dependencies.
-- **Two output layouts.** Preserve the archive tree and its resources, or
-  merge sources into one package tree.
-- **Reports you can act on.** Inspect failed and partial artifacts,
-  compiler diagnostics, and engine memory use after the run.
-
-![decaf processes a valid WAR alongside a broken JAR, then shows a compile-check diagnostic and the fallback engine attempts](docs/demo.gif)
-
-The demo includes an unreadable archive and a class that triggers a compile-check
-retry. The valid archives still produce sources. [Demo inputs and recording](docs/development.md#readme-media).
+Recover matching Maven sources, or decompile with automatic fallback and
+compile checks.
 
 ## Quick start
 
@@ -41,6 +26,55 @@ decaf self-update                 # install the latest release
 See [installation and updates](docs/installation.md) for platform requirements
 and other install methods, or [usage](docs/usage.md) for more commands.
 
+## Features
+
+### Sources, compile checks, and fallback
+
+Recover original sources from Maven when they match your binaries, with sources
+and lookup results cached for later runs. Otherwise, a chain of five decompilers
+retries crashes, timeouts, missing classes, and stubbed methods. Checks with
+`javac` also retry classes with decompiler errors.
+
+The demo input contains ten application and helper classes across five archives,
+plus the SLF4J logging library. The run downloads SLF4J's published sources,
+decompiles the other archives, and fixes a compile-check error by retrying with CFR.
+
+![A run downloads Maven sources and decompiles five archives, including a successful compile-check retry](docs/demos/workflow.gif)
+
+Processing is shown at half speed. The report records the failed first check
+and the successful retry:
+
+![The artifact report shows Vineflower with one flagged class, CFR with zero, and both application classes checked](docs/demos/workflow-report.svg)
+
+See [sources and engines](docs/sources-and-engines.md) for Maven matching and caching,
+or [compile checks](docs/compile-check.md) for retry rules and limitations.
+
+### Batch processing and output layouts
+
+Scan folders of JAR, WAR, EAR, and AAR files, including nested dependencies.
+Mirror output preserves archive paths and resources; `--merge` collects sources
+into one package tree. Both layouts below come from the same WAR and its nested JAR.
+
+![Mirror preserves the WAR's nested JAR and web.xml; merged output collects App.java and Greeter.java under src/demo](docs/output-layouts.svg)
+
+See [output layouts](docs/output-layouts.md) for resource handling and collisions.
+
+### Failures and reports
+
+A broken archive does not stop valid archives from producing sources. Inspect
+failed and partial artifacts, compiler diagnostics, and engine memory use after
+the run. The demo shows an unreadable archive alongside complete and partial
+results.
+
+![A batch finishes with two complete artifacts, one partial result, and one unreadable archive](docs/demos/reports.gif)
+
+Inspect the problem summary and compiler diagnostic after the run:
+
+![Report commands list failed and partial artifacts, then show the compiler diagnostic and engine attempts](docs/demos/reports-report.svg)
+
+See [reports](docs/reports.md) for exit codes and JSON output, or
+[demo inputs and recording](docs/development.md#readme-media) to reproduce these GIFs.
+
 ## How it works
 
 ```mermaid
@@ -60,16 +94,6 @@ Maven sources skip decompilation and compile checks. Unresolved problems stay
 in the [report](docs/reports.md); [compile checks](docs/compile-check.md) explain
 which diagnostics trigger retries.
 
-## Output layouts
-
-- **Mirror:** keep archive paths, nested dependencies, and original resources.
-- **Merged:** collect Java and Kotlin sources by package, with duplicate
-  conflicts recorded in the report.
-
-![The same WAR in both layouts: mirror preserves the nested JAR and web.xml; merged collects both Java files under src/demo](docs/output-layouts.svg)
-
-See [output layouts](docs/output-layouts.md) for resource handling and collisions.
-
 ## Documentation
 
 | Guide | Covers |
@@ -80,7 +104,7 @@ See [output layouts](docs/output-layouts.md) for resource handling and collision
 | [Sources and engines](docs/sources-and-engines.md) | Maven matching, caches, engine versions and management |
 | [Resource limits](docs/resource-limits.md) | CPU budgets, parallel jobs, heap budgets and memory reports |
 | [Configuration](docs/configuration.md) | Config paths, Maven repositories, authentication |
-| [Development](docs/development.md) | Tests and regenerating the demo and images |
+| [Development](docs/development.md) | Tests and regenerating demos and images |
 
 ## Agent skill
 
