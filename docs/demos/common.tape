@@ -12,6 +12,6 @@ Set CursorBlink false
 Set WaitTimeout 60s
 
 Hide
-Type@1ms "export PS1='$ ' HISTFILE=/dev/null; unset PROMPT_COMMAND; clear"
+Type@1ms 'export PS1="$ " HISTFILE=/dev/null XDG_CONFIG_HOME="$PWD/.config" XDG_CACHE_HOME="$PWD/.cache"; unset PROMPT_COMMAND; clear'
 Enter
 Sleep 500ms

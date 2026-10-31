@@ -28,37 +28,32 @@ and other install methods, or [usage](docs/usage.md) for more commands.
 
 ## Features
 
-### Published sources and caching
+### Sources, compile checks, and fallback
 
 Recover original sources from Maven when they match your binaries, with sources
-and lookup results cached for later runs. The demo downloads published sources
-for the SLF4J logging library, then repeats the run using the cache.
+and lookup results cached for later runs. Otherwise, a chain of five decompilers
+retries crashes, timeouts, missing classes, and stubbed methods. Checks with
+`javac` also retry classes with decompiler errors.
 
-![The first run recovers SLF4J sources from Maven; the second reports one cached Maven artifact and no decompilation](docs/demos/sources.gif)
+One `demo.jar` contains the SLF4J logging library and a small application class.
+The demo downloads the library's published sources, decompiles the application,
+and fixes a compile-check error by retrying with CFR.
 
-See [Maven matching, caching, and engines](docs/sources-and-engines.md).
+![One run downloads Maven sources and decompiles the application; artifact details show Vineflower with one flagged class and CFR with zero](docs/demos/workflow.gif)
+
+[Download the demo JAR](docs/demos/demo.jar). See
+[sources and engines](docs/sources-and-engines.md) for Maven matching and caching,
+or [compile checks](docs/compile-check.md) for retry rules and limitations.
 
 ### Batch processing and output layouts
 
 Scan folders of JAR, WAR, EAR, and AAR files, including nested dependencies.
 Mirror output preserves archive paths and resources; `--merge` collects sources
-into one package tree. The demo processes a WAR with a nested JAR and a separate
-library in both layouts.
+into one package tree. Both layouts below come from the same WAR and its nested JAR.
 
-![A batch produces mirrored source paths and web.xml, then merged output collects App.java, Greeter.java, and Tool.java under src/demo](docs/demos/layouts.gif)
+![Mirror preserves the WAR's nested JAR and web.xml; merged output collects App.java and Greeter.java under src/demo](docs/output-layouts.svg)
 
 See [output layouts](docs/output-layouts.md) for resource handling and collisions.
-
-### Compile checks and automatic fallback
-
-A chain of five decompilers retries crashes, timeouts, missing classes, and
-stubbed methods with the next engine. Checks with `javac` also retry classes
-with decompiler errors. This demo shows a bytecode case that remains flagged
-after Vineflower and CFR both try it; the available source and diagnostic are kept.
-
-![A compile check flags a checked exception, retries the class with CFR, and retains the diagnostic and both engine attempts](docs/demos/checks.gif)
-
-See [compile checks](docs/compile-check.md) for retry rules and limitations.
 
 ### Failures and reports
 

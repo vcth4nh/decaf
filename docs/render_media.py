@@ -1,6 +1,6 @@
 """Regenerate README media: uv run python docs/render_media.py [--gif | --demo NAME].
 
-Requires a JDK. GIFs also need VHS, ttyd, ffmpeg, and Chromium.
+Requires a JDK. GIFs also need Linux, VHS, ttyd, ffmpeg, and Chromium.
 Builds valid, unreadable, and compile-check inputs in a temporary directory.
 Uses built-in engine pins; its first run may download engines into decaf's cache.
 """
@@ -28,11 +28,13 @@ from rich.text import Text
 from rich.tree import Tree
 
 from decaf.engines import ENGINES, ensure_engine
+from decaf.maven import resolve_sources
 from decaf.report_view import load_report, render_artifact, render_ending, render_problems
+from decaf.verdicts import VerdictCache
 
 
 DOCS = Path(__file__).resolve().parent
-DEMOS = ("sources", "layouts", "checks", "reports")
+DEMOS = ("workflow", "reports")
 MAVEN_REPO = "https://repo.maven.apache.org/maven2"
 MAVEN_JAR = "slf4j-api-2.0.13.jar"
 MAVEN_SHA256 = "e7c2a48e8515ba1f49fa637d57b4e2f590b3f5bd97407ac699c3aa5efb1204a9"
@@ -55,9 +57,11 @@ SOURCES = {
                '        throw new java.io.IOException("demo");\n'
                '    }\n'
                '}\n',
-    "Tool": 'package demo; public class Tool {\n'
-            '    public static int twice(int value) { return value * 2; }\n'
-            '}\n',
+    "Calculator": 'package demo; public class Calculator {\n'
+                  '    public int increment(int input) {\n'
+                  '        int value = input + 1; return value;\n'
+                  '    }\n'
+                  '}\n',
 }
 
 
@@ -68,7 +72,7 @@ def build_sample(work: Path) -> None:
         (source / f"{name}.java").write_text(text, encoding="utf-8")
     classes = work / "classes"
     subprocess.run(
-        ["javac", "--release", "11", "-d", str(classes),
+        ["javac", "-g", "--release", "11", "-d", str(classes),
          *(str(p) for p in sorted(source.glob("*.java")))], check=True,
     )
     nested = io.BytesIO()
@@ -78,11 +82,6 @@ def build_sample(work: Path) -> None:
         war.write(classes / "demo/App.class", "WEB-INF/classes/demo/App.class")
         war.writestr("WEB-INF/lib/greeter.jar", nested.getvalue())
         war.writestr("WEB-INF/web.xml", "<web-app/>\n")
-    libs = work / "libs"
-    libs.mkdir()
-    shutil.copyfile(work / "app.war", libs / "app.war")
-    with zipfile.ZipFile(libs / "tools.jar", "w") as jar:
-        jar.write(classes / "demo/Tool.class", "demo/Tool.class")
     samples = work / "samples"
     samples.mkdir()
     shutil.copyfile(work / "app.war", samples / "app.war")
@@ -101,6 +100,31 @@ def build_sample(work: Path) -> None:
     (work / "config.toml").write_text(
         f'update_check = false\nrepositories = ["{MAVEN_REPO}"]\n', encoding="utf-8",
     )
+
+
+def build_workflow_sample(work: Path) -> None:
+    url = f"{MAVEN_REPO}/org/slf4j/slf4j-api/2.0.13/{MAVEN_JAR}"
+    response = httpx.get(url, follow_redirects=True, timeout=60)
+    response.raise_for_status()
+    if hashlib.sha256(response.content).hexdigest() != MAVEN_SHA256:
+        raise RuntimeError("Maven demo binary failed its SHA-256 check")
+    data = (work / "classes/demo/Calculator.class").read_bytes()
+    parameter = b"\x01\x00\x05input"
+    if data.count(parameter) != 1:
+        raise RuntimeError("Expected one parameter name in Calculator.class")
+    # Debug metadata may use Java keywords. Vineflower preserves this name;
+    # javac rejects it, and a real CFR retry supplies a valid parameter name.
+    data = data.replace(parameter, b"\x01\x00\x05super")
+    with zipfile.ZipFile(work / "demo.jar", "w", compression=zipfile.ZIP_DEFLATED) as jar:
+        for name, content in (
+            ("demo/Calculator.class", data),
+            (f"lib/{MAVEN_JAR}", response.content),
+            ("settings.xml", b"<settings/>\n"),
+        ):
+            # Fixed ZIP metadata keeps the downloadable sample reproducible.
+            info = zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            jar.writestr(info, content)
 
 
 def run_decaf(
@@ -145,22 +169,32 @@ def verify_demo(output: Path) -> None:
         raise RuntimeError("Demo did not show: " + ", ".join(missing))
 
 
-def verify_sources(work: Path) -> None:
-    for name, cached in (("original", False), ("cached", True)):
-        report, _ = load_report(work / name)
-        if len(report.artifacts) != 1:
-            raise RuntimeError(f"{name}: expected one Maven artifact")
-        artifact = report.artifacts[0]
-        if not (
-            artifact.outcome == "ok" and not artifact.partial
-            and artifact.method == "maven" and artifact.gav == "org.slf4j:slf4j-api:2.0.13"
-            and artifact.sources_cached == cached and not artifact.attempts
-        ):
-            raise RuntimeError(f"{name}: expected Maven sources with cached={cached}")
-    source = Path(MAVEN_JAR) / "org/slf4j/Logger.java"
-    original = (work / "original" / source).read_bytes()
-    if original != (work / "cached" / source).read_bytes():
-        raise RuntimeError("Cached Maven sources differ from the first download")
+def verify_workflow(work: Path) -> None:
+    output = work / "decaf-out"
+    report, _ = load_report(output)
+    artifacts = {a.rel: a for a in report.artifacts}
+    dependency = f"demo.jar!/lib/{MAVEN_JAR}"
+    if set(artifacts) != {"demo.jar", dependency} or not all(
+        a.outcome == "ok" and not a.partial for a in report.artifacts
+    ):
+        raise RuntimeError("Workflow demo must finish with two complete artifacts")
+    app, library = artifacts["demo.jar"], artifacts[dependency]
+    if not (
+        library.method == "maven" and library.gav == "org.slf4j:slf4j-api:2.0.13"
+        and not library.sources_cached and not library.attempts
+    ):
+        raise RuntimeError("Workflow demo must download the published Maven sources")
+    if not (
+        app.check and app.check["checked"] == 1 and not app.check["flagged"]
+        and not app.check["noted"] and not app.check["unchecked"]
+        and [(a.engine, a.flagged) for a in app.attempts] == [("vineflower", 1), ("cfr", 0)]
+    ):
+        raise RuntimeError("Workflow demo must fix the compile-check error with a CFR retry")
+    recovered = output / "demo.jar/demo/Calculator.java"
+    if "Decompiled with CFR" not in recovered.read_text(encoding="utf-8"):
+        raise RuntimeError("Workflow demo did not retain the recovered CFR source")
+    subprocess.run(["javac", "--release", "11", "-d", str(work / "verified"), str(recovered)], check=True)
+    original = (output / "demo.jar/lib" / MAVEN_JAR / "org/slf4j/Logger.java").read_bytes()
     sources_jar = work / ".cache/decaf/sources/org.slf4j_slf4j-api_2.0.13-sources.jar"
     with zipfile.ZipFile(sources_jar) as jar:
         if original != jar.read("org/slf4j/Logger.java"):
@@ -168,19 +202,18 @@ def verify_sources(work: Path) -> None:
 
 
 def verify_layouts(work: Path) -> None:
-    expected = {"app.war", "app.war!/WEB-INF/lib/greeter.jar", "tools.jar"}
+    expected = {"app.war", "app.war!/WEB-INF/lib/greeter.jar"}
     for name in ("mirror", "merged"):
         report, _ = load_report(work / name)
         if {a.rel for a in report.artifacts} != expected or not all(
             a.outcome == "ok" and not a.partial for a in report.artifacts
         ):
-            raise RuntimeError(f"{name}: expected three complete artifacts, including the nested JAR")
+            raise RuntimeError(f"{name}: expected two complete artifacts, including the nested JAR")
         if report.totals["collisions"]:
             raise RuntimeError(f"{name}: unexpected source collision")
     for rel in (
         "app.war/WEB-INF/classes/demo/App.java",
         "app.war/WEB-INF/lib/greeter.jar/demo/Greeter.java",
-        "tools.jar/demo/Tool.java",
     ):
         if (work / "mirror" / rel).read_bytes() != (
             work / "merged/src/demo" / Path(rel).name
@@ -192,56 +225,40 @@ def verify_layouts(work: Path) -> None:
         raise RuntimeError("Merged output unexpectedly contains resources")
 
 
-def verify_checks(work: Path) -> None:
-    report, _ = load_report(work / "checked")
-    if len(report.artifacts) != 1:
-        raise RuntimeError("Compile-check demo should contain one artifact")
-    artifact = report.artifacts[0]
-    if not (
-        artifact.rel == "bytecode.jar" and artifact.partial
-        and [(a.engine, a.flagged) for a in artifact.attempts] == [("vineflower", 1), ("cfr", 1)]
-        and any("unreported exception java.io.IOException" in f.get("first", "") for f in artifact.flagged)
-        and (work / "checked/bytecode.jar/demo/Checked.java").is_file()
-    ):
-        raise RuntimeError("Compile-check demo lost the diagnostic, fallback, or retained source")
-
-
 def record_demo(fixtures: Path, name: str, env: dict[str, str]) -> None:
     work = fixtures / "recordings" / name
     work.mkdir(parents=True)
-    shutil.copyfile(fixtures / "config.toml", work / "config.toml")
+    config_dir = work / ".config/decaf"
+    config_dir.mkdir(parents=True)
+    shutil.copyfile(fixtures / "config.toml", config_dir / "config.toml")
     # VHS resolves Source paths from its working directory.
     shutil.copyfile(DOCS / "demos/common.tape", work / "common.tape")
-    if name == "sources":
-        url = f"{MAVEN_REPO}/org/slf4j/slf4j-api/2.0.13/{MAVEN_JAR}"
-        response = httpx.get(url, follow_redirects=True, timeout=60)
-        response.raise_for_status()
-        if hashlib.sha256(response.content).hexdigest() != MAVEN_SHA256:
-            raise RuntimeError("Maven demo binary failed its SHA-256 check")
-        (work / MAVEN_JAR).write_bytes(response.content)
-        # Install engines before recording; only sources and lookup verdicts
-        # need an empty cache to demonstrate the first Maven download.
-        engine_cache = work / ".cache/decaf/engines"
-        engine_cache.mkdir(parents=True)
-        with httpx.Client(follow_redirects=True, timeout=120) as client:
-            for spec in ENGINES.values():
-                jar = ensure_engine(spec, client)
-                shutil.copyfile(jar, engine_cache / jar.name)
-    elif name == "layouts":
-        shutil.copytree(fixtures / "libs", work / "libs")
-    elif name == "checks":
-        shutil.copyfile(fixtures / "samples/bytecode.jar", work / "bytecode.jar")
-    else:
-        shutil.copytree(fixtures / "samples", work / "samples")
+    cache = work / ".cache/decaf"
+    engine_cache = cache / "engines"
+    engine_cache.mkdir(parents=True)
+    with httpx.Client(follow_redirects=True, timeout=120) as client:
+        for spec in ENGINES.values():
+            jar = ensure_engine(spec, client)
+            shutil.copyfile(jar, engine_cache / jar.name)
+        if name == "workflow":
+            build_workflow_sample(fixtures)
+            shutil.copyfile(fixtures / "demo.jar", work / "demo.jar")
+            # Resolve the generated application before filming. Only this
+            # genuine miss is cached; the nested dependency remains uncached.
+            resolution = resolve_sources(
+                work / "demo.jar", [MAVEN_REPO], client, cache / "sources",
+                verdicts=VerdictCache(cache / "verdicts"),
+            )
+            if resolution.sources_jar or not resolution.miss or resolution.miss.startswith("network:"):
+                raise RuntimeError(f"Expected a clean Maven miss for demo.jar: {resolution.miss}")
+        else:
+            shutil.copytree(fixtures / "samples", work / "samples")
     subprocess.run(["vhs", str(DOCS / "demos" / f"{name}.tape")], cwd=work, env=env, check=True)
-    if name == "sources":
-        verify_sources(work)
-    elif name == "layouts":
-        verify_layouts(work)
-    elif name == "checks":
-        verify_checks(work)
+    if name == "workflow":
+        verify_workflow(work)
+        shutil.copyfile(work / "demo.jar", DOCS / "demos/demo.jar")
     else:
-        verify_demo(work / "out")
+        verify_demo(work / "decaf-out")
     shutil.copyfile(work / f"{name}.gif", DOCS / "demos" / f"{name}.gif")
 
 
@@ -313,12 +330,14 @@ def render_report(work: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     recording = parser.add_mutually_exclusive_group()
-    recording.add_argument("--gif", action="store_true", help="Also record all four terminal demos with VHS")
+    recording.add_argument("--gif", action="store_true", help="Also record both terminal demos with VHS")
     recording.add_argument(
         "--demo", choices=DEMOS, action="append",
         help="Record only this demo; repeat to select several (skips SVGs)",
     )
     args = parser.parse_args()
+    if (args.gif or args.demo) and sys.platform != "linux":
+        parser.error("GIF recording uses Linux XDG config/cache isolation")
     env = dict(os.environ)
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     # Recording often starts in a noninteractive shell with TERM=dumb/NO_COLOR.
@@ -336,6 +355,7 @@ def main() -> None:
         if not args.demo:
             run_decaf(work, "mirror", env)
             run_decaf(work, "merged", env, merge=True)
+            verify_layouts(work)
             run_decaf(work, "out", env, source="samples", expected_exit=1)
             verify_demo(work / "out")
             render_layouts(work)
