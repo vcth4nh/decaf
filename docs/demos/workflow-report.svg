@@ -1,0 +1,93 @@
+<svg role="img" width="1238" height="342.79999999999995" class="rich-terminal" viewBox="0 0 1238 342.79999999999995" xmlns="http://www.w3.org/2000/svg">
+    <title>decaf / successful compile-check retry</title>
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    .workflow-report-matrix {
+        font-family: "DejaVu Sans Mono", monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .workflow-report-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .workflow-report-r1 { fill: #89b4fa;font-weight: bold }
+.workflow-report-r2 { fill: #cdd6f4 }
+.workflow-report-r3 { fill: #cdd6f4;font-weight: bold }
+.workflow-report-r4 { fill: #f9e2af }
+.workflow-report-r5 { fill: #cba6f7 }
+.workflow-report-r6 { fill: #cba6f7;font-style: italic; }
+.workflow-report-r7 { fill: #94e2d5;font-weight: bold }
+.workflow-report-r8 { fill: #f38ba8;font-style: italic; }
+    </style>
+
+    <defs>
+    <clipPath id="workflow-report-clip-terminal">
+      <rect x="0" y="0" width="1219.0" height="291.79999999999995" />
+    </clipPath>
+    <clipPath id="workflow-report-line-0">
+    <rect x="0" y="1.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-1">
+    <rect x="0" y="25.9" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-2">
+    <rect x="0" y="50.3" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-3">
+    <rect x="0" y="74.7" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-4">
+    <rect x="0" y="99.1" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-5">
+    <rect x="0" y="123.5" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-6">
+    <rect x="0" y="147.9" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-7">
+    <rect x="0" y="172.3" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-8">
+    <rect x="0" y="196.7" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-9">
+    <rect x="0" y="221.1" width="1220" height="24.65"/>
+            </clipPath>
+<clipPath id="workflow-report-line-10">
+    <rect x="0" y="245.5" width="1220" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#1e1e2e" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1236" height="340.8" rx="8"/><text class="workflow-report-title" fill="#cdd6f4" text-anchor="middle" x="618" y="27">decaf&#160;/&#160;successful&#160;compile-check&#160;retry</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+
+    <g transform="translate(9, 41)" clip-path="url(#workflow-report-clip-terminal)">
+
+    <g class="workflow-report-matrix">
+    <text class="workflow-report-r1" x="0" y="20" textLength="536.8" clip-path="url(#workflow-report-line-0)">$&#160;decaf&#160;report&#160;decaf-out&#160;--artifact&#160;demo.jar</text><text class="workflow-report-r2" x="1220" y="20" textLength="12.2" clip-path="url(#workflow-report-line-0)">
+</text><text class="workflow-report-r3" x="0" y="44.4" textLength="97.6" clip-path="url(#workflow-report-line-1)">demo.jar</text><text class="workflow-report-r2" x="1220" y="44.4" textLength="12.2" clip-path="url(#workflow-report-line-1)">
+</text><text class="workflow-report-r4" x="24.4" y="68.8" textLength="48.8" clip-path="url(#workflow-report-line-2)">kind</text><text class="workflow-report-r2" x="73.2" y="68.8" textLength="12.2" clip-path="url(#workflow-report-line-2)">=</text><text class="workflow-report-r5" x="85.4" y="68.8" textLength="85.4" clip-path="url(#workflow-report-line-2)">archive</text><text class="workflow-report-r4" x="183" y="68.8" textLength="85.4" clip-path="url(#workflow-report-line-2)">outcome</text><text class="workflow-report-r2" x="268.4" y="68.8" textLength="12.2" clip-path="url(#workflow-report-line-2)">=</text><text class="workflow-report-r5" x="280.6" y="68.8" textLength="24.4" clip-path="url(#workflow-report-line-2)">ok</text><text class="workflow-report-r4" x="317.2" y="68.8" textLength="73.2" clip-path="url(#workflow-report-line-2)">method</text><text class="workflow-report-r2" x="390.4" y="68.8" textLength="12.2" clip-path="url(#workflow-report-line-2)">=</text><text class="workflow-report-r5" x="402.6" y="68.8" textLength="122" clip-path="url(#workflow-report-line-2)">vineflower</text><text class="workflow-report-r2" x="1220" y="68.8" textLength="12.2" clip-path="url(#workflow-report-line-2)">
+</text><text class="workflow-report-r4" x="24.4" y="93.2" textLength="36.6" clip-path="url(#workflow-report-line-3)">gav</text><text class="workflow-report-r2" x="61" y="93.2" textLength="12.2" clip-path="url(#workflow-report-line-3)">=</text><text class="workflow-report-r6" x="73.2" y="93.2" textLength="48.8" clip-path="url(#workflow-report-line-3)">None</text><text class="workflow-report-r4" x="134.2" y="93.2" textLength="48.8" clip-path="url(#workflow-report-line-3)">repo</text><text class="workflow-report-r2" x="183" y="93.2" textLength="12.2" clip-path="url(#workflow-report-line-3)">=</text><text class="workflow-report-r6" x="195.2" y="93.2" textLength="48.8" clip-path="url(#workflow-report-line-3)">None</text><text class="workflow-report-r4" x="256.2" y="93.2" textLength="134.2" clip-path="url(#workflow-report-line-3)">resolved_by</text><text class="workflow-report-r2" x="390.4" y="93.2" textLength="12.2" clip-path="url(#workflow-report-line-3)">=</text><text class="workflow-report-r6" x="402.6" y="93.2" textLength="48.8" clip-path="url(#workflow-report-line-3)">None</text><text class="workflow-report-r4" x="463.6" y="93.2" textLength="146.4" clip-path="url(#workflow-report-line-3)">sources_miss</text><text class="workflow-report-r2" x="610" y="93.2" textLength="12.2" clip-path="url(#workflow-report-line-3)">=</text><text class="workflow-report-r5" x="622.2" y="93.2" textLength="73.2" clip-path="url(#workflow-report-line-3)">cached</text><text class="workflow-report-r2" x="695.4" y="93.2" textLength="500.2" clip-path="url(#workflow-report-line-3)">&#160;verdict:&#160;no&#160;pom.properties;&#160;sha1&#160;not&#160;in&#160;</text><text class="workflow-report-r2" x="1220" y="93.2" textLength="12.2" clip-path="url(#workflow-report-line-3)">
+</text><text class="workflow-report-r2" x="0" y="117.6" textLength="780.8" clip-path="url(#workflow-report-line-4)">Central&#160;index;&#160;no&#160;artifact/version&#160;hints&#160;in&#160;filename&#160;or&#160;manifest</text><text class="workflow-report-r2" x="1220" y="117.6" textLength="12.2" clip-path="url(#workflow-report-line-4)">
+</text><text class="workflow-report-r4" x="24.4" y="142" textLength="85.4" clip-path="url(#workflow-report-line-5)">classes</text><text class="workflow-report-r2" x="109.8" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">=</text><text class="workflow-report-r7" x="122" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">2</text><text class="workflow-report-r4" x="146.4" y="142" textLength="122" clip-path="url(#workflow-report-line-5)">java_files</text><text class="workflow-report-r2" x="268.4" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">=</text><text class="workflow-report-r7" x="280.6" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">2</text><text class="workflow-report-r4" x="305" y="142" textLength="195.2" clip-path="url(#workflow-report-line-5)">resources_copied</text><text class="workflow-report-r2" x="500.2" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">=</text><text class="workflow-report-r7" x="512.4" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">1</text><text class="workflow-report-r4" x="536.8" y="142" textLength="207.4" clip-path="url(#workflow-report-line-5)">resources_skipped</text><text class="workflow-report-r2" x="744.2" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">=</text><text class="workflow-report-r7" x="756.4" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">0</text><text class="workflow-report-r4" x="780.8" y="142" textLength="183" clip-path="url(#workflow-report-line-5)">missing_classes</text><text class="workflow-report-r2" x="963.8" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">=</text><text class="workflow-report-r7" x="976" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">0</text><text class="workflow-report-r4" x="1000.4" y="142" textLength="85.4" clip-path="url(#workflow-report-line-5)">stubbed</text><text class="workflow-report-r2" x="1085.8" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">=</text><text class="workflow-report-r7" x="1098" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">0</text><text class="workflow-report-r2" x="1220" y="142" textLength="12.2" clip-path="url(#workflow-report-line-5)">
+</text><text class="workflow-report-r4" x="0" y="166.4" textLength="122" clip-path="url(#workflow-report-line-6)">collisions</text><text class="workflow-report-r2" x="122" y="166.4" textLength="12.2" clip-path="url(#workflow-report-line-6)">=</text><text class="workflow-report-r7" x="134.2" y="166.4" textLength="12.2" clip-path="url(#workflow-report-line-6)">0</text><text class="workflow-report-r2" x="1220" y="166.4" textLength="12.2" clip-path="url(#workflow-report-line-6)">
+</text><text class="workflow-report-r2" x="0" y="190.8" textLength="109.8" clip-path="url(#workflow-report-line-7)">&#160;&#160;check:&#160;</text><text class="workflow-report-r4" x="109.8" y="190.8" textLength="85.4" clip-path="url(#workflow-report-line-7)">checked</text><text class="workflow-report-r2" x="195.2" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">=</text><text class="workflow-report-r7" x="207.4" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">2</text><text class="workflow-report-r4" x="231.8" y="190.8" textLength="85.4" clip-path="url(#workflow-report-line-7)">flagged</text><text class="workflow-report-r2" x="317.2" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">=</text><text class="workflow-report-r7" x="329.4" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">0</text><text class="workflow-report-r4" x="353.8" y="190.8" textLength="61" clip-path="url(#workflow-report-line-7)">noted</text><text class="workflow-report-r2" x="414.8" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">=</text><text class="workflow-report-r7" x="427" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">0</text><text class="workflow-report-r4" x="451.4" y="190.8" textLength="109.8" clip-path="url(#workflow-report-line-7)">unchecked</text><text class="workflow-report-r2" x="561.2" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">=</text><text class="workflow-report-r7" x="573.4" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">0</text><text class="workflow-report-r2" x="1220" y="190.8" textLength="12.2" clip-path="url(#workflow-report-line-7)">
+</text><text class="workflow-report-r2" x="0" y="215.2" textLength="256.2" clip-path="url(#workflow-report-line-8)">&#160;&#160;vineflower&#160;archive&#160;</text><text class="workflow-report-r4" x="256.2" y="215.2" textLength="24.4" clip-path="url(#workflow-report-line-8)">rc</text><text class="workflow-report-r2" x="280.6" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">=</text><text class="workflow-report-r7" x="292.8" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">0</text><text class="workflow-report-r4" x="317.2" y="215.2" textLength="109.8" clip-path="url(#workflow-report-line-8)">timed_out</text><text class="workflow-report-r2" x="427" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">=</text><text class="workflow-report-r8" x="439.2" y="215.2" textLength="61" clip-path="url(#workflow-report-line-8)">False</text><text class="workflow-report-r4" x="512.4" y="215.2" textLength="122" clip-path="url(#workflow-report-line-8)">java_files</text><text class="workflow-report-r2" x="634.4" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">=</text><text class="workflow-report-r7" x="646.6" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">2</text><text class="workflow-report-r4" x="671" y="215.2" textLength="85.4" clip-path="url(#workflow-report-line-8)">stubbed</text><text class="workflow-report-r2" x="756.4" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">=</text><text class="workflow-report-r7" x="768.6" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">0</text><text class="workflow-report-r4" x="793" y="215.2" textLength="85.4" clip-path="url(#workflow-report-line-8)">flagged</text><text class="workflow-report-r2" x="878.4" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">=</text><text class="workflow-report-r7" x="890.6" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">1</text><text class="workflow-report-r4" x="915" y="215.2" textLength="134.2" clip-path="url(#workflow-report-line-8)">peak_rss_mb</text><text class="workflow-report-r2" x="1049.2" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">=</text><text class="workflow-report-r7" x="1061.4" y="215.2" textLength="36.6" clip-path="url(#workflow-report-line-8)">149</text><text class="workflow-report-r2" x="1220" y="215.2" textLength="12.2" clip-path="url(#workflow-report-line-8)">
+</text><text class="workflow-report-r4" x="0" y="239.6" textLength="85.4" clip-path="url(#workflow-report-line-9)">heap_mb</text><text class="workflow-report-r2" x="85.4" y="239.6" textLength="12.2" clip-path="url(#workflow-report-line-9)">=</text><text class="workflow-report-r7" x="97.6" y="239.6" textLength="48.8" clip-path="url(#workflow-report-line-9)">5989</text><text class="workflow-report-r4" x="158.6" y="239.6" textLength="158.6" clip-path="url(#workflow-report-line-9)">out_of_memory</text><text class="workflow-report-r2" x="317.2" y="239.6" textLength="12.2" clip-path="url(#workflow-report-line-9)">=</text><text class="workflow-report-r8" x="329.4" y="239.6" textLength="61" clip-path="url(#workflow-report-line-9)">False</text><text class="workflow-report-r2" x="1220" y="239.6" textLength="12.2" clip-path="url(#workflow-report-line-9)">
+</text><text class="workflow-report-r2" x="0" y="264" textLength="146.4" clip-path="url(#workflow-report-line-10)">&#160;&#160;cfr&#160;class&#160;</text><text class="workflow-report-r4" x="146.4" y="264" textLength="24.4" clip-path="url(#workflow-report-line-10)">rc</text><text class="workflow-report-r2" x="170.8" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">=</text><text class="workflow-report-r7" x="183" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">0</text><text class="workflow-report-r4" x="207.4" y="264" textLength="109.8" clip-path="url(#workflow-report-line-10)">timed_out</text><text class="workflow-report-r2" x="317.2" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">=</text><text class="workflow-report-r8" x="329.4" y="264" textLength="61" clip-path="url(#workflow-report-line-10)">False</text><text class="workflow-report-r4" x="402.6" y="264" textLength="122" clip-path="url(#workflow-report-line-10)">java_files</text><text class="workflow-report-r2" x="524.6" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">=</text><text class="workflow-report-r7" x="536.8" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">1</text><text class="workflow-report-r4" x="561.2" y="264" textLength="85.4" clip-path="url(#workflow-report-line-10)">stubbed</text><text class="workflow-report-r2" x="646.6" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">=</text><text class="workflow-report-r7" x="658.8" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">0</text><text class="workflow-report-r4" x="683.2" y="264" textLength="85.4" clip-path="url(#workflow-report-line-10)">flagged</text><text class="workflow-report-r2" x="768.6" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">=</text><text class="workflow-report-r7" x="780.8" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">0</text><text class="workflow-report-r4" x="805.2" y="264" textLength="134.2" clip-path="url(#workflow-report-line-10)">peak_rss_mb</text><text class="workflow-report-r2" x="939.4" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">=</text><text class="workflow-report-r7" x="951.6" y="264" textLength="24.4" clip-path="url(#workflow-report-line-10)">85</text><text class="workflow-report-r4" x="988.2" y="264" textLength="85.4" clip-path="url(#workflow-report-line-10)">heap_mb</text><text class="workflow-report-r2" x="1073.6" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">=</text><text class="workflow-report-r7" x="1085.8" y="264" textLength="48.8" clip-path="url(#workflow-report-line-10)">5989</text><text class="workflow-report-r2" x="1220" y="264" textLength="12.2" clip-path="url(#workflow-report-line-10)">
+</text><text class="workflow-report-r4" x="0" y="288.4" textLength="158.6" clip-path="url(#workflow-report-line-11)">out_of_memory</text><text class="workflow-report-r2" x="158.6" y="288.4" textLength="12.2" clip-path="url(#workflow-report-line-11)">=</text><text class="workflow-report-r8" x="170.8" y="288.4" textLength="61" clip-path="url(#workflow-report-line-11)">False</text><text class="workflow-report-r2" x="1220" y="288.4" textLength="12.2" clip-path="url(#workflow-report-line-11)">
+</text>
+    </g>
+    </g>
+</svg>

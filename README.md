@@ -35,14 +35,18 @@ and lookup results cached for later runs. Otherwise, a chain of five decompilers
 retries crashes, timeouts, missing classes, and stubbed methods. Checks with
 `javac` also retry classes with decompiler errors.
 
-One `demo.jar` contains the SLF4J logging library and a small application class.
-The demo downloads the library's published sources, decompiles the application,
-and fixes a compile-check error by retrying with CFR.
+The demo input contains ten application and helper classes across five archives,
+plus the SLF4J logging library. The run downloads SLF4J's published sources,
+decompiles the other archives, and fixes a compile-check error by retrying with CFR.
 
-![One run downloads Maven sources and decompiles the application; artifact details show Vineflower with one flagged class and CFR with zero](docs/demos/workflow.gif)
+![A run downloads Maven sources and decompiles five archives, including a successful compile-check retry](docs/demos/workflow.gif)
 
-[Download the demo JAR](docs/demos/demo.jar). See
-[sources and engines](docs/sources-and-engines.md) for Maven matching and caching,
+Processing is shown at half speed. The report records the failed first check
+and the successful retry:
+
+![The artifact report shows Vineflower with one flagged class, CFR with zero, and both application classes checked](docs/demos/workflow-report.svg)
+
+See [sources and engines](docs/sources-and-engines.md) for Maven matching and caching,
 or [compile checks](docs/compile-check.md) for retry rules and limitations.
 
 ### Batch processing and output layouts
@@ -60,9 +64,13 @@ See [output layouts](docs/output-layouts.md) for resource handling and collision
 A broken archive does not stop valid archives from producing sources. Inspect
 failed and partial artifacts, compiler diagnostics, and engine memory use after
 the run. The demo shows an unreadable archive alongside complete and partial
-results, then opens the problem summary and artifact details.
+results.
 
-![A batch completes with an unreadable archive, then report commands show failed and partial artifacts, compiler diagnostics, and engine memory use](docs/demos/reports.gif)
+![A batch finishes with two complete artifacts, one partial result, and one unreadable archive](docs/demos/reports.gif)
+
+Inspect the problem summary and compiler diagnostic after the run:
+
+![Report commands list failed and partial artifacts, then show the compiler diagnostic and engine attempts](docs/demos/reports-report.svg)
 
 See [reports](docs/reports.md) for exit codes and JSON output, or
 [demo inputs and recording](docs/development.md#readme-media) to reproduce these GIFs.

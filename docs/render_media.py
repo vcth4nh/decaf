@@ -35,6 +35,7 @@ from decaf.verdicts import VerdictCache
 
 DOCS = Path(__file__).resolve().parent
 DEMOS = ("workflow", "reports")
+WORKFLOW_LIBRARIES = ("codec", "collections", "math", "text")
 MAVEN_REPO = "https://repo.maven.apache.org/maven2"
 MAVEN_JAR = "slf4j-api-2.0.13.jar"
 MAVEN_SHA256 = "e7c2a48e8515ba1f49fa637d57b4e2f590b3f5bd97407ac699c3aa5efb1204a9"
@@ -102,6 +103,17 @@ def build_sample(work: Path) -> None:
     )
 
 
+def jar_bytes(entries: dict[str, bytes]) -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as jar:
+        for name, content in sorted(entries.items()):
+            # Stable ZIP metadata keeps regenerated inputs identical.
+            info = zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            jar.writestr(info, content)
+    return archive.getvalue()
+
+
 def build_workflow_sample(work: Path) -> None:
     url = f"{MAVEN_REPO}/org/slf4j/slf4j-api/2.0.13/{MAVEN_JAR}"
     response = httpx.get(url, follow_redirects=True, timeout=60)
@@ -115,16 +127,27 @@ def build_workflow_sample(work: Path) -> None:
     # Debug metadata may use Java keywords. Vineflower preserves this name;
     # javac rejects it, and a real CFR retry supplies a valid parameter name.
     data = data.replace(parameter, b"\x01\x00\x05super")
-    with zipfile.ZipFile(work / "demo.jar", "w", compression=zipfile.ZIP_DEFLATED) as jar:
-        for name, content in (
-            ("demo/Calculator.class", data),
-            (f"lib/{MAVEN_JAR}", response.content),
-            ("settings.xml", b"<settings/>\n"),
-        ):
-            # Fixed ZIP metadata keeps the downloadable sample reproducible.
-            info = zipfile.ZipInfo(name, date_time=(2024, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            jar.writestr(info, content)
+    classes = work / "workflow-classes"
+    subprocess.run(
+        ["javac", "-g", "--release", "11", "-cp", str(work / "classes"), "-d", str(classes),
+         *(str(p) for p in sorted((DOCS / "demo-sources").rglob("*.java")))], check=True,
+    )
+    entries = {
+        "demo/Calculator.class": data,
+        "demo/Workflow.class": (classes / "demo/Workflow.class").read_bytes(),
+        f"lib/{MAVEN_JAR}": response.content,
+        "settings.xml": b"<settings/>\n",
+    }
+    libraries = work / "workflow-libs"
+    libraries.mkdir()
+    for name in WORKFLOW_LIBRARIES:
+        library = jar_bytes({
+            path.relative_to(classes).as_posix(): path.read_bytes()
+            for path in (classes / "demo" / name).glob("*.class")
+        })
+        entries[f"lib/{name}.jar"] = library
+        (libraries / f"{name}.jar").write_bytes(library)
+    (work / "demo.jar").write_bytes(jar_bytes(entries))
 
 
 def run_decaf(
@@ -174,10 +197,11 @@ def verify_workflow(work: Path) -> None:
     report, _ = load_report(output)
     artifacts = {a.rel: a for a in report.artifacts}
     dependency = f"demo.jar!/lib/{MAVEN_JAR}"
-    if set(artifacts) != {"demo.jar", dependency} or not all(
+    generated = {"demo.jar", *(f"demo.jar!/lib/{name}.jar" for name in WORKFLOW_LIBRARIES)}
+    if set(artifacts) != generated | {dependency} or not all(
         a.outcome == "ok" and not a.partial for a in report.artifacts
     ):
-        raise RuntimeError("Workflow demo must finish with two complete artifacts")
+        raise RuntimeError("Workflow demo must finish with six complete artifacts")
     app, library = artifacts["demo.jar"], artifacts[dependency]
     if not (
         library.method == "maven" and library.gav == "org.slf4j:slf4j-api:2.0.13"
@@ -185,15 +209,33 @@ def verify_workflow(work: Path) -> None:
     ):
         raise RuntimeError("Workflow demo must download the published Maven sources")
     if not (
-        app.check and app.check["checked"] == 1 and not app.check["flagged"]
+        app.check and app.check["checked"] == 2 and not app.check["flagged"]
         and not app.check["noted"] and not app.check["unchecked"]
         and [(a.engine, a.flagged) for a in app.attempts] == [("vineflower", 1), ("cfr", 0)]
     ):
         raise RuntimeError("Workflow demo must fix the compile-check error with a CFR retry")
+    for rel in generated:
+        artifact = artifacts[rel]
+        if not (
+            artifact.classes == 2 and artifact.check and artifact.check["checked"] == 2
+            and not artifact.check["flagged"] and not artifact.check["noted"]
+            and not artifact.check["unchecked"]
+        ):
+            raise RuntimeError(f"Workflow demo must decompile and check both classes in {rel}")
     recovered = output / "demo.jar/demo/Calculator.java"
     if "Decompiled with CFR" not in recovered.read_text(encoding="utf-8"):
         raise RuntimeError("Workflow demo did not retain the recovered CFR source")
-    subprocess.run(["javac", "--release", "11", "-d", str(work / "verified"), str(recovered)], check=True)
+    sources = sorted((output / "demo.jar/demo").glob("*.java"))
+    for name in WORKFLOW_LIBRARIES:
+        sources.extend(sorted((output / f"demo.jar/lib/{name}.jar").rglob("*.java")))
+    if len(sources) != 10:
+        raise RuntimeError("Workflow demo must retain all ten decompiled classes")
+    subprocess.run(
+        ["javac", "--release", "11", "-d", str(work / "verified"), *map(str, sources)], check=True,
+    )
+    subprocess.run(
+        ["java", "-cp", str(work / "verified"), "demo.Workflow"], check=True, capture_output=True,
+    )
     original = (output / "demo.jar/lib" / MAVEN_JAR / "org/slf4j/Logger.java").read_bytes()
     sources_jar = work / ".cache/decaf/sources/org.slf4j_slf4j-api_2.0.13-sources.jar"
     with zipfile.ZipFile(sources_jar) as jar:
@@ -243,22 +285,23 @@ def record_demo(fixtures: Path, name: str, env: dict[str, str]) -> None:
         if name == "workflow":
             build_workflow_sample(fixtures)
             shutil.copyfile(fixtures / "demo.jar", work / "demo.jar")
-            # Resolve the generated application before filming. Only this
-            # genuine miss is cached; the nested dependency remains uncached.
-            resolution = resolve_sources(
-                work / "demo.jar", [MAVEN_REPO], client, cache / "sources",
-                verdicts=VerdictCache(cache / "verdicts"),
-            )
-            if resolution.sources_jar or not resolution.miss or resolution.miss.startswith("network:"):
-                raise RuntimeError(f"Expected a clean Maven miss for demo.jar: {resolution.miss}")
+            # Cache real misses for the generated archives before filming.
+            # The published dependency still starts without cached sources.
+            for archive in [work / "demo.jar", *sorted((fixtures / "workflow-libs").glob("*.jar"))]:
+                resolution = resolve_sources(
+                    archive, [MAVEN_REPO], client, cache / "sources",
+                    verdicts=VerdictCache(cache / "verdicts"),
+                )
+                if resolution.sources_jar or not resolution.miss or resolution.miss.startswith("network:"):
+                    raise RuntimeError(f"Expected a clean Maven miss for {archive.name}: {resolution.miss}")
         else:
             shutil.copytree(fixtures / "samples", work / "samples")
     subprocess.run(["vhs", str(DOCS / "demos" / f"{name}.tape")], cwd=work, env=env, check=True)
     if name == "workflow":
         verify_workflow(work)
-        shutil.copyfile(work / "demo.jar", DOCS / "demos/demo.jar")
     else:
         verify_demo(work / "decaf-out")
+    render_recording_report(work, name)
     shutil.copyfile(work / f"{name}.gif", DOCS / "demos" / f"{name}.gif")
 
 
@@ -327,13 +370,27 @@ def render_report(work: Path) -> None:
     save_svg(c, "compile-check.svg", "decaf / compile check and fallback")
 
 
+def render_recording_report(work: Path, name: str) -> None:
+    report, _ = load_report(work / "decaf-out")
+    c = console()
+    if name == "reports":
+        c.print("$ decaf report decaf-out --problems", style="bold blue")
+        render_problems(c, report)
+        c.print()
+    artifact = "demo.jar" if name == "workflow" else "bytecode.jar"
+    c.print(f"$ decaf report decaf-out --artifact {artifact}", style="bold blue")
+    render_artifact(c, report, [artifact])
+    title = "successful compile-check retry" if name == "workflow" else "failures and diagnostics"
+    save_svg(c, f"demos/{name}-report.svg", f"decaf / {title}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     recording = parser.add_mutually_exclusive_group()
     recording.add_argument("--gif", action="store_true", help="Also record both terminal demos with VHS")
     recording.add_argument(
         "--demo", choices=DEMOS, action="append",
-        help="Record only this demo; repeat to select several (skips SVGs)",
+        help="Record this demo and its report image; repeat to select several",
     )
     args = parser.parse_args()
     if (args.gif or args.demo) and sys.platform != "linux":

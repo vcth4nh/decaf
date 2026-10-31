@@ -5,8 +5,8 @@ Set Width 1200
 Set Height 760
 Set Theme "Catppuccin Mocha"
 Set Padding 24
-Set TypingSpeed 60ms
-Set PlaybackSpeed 1
+Set TypingSpeed 30ms
+Set PlaybackSpeed 0.5
 Set Framerate 20
 Set CursorBlink false
 Set WaitTimeout 60s
