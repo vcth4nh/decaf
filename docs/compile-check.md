@@ -58,9 +58,10 @@ limits retries for these cases:
   across engines without yielding compilable Java.
 - **Detached inner classes:** an engine may write an old bytecode inner class
   as a separate file such as `XStream$1.java`. Errors involving synthetic names
-  such as `this$0` are noted. Other errors retry the outer class so another
-  engine can nest it correctly. The files are held together during retries
-  to avoid duplicate output.
+  such as `this$0` are noted. Other errors or a stub retry the outer class so
+  another engine can nest it correctly. The files are held together during
+  retries to avoid duplicate output, also when the engine wrote no file of
+  the outer class.
 
 ## Cost and controls
 

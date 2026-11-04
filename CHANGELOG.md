@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An inner class could be in the output two times when an engine wrote its
+  file apart but wrote no file of its outer class (#159), for example when
+  Fernflower failed the outer class as a whole. decaf wrote the file of the
+  inner class at once, and the retry of the outer class nested the inner
+  class again. Now such a file holds its family until a retry of the outer
+  class replaces the family, as for a flagged file of an inner class (#101).
+  With no held file of the outer class, a retry file without a stub or a
+  flag replaces the family also when the check cannot examine it. When no
+  retry family is good as a whole, the first retry file of the outer class
+  fills the gap, also a stubbed or flagged one. The held files of the inner
+  classes that this file nests go at the end of the chain. Thus the outer
+  class is not missing at the end.
+- A held file of an inner class that passes the check now stays when the
+  retry engine writes that class apart too, but its own file of the class
+  has a stub or a flag (#159). That engine does not nest the class in its
+  file of the outer class, so its other files of the family can replace the
+  held ones. Before, such a retry file failed the whole retry family, so a
+  clean retry file of the outer class did not replace a flagged one.
+- A stubbed file of an inner class that an engine wrote apart went out with
+  its stub, and its outer class got no retry (#160). Now such a file holds
+  its family, as a flagged one does, and the outer class gets a retry. A
+  stub in any held file of a family now lets a retry family without stubs
+  and flags replace it, also when the check cannot examine the retry files
+  or with `--no-check`, as for one stubbed file (#96).
+
 ## [1.12.0] - 2026-10-31
 
 ### Added

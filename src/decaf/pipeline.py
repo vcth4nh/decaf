@@ -755,6 +755,7 @@ class _Held:
     copies: set[str] | None = None  # the _copied_keys of the source, read once
     roots: list[Path] | None = None  # the _tree_roots of a class folder, read once
     waiting: set[str] = field(default_factory=set)  # outer classes whose held family waits for a retry (#101, #150)
+    nests: dict[str, set[str]] = field(default_factory=dict)  # outer class -> held keys that its gap fill nests (#159)
 
     def stems(self, settled: bool = True) -> set[str]:
         """The class stems of the held files: a copy's key loses its container root (#107).
@@ -899,15 +900,23 @@ def _apply_hold(
     bytecode can cause this error legally (#108). A file of a Groovy class gets no more retries
     when two engines in a row flag it: no engine writes compilable Java for the call-site and
     meta-class code of groovyc, and each engine gives a different first error for it (#101).
-    A flagged file of an inner class that the engine wrote apart from its outer class holds its
-    family: the files of the outer class and of its inner classes in the output. The family must
-    be new: no earlier output wrote or held a file of it (#101). A held file of an outer class
-    holds its family too, from any output: the next engine can nest the inner classes in its file
-    of the outer class, so no file of an inner class goes out alone (#150). Then the outer class
-    gets a retry. A later output replaces a held family as a whole, when it has the file of the
-    outer class and each of its files of the family is good, as for one file: no stub, not
-    flagged, and it passes the check or replaces a stub; else its files of the family go. Only
-    a held file of an inner class whose family does not wait still follows the rule of one file.
+    A flagged or stubbed (#160) file of an inner class that the engine wrote apart from its outer
+    class holds its family: the files of the outer class and of its inner classes in the output. A
+    file of an inner class also holds its family when the output has no file of its outer class,
+    for example when the outer class failed as a whole (#159). The family must be new: no
+    earlier output wrote or held a file of it (#101). A held file of an outer class holds its
+    family too, from any output: the next engine can nest the inner classes in its file of the
+    outer class, so no file of an inner class goes out alone (#150). Then the outer class gets a
+    retry. A later output replaces a held family as a whole, when it has the file of the outer
+    class and each of its files of the family is good, as for one file: no stub, not flagged, and
+    it passes the check or replaces a known loss; else its files of the family go. A known loss
+    is a stub in a held file of the family, or no held file of the outer class. A held file of an
+    inner class that passes the check stays when the output has a file of that class that is not
+    good: that engine wrote the class apart, so its file of the outer class does not nest it
+    (#159). When no held file of the outer class exists, the first file of the outer class fills
+    the gap, also a stubbed or flagged one. Its files of the family are held, and the held files
+    of the inner classes that it nests go at the end of the chain (#159). Only a held file of an
+    inner class whose family does not wait still follows the rule of one file.
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
@@ -923,12 +932,17 @@ def _apply_hold(
 
     def good(key: str, stub: stubs.Stub | None, r: check.FileResult | None) -> bool:
         """Can this file take part in the replacement of a held family? As for one file: no stub, not
-        flagged, and it passes the check, or it replaces a stub (a known loss): the held file of its key
-        or the held file of its outer class has one."""
+        flagged, and it passes the check, or it replaces a known loss: a held file of its family has a
+        stub, or no held file of its outer class exists (#159)."""
         if stub is not None or (r is not None and r.status == "flagged"):
             return False
-        olds = (held.files.get(key), held.files.get(top(key)))
-        return (r is not None and r.passes) or any(old is not None and old.stub is not None for old in olds)
+        family = top(key)
+        return (r is not None and r.passes) or family not in held.files or any(
+            f.stub is not None for k, f in held.files.items() if top(k) == family
+        )
+
+    def passes(f: _HeldFile) -> bool:
+        return f.stub is None and f.result is not None and f.result.passes
 
     files: list[tuple[Path, str, str, stubs.Stub | None, check.FileResult | None]] = []
     for p in sorted(tree.rglob("*")):
@@ -939,8 +953,12 @@ def _apply_hold(
         if key in held.copies:
             key = rel[: -len(PurePosixPath(rel).suffix)]  # one key for each copy (#107)
         files.append((p, rel, key, found.get(rel), results.get(rel) if results is not None else None))
-    waiting = {top(key) for _, _, key, _, r in files if top(key) != key and r is not None and r.status == "flagged"}
-    if waiting:  # a flagged file of an inner class holds only a new family
+    keys = {key for _, _, key, _, _ in files}
+    waiting = {  # a stubbed or flagged file of an inner class, or one without the file of its outer class (#159, #160)
+        top(key) for _, _, key, stub, r in files
+        if top(key) != key and (stub is not None or (r is not None and r.status == "flagged") or top(key) not in keys)
+    }
+    if waiting:  # holds only a new family
         waiting -= {top(k) for k in held.files.keys() | held.written}
     # a clean file with the key of a stubbed or flagged file of the same output is written, so no family waits then
     clean_now = {key for _, _, key, stub, r in files if stub is None and (r is None or r.status != "flagged")}
@@ -949,16 +967,25 @@ def _apply_hold(
         if top(key) == key and key not in held.written and key not in clean_now
         and (stub is not None or (r is not None and r.status == "flagged"))
     }
+    fill: set[str] = set()  # keys of this output that fill the gap of a family without a held outer file (#159)
     for family in list(held.waiting):
         mine = [  # a file of a class that an earlier output wrote goes (#107), so it does not count
             (key, stub, r) for _, _, key, stub, r in files if top(key) == family and key not in held.written
         ]
-        if any(key == family for key, _, _ in mine) and not engines.PROCESSES.closed and all(
-            good(key, stub, r) for key, stub, r in mine
-        ):  # the files of this output replace the held files of the family
-            held.waiting.discard(family)
-            for k in [k for k in held.files if top(k) == family]:
+        if not any(key == family for key, _, _ in mine) or engines.PROCESSES.closed:
+            continue
+        stay = {  # this engine wrote the class apart too, so its file of the outer class does not nest it (#159)
+            key for key, stub, r in mine
+            if key != family and key in held.files and passes(held.files[key]) and not good(key, stub, r)
+        }
+        if all(good(key, stub, r) for key, stub, r in mine if key not in stay):
+            held.waiting.discard(family)  # the files of this output replace the held files of the family
+            held.nests.pop(family, None)
+            for k in [k for k in held.files if top(k) == family and k not in stay]:
                 (held.root / held.files.pop(k).path).unlink(missing_ok=True)
+        elif family not in held.files:  # the first file of the outer class fills the gap, also a held one (#159)
+            held.nests[family] = {k for k in held.files if top(k) == family} - {key for key, _, _ in mine}
+            fill |= {key for key, _, _ in mine if key not in held.files}
     flagged = 0
     held_now: set[str] = set()
     written_now: set[str] = set()
@@ -988,9 +1015,9 @@ def _apply_hold(
                 p.unlink()  # the earlier engine's held file stays
         elif key in held.written and key not in written_now:
             p.unlink()  # an earlier engine wrote this class, and its file stays (#107)
-        elif top(key) in held.waiting:
+        elif top(key) in held.waiting and key not in fill:
             p.unlink()  # the held family of its outer class waits: only a whole family replaces it
-        elif stub is not None or is_flagged or top(key) in waiting:
+        elif stub is not None or is_flagged or top(key) in waiting or key in fill:
             if held.root is None:
                 held.root = _tmp_dir(ctx)
             target = held.root / rel
@@ -1042,6 +1069,11 @@ def _hold_output(
 
 def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
     """End of the chain: write the held files (the first engine's file) and list them (#96, #99)."""
+    for keys in held.nests.values():  # the held file of the outer class nests these classes (#159)
+        for k in keys:
+            f = held.files.pop(k, None)
+            if f is not None:
+                (held.root / f.path).unlink(missing_ok=True)
     if held.files:
         java, collisions = ctx.writer.add_tree(held.root, rel)
         report.java_files += java
