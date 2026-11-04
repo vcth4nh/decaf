@@ -2356,13 +2356,11 @@ def test_a_waiting_family_holds_its_clean_file_of_an_inner_class(make_jar, tmp_p
 @pytest.mark.parametrize("cfr", [
     {_A: "class A {} // FLAG cfr"},
     {_A: _CFR_STUB},
-    {_A: "// ENV"},
-    {_A: "class A { /* cfr */ }", _A1: "// FLAG cfr"},
-    {_A1: "class A$1 { /* cfr */ }"},  # no file of the outer class
-    {_A: "class A {} // FLAG cfr", _A1: "class A$1 { /* cfr */ }"},  # the file of A fails, so A$1 goes with it
+    {_A: "// ENV"},  # an unchecked file does not replace the flagged A$1 that it nests
+    {_A: "class A { /* cfr */ }", _A1: "// FLAG cfr"},  # the clean A of Vineflower stays: the A of CFR is not better
     {_A: "class A {} // FLAG cfr", _A2: "class A$2 { /* cfr */ }"},  # the file of Vineflower nests A$2
 ])
-def test_a_retry_family_replaces_a_waiting_family_only_as_a_whole(make_jar, tmp_path: Path, cfr):
+def test_a_retry_family_that_is_not_better_leaves_the_waiting_family(make_jar, tmp_path: Path, cfr):
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A: "class A { /* vf */ }", _A1: "// FLAG"}, "cfr": cfr,
     })
@@ -2371,13 +2369,31 @@ def test_a_retry_family_replaces_a_waiting_family_only_as_a_whole(make_jar, tmp_
     assert report.missing_classes == 0 and report.stubs == []
 
 
-def test_a_retry_family_that_passes_replaces_the_waiting_family(make_jar, tmp_path: Path):
+@pytest.mark.parametrize("cfr", [
+    {_A1: "class A$1 { /* cfr */ }"},  # no file of the outer class
+    {_A: "class A {} // FLAG cfr", _A1: "class A$1 { /* cfr */ }"},
+])
+def test_a_clean_retry_file_replaces_the_flagged_held_file_of_its_class_alone(make_jar, tmp_path: Path, cfr):
+    """Vineflower wrote A$1 apart, so its file of A does not nest A$1. The clean A$1 of CFR replaces the flagged A$1
+    alone, as for one file, and the clean A of Vineflower stays (#159). Then no file of the family has a flag, so A
+    gets no more retries. Before, only a whole retry family replaced a held family."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A { /* vf */ }", _A1: "// FLAG"}, "cfr": cfr,
+    })
+    assert written == {_A: "class A { /* vf */ }", _A1: "class A$1 { /* cfr */ }"}
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+    assert report.flagged == [] and not report.partial and report.java_files == 2
+
+
+def test_a_retry_replaces_only_the_held_files_that_it_makes_better(make_jar, tmp_path: Path):
+    """The clean A of Vineflower stays: the clean A of Fernflower is not better. The clean A$1 of Fernflower replaces
+    the flagged A$1 of Vineflower (#159). Before, the whole family of Fernflower replaced the held family."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A: "class A { /* vf */ }", _A1: "// FLAG"},
         "cfr": {_A: "class A {} // FLAG cfr"},
         "fernflower": {_A: "class A { /* ff */ }", _A1: "class A$1 { /* ff */ }"},
     })
-    assert written == {_A: "class A { /* ff */ }", _A1: "class A$1 { /* ff */ }"}
+    assert written == {_A: "class A { /* vf */ }", _A1: "class A$1 { /* ff */ }"}
     assert report.flagged == [] and [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower"]
 
 
@@ -2389,18 +2405,20 @@ def test_a_retry_with_the_missing_outer_class_drops_the_held_file_of_its_inner_c
     })
     assert written == {_A: "class A { /* cfr */ }"}
     assert report.flagged == [] and report.missing_classes == 0
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]  # the A of CFR passes, so the family is done
 
 
-def test_a_family_held_for_stubs_is_replaced_only_as_a_whole(make_jar, tmp_path: Path):
-    """The stubs of Vineflower hold A and A$1, so the family waits (#150). No retry passes as a whole, so the
-    clean A$1 of Fernflower goes: it cannot replace the held A$1 alone."""
+def test_a_clean_retry_file_replaces_a_stubbed_held_file_of_an_inner_class_alone(make_jar, tmp_path: Path):
+    """The stubs of Vineflower hold A and A$1, so the family waits (#150). CFR and Fernflower flag A, so the stubbed
+    A of Vineflower stays. Vineflower wrote A$1 apart, so the clean A$1 of Fernflower replaces the stubbed A$1 alone
+    (#159). Before, only a whole retry family replaced a held family, and both stubs went out."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A: _VF_STUB, _A1: _VF_STUB.replace("class A", "class A$1")},
         "cfr": {_A: "class A {} // FLAG cfr", _A1: "class A$1 {} // FLAG cfr"},
         "fernflower": {_A: "class A {} // FLAG ff", _A1: "class A$1 { /* ff */ }"},
     })
-    assert written == {_A: _VF_STUB, _A1: _VF_STUB.replace("class A", "class A$1")}
-    assert [s["path"] for s in report.stubs] == [_A1, _A]
+    assert written == {_A: _VF_STUB, _A1: "class A$1 { /* ff */ }"}
+    assert [s["path"] for s in report.stubs] == [_A]
 
 
 def test_a_retry_replaces_a_family_with_a_held_outer_file_only_as_a_whole(make_jar, tmp_path: Path):
@@ -2419,8 +2437,8 @@ def test_a_held_file_of_an_inner_class_stays_when_the_retry_flags_its_own_file_o
     make_jar, tmp_path: Path, first,
 ):
     """The family of A waits with the clean A$1 of Vineflower (#159, #150). CFR wrote A$1 apart too, so its file
-    of A does not nest A$1: the clean A$1 of Vineflower stays, and the flagged A$1 of CFR goes, as for a file that
-    an earlier output wrote (#107). Before, the flagged A$1 of CFR failed the whole retry family."""
+    of A does not nest A$1: the clean A$1 of Vineflower stays, as for one file, because a flagged file does not
+    replace it. Before, the flagged A$1 of CFR failed the whole retry family."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": first,
         "cfr": {_A: "class A { /* cfr */ }", _A1: "class A$1 {} // FLAG cfr"},
@@ -2464,7 +2482,7 @@ _A1_VF = "class A$1 { /* vf */ }"
     ({"vineflower": {_A: _VF_STUB, _A1: _A1_VF}, "cfr": {_A: "// ENV"}}, {_A: "// ENV"}),  # a stub is a known loss
     ({"vineflower": {_A: "class A {} // FLAG", _A1: _A1_VF},
       "cfr": {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* cfr */ }"}},
-     {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* cfr */ }"}),
+     {_A: "class A { /* cfr */ }", _A1: _A1_VF}),  # the clean A$1 of Vineflower stays: the A$1 of CFR is not better
     ({"vineflower": {_A: "class A {} // FLAG"}, "cfr": {_A: "class A {} // FLAG cfr", _A1: "class A$1 {} // FLAG cfr"},
       "fernflower": {_A: "class A { /* ff */ }"}}, {_A: "class A { /* ff */ }"}),  # xstream-1.4.21 with --engine cfr
 ])
@@ -2510,8 +2528,8 @@ def test_a_file_that_an_earlier_output_wrote_fails_no_retry_family(make_jar, tmp
 
 def test_a_gap_fill_keeps_the_held_files_of_its_family_until_the_end_of_the_chain(make_jar, tmp_path: Path):
     """The flagged A of CFR fills the gap of the family (#159), and that file nests A$1. Fernflower wrote a clean
-    A and a flagged A$1 apart: its family replaces the held one, and the clean A$1 of Vineflower stays, because
-    the held files that a gap fill nests go only at the end of the chain."""
+    A and a flagged A$1 apart: its A replaces the flagged A, and the clean A$1 of Vineflower comes back, because
+    the held files that a gap fill nests wait until the files of the family are done."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A1: _A1_VF},
         "cfr": {_A: "class A {} // FLAG cfr"},
@@ -2540,14 +2558,15 @@ def test_a_held_file_of_an_outer_class_holds_the_family_of_its_copy(make_jar, tm
     assert report.stubs == [] and report.missing_classes == 0
 
 
-def test_an_unchecked_retry_family_replaces_a_family_held_for_a_stub_in_its_outer_file(make_jar, tmp_path: Path):
-    """A stub in the file of the outer class is a known loss for the whole family: the unchecked A and A$1 of
-    CFR replace the stub A and the clean A$1 of Vineflower, as an unchecked file replaces a stub (#96)."""
+def test_an_unchecked_retry_file_replaces_a_stubbed_held_file_but_not_a_clean_one(make_jar, tmp_path: Path):
+    """An unchecked file replaces a stub, a known loss (#96): the unchecked A of CFR replaces the stubbed A of
+    Vineflower. The held A$1 is clean, so the unchecked A$1 of CFR does not replace it (#159). Before, the stub of A
+    let the whole unchecked family of CFR replace the held family."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A: _VF_STUB, _A1: _A1_VF},
         "cfr": {_A: "// ENV", _A1: "// ENV 1"},
     })
-    assert written == {_A: "// ENV", _A1: "// ENV 1"}
+    assert written == {_A: "// ENV", _A1: _A1_VF}
     assert report.stubs == []
 
 
@@ -2610,8 +2629,8 @@ def test_a_file_of_an_inner_class_waits_when_its_output_has_no_file_of_the_outer
 
 
 def test_a_file_of_an_inner_class_waits_without_the_check_too(make_jar, tmp_path: Path):
-    """With --no-check, the retry file of A has no check result. No held file of A exists, a known loss, so the
-    file of CFR replaces the family, and no more retries follow (#159)."""
+    """With --no-check, the retry file of A has no check result. It fills the gap of A and nests A$1, and it has no
+    stub, so the files of the family are done, and no more retries follow (#159)."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A1: _A1_VF}, "cfr": {_A: "class A { /* cfr */ }"},
     }, check=False)
@@ -2619,14 +2638,21 @@ def test_a_file_of_an_inner_class_waits_without_the_check_too(make_jar, tmp_path
     assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
 
 
-def test_an_unchecked_retry_file_of_a_missing_outer_class_replaces_its_family(make_jar, tmp_path: Path):
-    """No held file of A exists, a known loss as for a stub. So the unchecked A of CFR replaces the flagged A$1
-    of Vineflower at once, and no more retries follow (#159). Before, A was missing at the end."""
+@pytest.mark.parametrize("fernflower, expected, engines", [
+    ({}, {_A: "// ENV"}, ["vineflower", "cfr", "fernflower", "procyon", "jd"]),
+    ({_A: "class A { /* ff */ }"}, {_A: "class A { /* ff */ }"}, ["vineflower", "cfr", "fernflower"]),
+])
+def test_an_unchecked_retry_file_that_nests_a_flagged_held_file_keeps_its_family_waiting(
+    make_jar, tmp_path: Path, fernflower, expected, engines,
+):
+    """The unchecked A of CFR fills the gap of A, and it nests the flagged A$1 of Vineflower. An unchecked file does
+    not replace a flagged file (#99), so A gets more retries, and a clean A replaces the A of CFR. Else the A of CFR
+    goes out at the end (#159). Before, A was missing at the end."""
     report, written, _ = _run_family(make_jar, tmp_path, {
-        "vineflower": {_A1: "class A$1 {} // FLAG"}, "cfr": {_A: "// ENV"},
+        "vineflower": {_A1: "class A$1 {} // FLAG"}, "cfr": {_A: "// ENV"}, "fernflower": fernflower,
     })
-    assert written == {_A: "// ENV"}
-    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+    assert written == expected
+    assert [a.engine for a in report.attempts] == engines
     assert report.flagged == [] and report.missing_classes == 0
 
 
@@ -2693,7 +2719,7 @@ def test_after_ctrl_c_no_retry_file_fills_the_gap_of_a_family(make_jar, tmp_path
 @pytest.mark.parametrize("cfr, expected", [
     ({_A: "class A { /* cfr */ }"}, {_A: "class A { /* cfr */ }"}),
     ({_A: "// ENV"}, {_A: "// ENV"}),  # the stub of A$1 is a known loss for the whole family
-    ({_A: "class A { /* cfr */ }", _A1: "// ENV 1"}, {_A: "class A { /* cfr */ }", _A1: "// ENV 1"}),
+    ({_A: "class A { /* cfr */ }", _A1: "// ENV 1"}, {_A: "class A { /* vf */ }", _A1: "// ENV 1"}),  # A of VF stays
 ])
 def test_a_stubbed_file_of_an_inner_class_holds_its_family(make_jar, tmp_path: Path, cfr, expected):
     """Vineflower wrote A$1 apart with a stub (#96). Its family waits, so A gets a retry, and the file of A from
@@ -2763,3 +2789,126 @@ def test_decompile_batch_holds_the_family_of_a_stubbed_file_of_an_inner_class(ma
     assert {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")} == {
         _A: "class A { /* cfr */ }", "com/b/B.java": "class B {}",
     }
+
+
+# For each class of a family that waits, the file of the earliest engine stays, unless a later file is better as
+# for one file. A file holds its class and the inner classes that its engine did not write apart (#159).
+@pytest.mark.parametrize("fernflower, expected", [
+    ({}, {_A1: "class A$1 { /* cfr */ }", _A2: "class A$2 { /* vf */ }"}),
+    ({_A: "class A { /* ff */ }"}, {_A: "class A { /* ff */ }"}),  # the A of Fernflower nests A$1 and A$2
+])
+def test_retry_files_of_inner_classes_fill_the_gaps_of_a_family_without_a_file_of_the_outer_class(
+    make_jar, tmp_path: Path, fernflower, expected,
+):
+    """No engine wrote a file of A yet. The A$1 of CFR fills a gap next to the A$2 of Vineflower, because neither
+    file nests the class of the other. The family waits for a file of A (#159)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A2: "class A$2 { /* vf */ }"}, "cfr": {_A1: "class A$1 { /* cfr */ }"}, "fernflower": fernflower,
+    })
+    assert written == expected
+    assert report.missing_classes == (0 if fernflower else 1)
+
+
+def test_an_unchecked_retry_file_that_nests_a_stubbed_held_file_ends_the_wait(make_jar, tmp_path: Path):
+    """A stub is a known loss, also in a flagged file (#96): the unchecked A of CFR nests the stubbed and flagged
+    A$1 of Vineflower, so the family is done, and A gets no more retries (#159)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A1: _A1_STUB + "// FLAG\n"}, "cfr": {_A: "// ENV"},
+    })
+    assert written == {_A: "// ENV"}
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+    assert report.stubs == [] and report.flagged == []
+
+
+_A11 = "com/x/A$1$1.java"
+
+
+def _run_deep(make_jar, tmp_path: Path, files: dict[str, dict[str, str]]):
+    """com/x/A, A$1, and A$1$1, an inner class of the inner class A$1. Returns the report and the written files."""
+    jar = make_jar("app.jar", {f"com/x/{n}.class": _class_header(52) for n in ("A", "A$1", "A$1$1")})
+    ctx = make_ctx(tmp_path, writing_runner(files), checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    return report, {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
+
+
+@pytest.mark.parametrize("files, expected", [
+    ({"vineflower": {_A1: _A1_VF, _A11: "class A$1$1 { /* vf */ }"},  # the flagged A$1 of CFR nests A$1$1
+      "cfr": {_A: "class A { /* cfr */ }", _A1: "class A$1 {} // FLAG cfr"}},
+     {_A: "class A { /* cfr */ }", _A1: _A1_VF, _A11: "class A$1$1 { /* vf */ }"}),
+    ({"vineflower": {_A: "class A {} // FLAG", _A1: "class A$1 { /* vf, nests A$1$1 */ }"},
+      "cfr": {_A: "class A { /* cfr */ }", _A1: "class A$1 {} // FLAG cfr", _A11: "class A$1$1 { /* cfr */ }"}},
+     {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* vf, nests A$1$1 */ }"}),
+    ({"vineflower": {_A1: _A1_VF, _A11: "class A$1$1 { /* vf */ }"},
+      "cfr": {_A: "class A {} // FLAG cfr", _A1: "class A$1 {} // FLAG cfr"}},
+     {_A: "class A {} // FLAG cfr", _A1: _A1_VF, _A11: "class A$1$1 { /* vf */ }"}),
+    ({"vineflower": {_A1: "class A$1 {} // FLAG vf, nests A$1$1"},
+      "cfr": {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* cfr */ }", _A11: "class A$1$1 {} // FLAG cfr"}},
+     {_A: "class A { /* cfr */ }", _A1: "class A$1 {} // FLAG vf, nests A$1$1"}),
+])
+def test_a_file_that_nests_an_inner_class_of_an_inner_class_keeps_it(make_jar, tmp_path: Path, files, expected):
+    """A$1$1 is an inner class of A$1. A file of A$1 that stays keeps the A$1$1 that it nests, and a file of A$1$1
+    goes out only next to a file of A$1 that does not nest it. So no class goes out two times, and no class gets
+    lost (#159)."""
+    _, written = _run_deep(make_jar, tmp_path, files)
+    assert written == expected
+
+
+def test_a_clean_retry_file_replaces_a_stubbed_held_file_next_to_a_gap_fill(make_jar, tmp_path: Path):
+    """The flagged A of CFR fills the gap of A. CFR wrote A$1 apart, so its clean A$1 replaces the stubbed A$1 of
+    Vineflower, as for one file (#159)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A1: _A1_STUB}, "cfr": {_A: "class A {} // FLAG cfr", _A1: "class A$1 { /* cfr */ }"},
+    })
+    assert written == {_A: "class A {} // FLAG cfr", _A1: "class A$1 { /* cfr */ }"}
+    assert report.stubs == [] and [f["path"] for f in report.flagged] == [_A]
+
+
+@pytest.mark.parametrize("with_check", [True, False])
+def test_a_held_file_that_a_gap_fill_nests_comes_back_when_a_later_engine_writes_its_class_apart(
+    make_jar, tmp_path: Path, with_check,
+):
+    """The stubbed A of CFR fills the gap of A and nests A$1, so the clean A$1 of Vineflower waits. Fernflower wrote
+    a clean A and a stubbed A$1 apart: its A replaces the stub, and the A$1 of Vineflower comes back (#159)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A1: _A1_VF},
+        "cfr": {_A: _CFR_STUB},
+        "fernflower": {_A: "class A { /* ff */ }", _A1: _A1_STUB.replace("$VF:", "$FF:")},
+    }, check=with_check)
+    assert written == {_A: "class A { /* ff */ }", _A1: _A1_VF}
+    assert report.stubs == []
+
+
+def test_an_unchecked_retry_file_does_not_replace_a_clean_held_file(make_jar, tmp_path: Path):
+    """The clean A$1 of Vineflower waits for a file of A (#159). CFR wrote its A$1 apart, and the check could not
+    examine that file, so the clean A$1 of Vineflower stays, as for one file."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A1: _A1_VF}, "cfr": {_A: "class A { /* cfr */ }", _A1: "// ENV cfr"},
+    })
+    assert written == {_A: "class A { /* cfr */ }", _A1: _A1_VF}
+    assert report.unchecked == [] and [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+
+
+def test_an_unchecked_held_file_comes_back_when_a_clean_retry_file_replaces_a_gap_fill(make_jar, tmp_path: Path):
+    """The flagged A of CFR fills the gap of A and nests the unchecked A$1 of Vineflower. The clean A of Fernflower
+    replaces the flagged A, and Fernflower wrote a stubbed A$1 apart. So the A$1 of Vineflower comes back: it is the
+    file of an earlier engine, and it needs no check result for that (#159)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A1: "// ENV vf"},
+        "cfr": {_A: "class A {} // FLAG cfr"},
+        "fernflower": {_A: "class A { /* ff */ }", _A1: _A1_STUB.replace("$VF:", "$FF:")},
+    })
+    assert written == {_A: "class A { /* ff */ }", _A1: "// ENV vf"}
+    assert report.flagged == [] and report.stubs == []
+
+
+def test_two_retry_files_with_the_key_of_the_outer_class_are_both_written(make_jar, tmp_path: Path):
+    """The flagged A of Vineflower makes its family wait (#150). The source has one class file of A, so both files
+    of CFR get the key of A. One file replaces the flagged A, and the other goes out too, as for two files with one
+    key in an output without a family (#107)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // FLAG"},
+        "cfr": {_A: "class A { /* cfr */ }", "WEB-INF/classes/com/x/A.java": "class A { /* cfr, other */ }"},
+    })
+    assert written == {_A: "class A { /* cfr */ }", "WEB-INF/classes/com/x/A.java": "class A { /* cfr, other */ }"}
+    assert report.flagged == []

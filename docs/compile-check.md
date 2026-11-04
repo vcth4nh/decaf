@@ -61,7 +61,9 @@ limits retries for these cases:
   such as `this$0` are noted. Other errors or a stub retry the outer class so
   another engine can nest it correctly. The files are held together during
   retries to avoid duplicate output, also when the engine wrote no file of
-  the outer class.
+  the outer class. Each class keeps the file of the earliest engine, unless
+  a later file replaces a stub or a flag in it. A file of the outer class
+  also covers each inner class that its engine did not write apart.
 
 ## Cost and controls
 

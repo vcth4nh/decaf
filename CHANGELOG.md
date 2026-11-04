@@ -4,30 +4,26 @@
 
 ### Fixed
 
-- An inner class could be in the output two times when an engine wrote its
-  file apart but wrote no file of its outer class (#159), for example when
-  Fernflower failed the outer class as a whole. decaf wrote the file of the
-  inner class at once, and the retry of the outer class nested the inner
-  class again. Now such a file holds its family until a retry of the outer
-  class replaces the family, as for a flagged file of an inner class (#101).
-  With no held file of the outer class, a retry file without a stub or a
-  flag replaces the family also when the check cannot examine it. When no
-  retry family is good as a whole, the first retry file of the outer class
-  fills the gap, also a stubbed or flagged one. The held files of the inner
-  classes that this file nests go at the end of the chain. Thus the outer
-  class is not missing at the end.
-- A held file of an inner class that passes the check now stays when the
-  retry engine writes that class apart too, but its own file of the class
-  has a stub or a flag (#159). That engine does not nest the class in its
-  file of the outer class, so its other files of the family can replace the
-  held ones. Before, such a retry file failed the whole retry family, so a
-  clean retry file of the outer class did not replace a flagged one.
+- An inner class could be in the output two times (#159). An engine wrote the
+  file of the inner class apart, but it wrote no file of the outer class. For
+  example, Fernflower failed the outer class as a whole. decaf wrote the file
+  of the inner class at once, and the retry of the outer class nested the
+  inner class again. Now such a file holds its family, as a flagged file of
+  an inner class does (#101), and the outer class gets a retry.
+- In a family that waits, decaf now chooses the file of each class alone
+  (#159). A file holds its class and each inner class that its engine did
+  not write apart. For each class, the held file of the earlier engine stays,
+  unless the retry file is better, as for one file. A better file has no
+  stub and no flag, and it passes the check or replaces a stub. Before, only
+  a whole retry family replaced a held family. Thus one stubbed or flagged
+  retry file kept all the held files, also a flagged file of the outer class.
+  When no engine wrote a file of the outer class yet, decaf keeps the first
+  one, also a stubbed or flagged one. Thus the outer class is not missing at
+  the end. The outer class gets retries until it has a file and no file of
+  its family has a stub or a flag.
 - A stubbed file of an inner class that an engine wrote apart went out with
   its stub, and its outer class got no retry (#160). Now such a file holds
-  its family, as a flagged one does, and the outer class gets a retry. A
-  stub in any held file of a family now lets a retry family without stubs
-  and flags replace it, also when the check cannot examine the retry files
-  or with `--no-check`, as for one stubbed file (#96).
+  its family, as a flagged one does, and the outer class gets a retry.
 
 ## [1.12.0] - 2026-10-31
 
