@@ -767,8 +767,10 @@ def test_lists_itself_tells_an_inner_class_from_a_top_level_class_with_a_dollar(
     assert check.lists_itself(_class_with_inner_classes("p/A$B", (("p/A$B", "p/A"),)))
     assert check.lists_itself(_class_with_inner_classes("p/A", (("p/A$1", "p/A"),))) is False  # its inner class only
     assert check.lists_itself(_class_with("p/Foo$")) is False  # no InnerClasses attribute
+    assert check.lists_itself(_class_with("p/A$1", utf8=("InnerClasses",))) is False  # a tool kept only the name
     assert check.lists_itself(b"not a class") is None
     assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-6]) is None  # a cut file
+    assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-18]) is None  # no attributes
 
 
 def test_non_java_reads_the_markers_of_kotlin_groovy_and_scala():

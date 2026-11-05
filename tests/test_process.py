@@ -2948,28 +2948,34 @@ def test_two_retry_files_with_the_key_of_the_outer_class_are_both_written(make_j
     assert report.flagged == []
 
 
-def _a1_class(lists_itself: bool) -> dict[str, bytes]:
-    """A class file of A$1: an inner class of the JVM lists itself in its InnerClasses attribute. A class that does
-    not, for example the module class Foo$ of a Scala object, is a top-level class for the JVM."""
+def _a1_class(shape: str) -> dict[str, bytes]:
+    """A class file of A$1. An inner class of the JVM lists itself in its InnerClasses attribute ("inner"). A class
+    that does not is a top-level class for the JVM: it has no InnerClasses attribute ("top"), or a tool removed the
+    attribute and kept its name in the constant pool ("stripped")."""
     from test_check import _class_with, _class_with_inner_classes
 
-    data = _class_with_inner_classes("com/x/A$1", (("com/x/A$1", "com/x/A"),)) if lists_itself else _class_with("com/x/A$1")
+    data = {
+        "inner": _class_with_inner_classes("com/x/A$1", (("com/x/A$1", "com/x/A"),)),
+        "top": _class_with("com/x/A$1"),
+        "stripped": _class_with("com/x/A$1", utf8=("InnerClasses",)),
+    }[shape]
     return {"com/x/A$1.class": data}
 
 
-@pytest.mark.parametrize("lists_itself, expected", [
-    (False, {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* vf */ }"}),
-    (True, {_A: "class A { /* cfr */ }"}),  # the A of CFR nests A$1
+@pytest.mark.parametrize("shape, expected", [
+    ("top", {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* vf */ }"}),
+    ("stripped", {_A: "class A { /* cfr */ }", _A1: "class A$1 { /* vf */ }"}),
+    ("inner", {_A: "class A { /* cfr */ }"}),  # the A of CFR nests A$1
 ])
 def test_a_retry_file_of_the_outer_class_does_not_nest_a_class_that_is_top_level_for_the_jvm(
-    make_jar, tmp_path: Path, lists_itself, expected,
+    make_jar, tmp_path: Path, shape, expected,
 ):
     """CFR and Procyon get only the files of the outer classes in a class retry (#106). No InnerClasses attribute
     links A$1 to A, so CFR writes no file of A$1, and its file of A does not hold A$1. Thus the held A$1 of
     Vineflower stays. Before, the class was lost, and the report did not show it (#159)."""
     report, written, _ = _run_family(make_jar, tmp_path, {
         "vineflower": {_A1: "class A$1 { /* vf */ }"}, "cfr": {_A: "class A { /* cfr */ }"},
-    }, classes=_a1_class(lists_itself))
+    }, classes=_a1_class(shape))
     assert written == expected
     assert report.java_files == len(expected) and report.missing_classes == 0
 
@@ -2988,7 +2994,7 @@ def test_a_stubbed_file_of_a_class_that_is_top_level_for_the_jvm_stays_until_a_b
         "vineflower": {_A: "class A { /* vf */ }", _A1: _A1_STUB},
         "cfr": {_A: "class A { /* cfr */ }"},
         "fernflower": fernflower,
-    }, classes=_a1_class(False))
+    }, classes=_a1_class("top"))
     assert written == expected
     assert [s["path"] for s in report.stubs] == ([_A1] if expected[_A1] == _A1_STUB else [])
 
