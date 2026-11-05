@@ -738,6 +738,7 @@ class _HeldFile:
     path: str  # posix path in the engine output, and under _Held.root
     stub: stubs.Stub | None = None
     result: check.FileResult | None = None  # None: the file had no check
+    peers: frozenset[str] = frozenset()  # the keys of its family in its output, also of empty files: it nests none (#159)
 
 
 @dataclass
@@ -755,6 +756,10 @@ class _Held:
     copies: set[str] | None = None  # the _copied_keys of the source, read once
     roots: list[Path] | None = None  # the _tree_roots of a class folder, read once
     waiting: set[str] = field(default_factory=set)  # outer classes whose held family waits for a retry (#101, #150)
+    nests: dict[str, set[str]] = field(default_factory=dict)  # outer class -> its spares: a chosen file nests them (#159)
+    tops: dict[str, str] = field(default_factory=dict)  # key -> the key of its outer class, a cache for _apply_hold
+    names: dict[str, str] | None = None  # key -> its class entry in the source, read once (#159)
+    unnested: dict[str, bool] = field(default_factory=dict)  # key -> no file of another class nests it (#159)
 
     def stems(self, settled: bool = True) -> set[str]:
         """The class stems of the held files: a copy's key loses its container root (#107).
@@ -877,6 +882,153 @@ def _twice(own: list[Path], others: list[Path], ctx: Ctx) -> Callable[[str], boo
     return twice
 
 
+def _units(keys: Collection[str]) -> dict[str, list[str]]:
+    """Each key -> the keys of inner classes one level down: no other key of keys is between them (#159)."""
+    out: dict[str, list[str]] = {}
+    for k in keys:
+        cut = k.rfind("$")
+        while cut > 0 and k[:cut] not in keys:
+            cut = k.rfind("$", 0, cut)
+        if cut > 0:
+            out.setdefault(k[:cut], []).append(k)
+    return out
+
+
+def _between(key: str, family: str) -> list[str]:
+    """The keys between a key and the key of its outer class, by name: p/A$1 for p/A$1$1 in the family p/A."""
+    return [key[:i] for i in range(len(family) + 1, len(key)) if key[i] == "$"]
+
+
+def _read_unnested(source: Path, keys: set[str], held: _Held) -> None:
+    """Note for each key whether its class file lists itself in its InnerClasses attribute. A class that does not
+    is a top-level class for the JVM, for example the module class Foo$ of a Scala object, so decaf takes no file
+    of another class to hold it. CFR and Procyon get only the outer classes in a class retry (#106), so they write
+    no file of it (#159)."""
+    if held.names is None:
+        held.names = {}
+        for names in _family_entries(source).values():
+            for name in names:
+                key = _held_key(name)
+                held.names.setdefault(name[: -len(".class")] if key in (held.copies or ()) else key, name)
+    entries = {held.names[k]: k for k in keys if k in held.names}
+    held.unnested.update(dict.fromkeys(keys, False))  # no class file, or no parse: as for any inner class
+    for name, data in _read_classes(source, entries):
+        held.unnested[entries[name]] = check.lists_itself(data) is False
+
+
+def _is_flagged(f: _HeldFile) -> bool:
+    return f.result is not None and f.result.status == "flagged"
+
+
+def _is_unchecked(f: _HeldFile) -> bool:
+    return f.result is not None and f.result.status == "unchecked"
+
+
+def _replaces(came: list[_HeldFile], gone: list[_HeldFile], fresh: set[int], loses: bool, gains: bool) -> bool:
+    """Do the files of came replace the files of gone, as for one file? A stubbed or flagged file replaces
+    nothing, and a stub is a known loss. A class that no file holds is a known loss too: loses means that the
+    change leaves a class without a file, and gains means that it gives a file to a class without one. Else a
+    flagged or unchecked file goes only for retry files (their ids are in fresh) that pass the check. A held file
+    in came is the file of an earlier engine, so it needs no check result (#159)."""
+    if loses or any(f.stub is not None or _is_flagged(f) for f in came):
+        return False
+    if gains or any(f.stub is not None for f in gone):
+        return True
+    return any(_is_flagged(f) or _is_unchecked(f) for f in gone) and all(
+        f.result is not None and f.result.passes for f in came if id(f) in fresh
+    )
+
+
+@dataclass
+class _FamilyPlan:
+    """What the files of one output do to a family that waits (#159)."""
+
+    new: dict[str, _HeldFile]  # the files of the output, by key
+    chosen: dict[str, _HeldFile]  # key -> the file, held or new, that holds its class
+    drop: set[str]  # the held keys whose files a better file replaced
+    spares: set[str]  # the other held keys that a chosen file nests: they wait until the family is done
+    done: bool  # the files of the family can go out, and its outer class gets no more retries
+
+
+def _plan_family(
+    family: str, olds: dict[str, _HeldFile], new: dict[str, _HeldFile], written: set[str], unnested: set[str],
+    replace: bool = True,
+) -> _FamilyPlan:
+    """Choose the files of a family that waits, from its held files (olds) and the files of this output (#159).
+
+    A file holds its class and each inner class that its engine did not write apart; an empty file counts as
+    written apart. No file of another class holds a class of unnested: that class is top-level for the JVM. From
+    the outer class down, the file of the earlier engine holds a class, unless the file of this output and the
+    files that it needs replace the files that go, as for one file (_replaces): a class that no file holds is a
+    loss, as a stub is. With replace=False, nothing replaces a held file. A class without a held file takes the
+    file of this output, also a stubbed or flagged one: it fills the gap.
+    """
+    fresh = {id(f) for f in new.values()}
+    memo: dict[str, dict[str, _HeldFile]] = {}
+    lost: dict[str, frozenset[str]] = {}  # key -> the classes at or below key that no file of memo[key] holds
+    units: dict[int, dict[str, list[str]]] = {}  # id of a peers set -> its units, made once
+
+    def holding(key: str, f: _HeldFile) -> tuple[dict[str, _HeldFile], frozenset[str]]:
+        """f holds key and the inner classes that it nests; the best files hold the inner classes of its peers.
+        Also the classes that no file holds."""
+        if id(f.peers) not in units:
+            units[id(f.peers)] = _units((f.peers | unnested) - written)
+        out, gaps = {key: f}, frozenset()
+        for k in units[id(f.peers)].get(key, ()):
+            out |= best(k)
+            gaps |= lost[k]
+        return out, gaps
+
+    def best(key: str) -> dict[str, _HeldFile]:
+        """The files that hold key and its inner classes, when no chosen file of an outer class nests key."""
+        if key not in memo:
+            old, now = olds.get(key), new.get(key)
+            if old is None and now is None:  # no file of this class: its inner classes take their own files
+                out: dict[str, _HeldFile] = {}
+                gaps = frozenset({key})
+                for k in _units(olds.keys() | new.keys() | {key}).get(key, ()):
+                    out |= best(k)
+                    gaps |= lost[k]
+            elif old is None or now is None:
+                out, gaps = holding(key, old or now)
+            else:
+                (keep, kept_gaps), (take, take_gaps) = holding(key, old), holding(key, now)
+                came = [f for k, f in take.items() if keep.get(k) is not f]
+                gone = [f for k, f in keep.items() if take.get(k) is not f]
+                if replace and _replaces(came, gone, fresh, bool(take_gaps - kept_gaps), bool(kept_gaps - take_gaps)):
+                    out, gaps = take, take_gaps
+                else:
+                    out, gaps = keep, kept_gaps
+            memo[key], lost[key] = out, gaps
+        return memo[key]
+
+    chosen = best(family)
+
+    def holder(k: str) -> str | None:
+        """The chosen key whose file holds the class k: the nearest chosen key at k or above it."""
+        while k not in chosen:
+            if "$" not in k:
+                return None
+            k = k.rsplit("$", 1)[0]
+        return k
+
+    drop: set[str] = set()
+    spares: set[str] = set()
+    for k, f in olds.items():
+        if chosen.get(k) is f:
+            continue
+        h = holder(k)
+        if h is not None and id(chosen[h]) in fresh and h in olds:
+            drop.add(k)  # a file of this output replaced the held file of its class or of an outer class
+        else:
+            spares.add(k)
+    done = family in chosen and not any(f.stub is not None or _is_flagged(f) for f in chosen.values()) and not any(
+        _is_flagged(olds[k]) and olds[k].stub is None and (h := holder(k)) is not None and _is_unchecked(chosen[h])
+        for k in spares
+    )  # an unchecked file does not replace a flagged one (#99): then the family waits for a file that passes
+    return _FamilyPlan(new, chosen, drop, spares, done)
+
+
 def _apply_hold(
     tree: Path,
     source: Path,
@@ -885,8 +1037,11 @@ def _apply_hold(
     engine: str,
     held: _Held,
     ctx: Ctx,
+    empty: Collection[str] = (),
 ) -> int:
     """Hold back the stubbed (#96) and flagged (#99) files of one output; returns the flagged count.
+
+    empty: the rels of the empty files that _hold_output deleted; their classes count as written apart (#159).
 
     Files match by _held_key; each copy of a class that the source has at two places keeps
     its container root in its key, so no copy replaces or deletes the other. A retry file
@@ -899,15 +1054,22 @@ def _apply_hold(
     bytecode can cause this error legally (#108). A file of a Groovy class gets no more retries
     when two engines in a row flag it: no engine writes compilable Java for the call-site and
     meta-class code of groovyc, and each engine gives a different first error for it (#101).
-    A flagged file of an inner class that the engine wrote apart from its outer class holds its
-    family: the files of the outer class and of its inner classes in the output. The family must
-    be new: no earlier output wrote or held a file of it (#101). A held file of an outer class
-    holds its family too, from any output: the next engine can nest the inner classes in its file
-    of the outer class, so no file of an inner class goes out alone (#150). Then the outer class
-    gets a retry. A later output replaces a held family as a whole, when it has the file of the
-    outer class and each of its files of the family is good, as for one file: no stub, not
-    flagged, and it passes the check or replaces a stub; else its files of the family go. Only
-    a held file of an inner class whose family does not wait still follows the rule of one file.
+    A flagged or stubbed (#160) file of an inner class that the engine wrote apart from its outer
+    class holds its family: the files of the outer class and of its inner classes in the output. A
+    file of an inner class also holds its family when the output has no file of its outer class,
+    for example when the outer class failed as a whole (#159). The family must be new: no
+    earlier output wrote or held a file of it (#101). A held file of an outer class holds its
+    family too, from any output: the next engine can nest the inner classes in its file of the
+    outer class, so no file of an inner class goes out alone (#150). Then the outer class gets a
+    retry. In a family that waits, each class has one file: _plan_family chooses it, as for one
+    file, from the held files and the files of the output (#159). A class whose class file does not
+    list itself in its InnerClasses attribute is top-level for the JVM, so no file of another class
+    holds it. The held files that a chosen file nests wait as spares, unless a file of the output
+    replaced the file of their class or of an outer class. The family is done when the outer class
+    has a file, no chosen file has a stub or a flag, and no unchecked chosen file nests a flagged
+    spare without a stub. Then the chosen files go out, the spares go, and the outer class gets no
+    more retries. Only a held file of an inner class whose family does not wait still follows the
+    rule of one file.
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
@@ -917,30 +1079,28 @@ def _apply_hold(
 
     def top(key: str) -> str:
         """The key of the outer class of a key, or the key itself; a copy keeps its container root (#107)."""
-        stem = _strip_container(key)
-        outer = outer_stem(stem, versions)
-        return key[: len(key) - len(stem)] + outer if outer else key
+        if key not in held.tops:
+            stem = _strip_container(key)
+            outer = outer_stem(stem, versions)
+            held.tops[key] = key[: len(key) - len(stem)] + outer if outer else key
+        return held.tops[key]
 
-    def good(key: str, stub: stubs.Stub | None, r: check.FileResult | None) -> bool:
-        """Can this file take part in the replacement of a held family? As for one file: no stub, not
-        flagged, and it passes the check, or it replaces a stub (a known loss): the held file of its key
-        or the held file of its outer class has one."""
-        if stub is not None or (r is not None and r.status == "flagged"):
-            return False
-        olds = (held.files.get(key), held.files.get(top(key)))
-        return (r is not None and r.passes) or any(old is not None and old.stub is not None for old in olds)
+    def key_of(rel: str) -> str:
+        key = _held_key(rel)
+        return rel[: -len(PurePosixPath(rel).suffix)] if key in held.copies else key  # one key for each copy (#107)
 
     files: list[tuple[Path, str, str, stubs.Stub | None, check.FileResult | None]] = []
     for p in sorted(tree.rglob("*")):
         if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
             continue
         rel = p.relative_to(tree).as_posix()
-        key = _held_key(rel)
-        if key in held.copies:
-            key = rel[: -len(PurePosixPath(rel).suffix)]  # one key for each copy (#107)
-        files.append((p, rel, key, found.get(rel), results.get(rel) if results is not None else None))
-    waiting = {top(key) for _, _, key, _, r in files if top(key) != key and r is not None and r.status == "flagged"}
-    if waiting:  # a flagged file of an inner class holds only a new family
+        files.append((p, rel, key_of(rel), found.get(rel), results.get(rel) if results is not None else None))
+    keys = {key for _, _, key, _, _ in files}
+    waiting = {  # a stubbed or flagged file of an inner class, or one without the file of its outer class (#159, #160)
+        top(key) for _, _, key, stub, r in files
+        if top(key) != key and (stub is not None or (r is not None and r.status == "flagged") or top(key) not in keys)
+    }
+    if waiting:  # holds only a new family
         waiting -= {top(k) for k in held.files.keys() | held.written}
     # a clean file with the key of a stubbed or flagged file of the same output is written, so no family waits then
     clean_now = {key for _, _, key, stub, r in files if stub is None and (r is None or r.status != "flagged")}
@@ -949,16 +1109,74 @@ def _apply_hold(
         if top(key) == key and key not in held.written and key not in clean_now
         and (stub is not None or (r is not None and r.status == "flagged"))
     }
-    for family in list(held.waiting):
-        mine = [  # a file of a class that an earlier output wrote goes (#107), so it does not count
-            (key, stub, r) for _, _, key, stub, r in files if top(key) == family and key not in held.written
-        ]
-        if any(key == family for key, _, _ in mine) and not engines.PROCESSES.closed and all(
-            good(key, stub, r) for key, stub, r in mine
-        ):  # the files of this output replace the held files of the family
+    by_family: dict[str, list[tuple[str, str, stubs.Stub | None, check.FileResult | None]]] = {}
+    members: dict[str, set[str]] = {}
+    for _, rel, key, stub, r in files:
+        by_family.setdefault(top(key), []).append((rel, key, stub, r))
+        members.setdefault(top(key), set()).add(key)
+    for rel in empty:  # the engine wrote the class apart, and the class failed as a whole (#96)
+        members.setdefault(top(key_of(rel)), set()).add(key_of(rel))
+    peers = {family: frozenset(ks) for family, ks in members.items()}
+    planned = {family for family in by_family if family in held.waiting or family in waiting}
+    olds: dict[str, dict[str, _HeldFile]] = {family: {} for family in planned}  # their held files, read once
+    if planned:
+        for k, f in held.files.items():
+            if top(k) in olds:
+                olds[top(k)][k] = f
+        unknown = {  # also the classes between: a class without a file can be top-level for the JVM too
+            a for family in planned for k in olds[family].keys() | members[family] if top(k) != k
+            for a in (k, *_between(k, family))
+        }
+        if unknown - held.unnested.keys():
+            _read_unnested(source, unknown - held.unnested.keys(), held)
+    plans: dict[str, _FamilyPlan] = {}
+    for family in planned:
+        new: dict[str, _HeldFile] = {}
+        for rel, key, stub, r in by_family[family]:  # a file of a class that an earlier output wrote goes (#107)
+            if key not in held.written:
+                new.setdefault(key, _HeldFile(engine, rel, stub, r, peers[family]))
+        unnested = {
+            a for k in olds[family].keys() | new.keys() for a in (k, *_between(k, family)) if held.unnested.get(a)
+        }
+        plans[family] = plan = _plan_family(  # after Ctrl-C the check did not run or end, so replace=False (#112)
+            family, olds[family], new, held.written, unnested, replace=not engines.PROCESSES.closed,
+        )
+        for k in plan.drop | (plan.spares if plan.done else set()):
+            (held.root / held.files.pop(k).path).unlink(missing_ok=True)
+        if plan.done:  # its held files that stay go out at the end
             held.waiting.discard(family)
-            for k in [k for k in held.files if top(k) == family]:
-                (held.root / held.files.pop(k).path).unlink(missing_ok=True)
+            waiting.discard(family)
+            held.nests.pop(family, None)
+            held.settled.update(k for k, f in plan.chosen.items() if held.files.get(k) is f)
+        else:
+            held.nests[family] = plan.spares
+
+    def settle(key: str, result: check.FileResult) -> None:
+        """Two engines in a row with the same error that bytecode can cause legally (#108)."""
+        first = _first_error(result)
+        if (result.bytecode_only and held.firsts.get(key) == first and not first.startswith(_CAST_DROPPED)) or (
+            key in held.firsts and held.non_java.get(top(_strip_container(key))) == "groovy"
+        ):  # a Groovy class: two engines in a row flag it, and no engine writes compilable Java for it (#101)
+            held.settled.add(key)
+        held.firsts[key] = first
+
+    def hold(p: Path, key: str, f: _HeldFile) -> None:
+        if held.root is None:
+            held.root = _tmp_dir(ctx)
+        target = held.root / f.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(p, target)
+        held.files[key] = f
+        held_now.add(key)
+        if _is_flagged(f):
+            held.firsts[key] = _first_error(f.result)
+
+    def write(key: str, rel: str, result: check.FileResult | None) -> None:
+        held.written.add(key)
+        written_now.add(key)
+        if result is not None:
+            held.checks[key] = _HeldFile(engine, rel, None, result)
+
     flagged = 0
     held_now: set[str] = set()
     written_now: set[str] = set()
@@ -967,7 +1185,18 @@ def _apply_hold(
         flagged += is_flagged
         if key in held_now:
             continue  # another file of this output with the same key: keep both
-        if key in held.files:
+        if top(key) in plans and key not in held.written:  # a file of a family that waits (#159)
+            plan = plans[top(key)]
+            f = plan.new.get(key)
+            if f is None or f.path != rel or plan.chosen.get(key) is not f:
+                if is_flagged and key in held.files:
+                    settle(key, result)
+                p.unlink()  # the held file of its class stays, or a chosen file nests its class
+            elif plan.done:
+                write(key, rel, result)
+            else:
+                hold(p, key, f)
+        elif key in held.files:
             if stub is None and not is_flagged and not engines.PROCESSES.closed and top(key) not in held.waiting and (
                 held.files[key].stub is not None or result is None or result.passes
             ):  # an unchecked file can replace a stub (a known loss), not a flagged file; after
@@ -978,33 +1207,15 @@ def _apply_hold(
                 if result is not None:
                     held.checks[key] = _HeldFile(engine, rel, None, result)
             else:
-                if is_flagged:  # two engines in a row with the same error that bytecode can cause legally (#108)
-                    first = _first_error(result)
-                    if (result.bytecode_only and held.firsts.get(key) == first and not first.startswith(_CAST_DROPPED)) or (
-                        key in held.firsts and held.non_java.get(top(_strip_container(key))) == "groovy"
-                    ):  # a Groovy class: two engines in a row flag it, and no engine writes compilable Java for it (#101)
-                        held.settled.add(key)
-                    held.firsts[key] = first
+                if is_flagged:
+                    settle(key, result)
                 p.unlink()  # the earlier engine's held file stays
         elif key in held.written and key not in written_now:
             p.unlink()  # an earlier engine wrote this class, and its file stays (#107)
-        elif top(key) in held.waiting:
-            p.unlink()  # the held family of its outer class waits: only a whole family replaces it
-        elif stub is not None or is_flagged or top(key) in waiting:
-            if held.root is None:
-                held.root = _tmp_dir(ctx)
-            target = held.root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(p, target)
-            held.files[key] = _HeldFile(engine, rel, stub, result)
-            held_now.add(key)
-            if is_flagged:
-                held.firsts[key] = _first_error(result)
+        elif stub is not None or is_flagged:
+            hold(p, key, _HeldFile(engine, rel, stub, result, peers[top(key)]))
         else:
-            held.written.add(key)
-            written_now.add(key)
-            if result is not None:
-                held.checks[key] = _HeldFile(engine, rel, None, result)
+            write(key, rel, result)
     held.waiting |= waiting
     return flagged
 
@@ -1027,21 +1238,30 @@ def _hold_output(
     """The hold step of one engine output, before the writer copies it: (its stubs, flagged).
 
     Empty source files are no output (Fernflower writes one when a whole class fails),
-    so they go (#96). Then the stub scan and the compile check decide what to hold.
+    so they go (#96), but the engine wrote their classes apart (#159). Then the stub scan and
+    the compile check decide what to hold.
     """
+    empty = []
     for p in list(tree.rglob("*")):
         if p.is_file() and p.suffix.lower() in SOURCE_SUFFIXES and p.stat().st_size == 0:
+            empty.append(p.relative_to(tree).as_posix())
             p.unlink()
     found = stubs.scan(tree, engine)
     results = _check_trees([(tree, artifact, source, held)], ctx, heap_mb, engine)
     flagged = _apply_hold(
-        tree, source, {s.path: s for s in found}, results[0] if results is not None else None, engine, held, ctx
+        tree, source, {s.path: s for s in found}, results[0] if results is not None else None, engine, held, ctx,
+        empty,
     )
     return found, flagged
 
 
 def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
     """End of the chain: write the held files (the first engine's file) and list them (#96, #99)."""
+    for keys in held.nests.values():  # the spares: a chosen file nests their classes (#159)
+        for k in keys:
+            f = held.files.pop(k, None)
+            if f is not None:
+                (held.root / f.path).unlink(missing_ok=True)
     if held.files:
         java, collisions = ctx.writer.add_tree(held.root, rel)
         report.java_files += java
@@ -1628,16 +1848,20 @@ def _decompile_batch(
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
     helds: dict[int, _Held] = {}
     counts: dict[int, tuple[list[stubs.Stub], int]] = {}  # member -> (stubs, flagged) of the batch output
+    empty: dict[int, list[str]] = {}  # member -> the rels of its empty files
     try:
         if res.returncode == 0 and not res.timed_out:
             for p in sorted(dest.rglob("*")):
-                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES or p.stat().st_size == 0:
-                    continue  # an empty file is no output (#96)
+                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                    continue
                 rel = p.relative_to(dest).as_posix()
                 stem = normalize_java_rel(rel)[: -len(p.suffix)]
                 i = _owner_index(stem, owners)
                 if i is None:
                     continue  # engine banner/stray file; real resources come from the member jar
+                if p.stat().st_size == 0:  # no output (#96), but the engine wrote the class apart (#159)
+                    empty.setdefault(i, []).append(rel)
+                    continue
                 tree = trees.setdefault(i, _tmp_dir(ctx))
                 target = tree / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -1651,7 +1875,7 @@ def _decompile_batch(
             by_path = results[n] if results is not None else None
             counts[i] = (
                 list(found[i].values()),
-                _apply_hold(trees[i], members[i][1], found[i], by_path, name, helds[i], ctx),
+                _apply_hold(trees[i], members[i][1], found[i], by_path, name, helds[i], ctx, empty.get(i, ())),
             )
     except Exception:
         trees = {}  # split unusable; every member requeues and redoes solo (self-healing)

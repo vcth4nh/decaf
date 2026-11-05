@@ -741,6 +741,40 @@ def _class_with(name: str, interfaces: tuple[str, ...] = (), utf8: tuple[str, ..
     return b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + count.to_bytes(2, "big") + pool + body
 
 
+def _class_with_inner_classes(name: str, entries: tuple[tuple[str, str | None], ...]) -> bytes:
+    """A class file with an InnerClasses attribute; each entry is (inner class, outer class or None)."""
+    names = [name]
+    for inner, outer in entries:
+        names += [n for n in (inner, outer) if n is not None and n not in names]
+    pool, index = b"", {}
+    for i, n in enumerate(names):
+        u = n.encode()
+        pool += b"\x01" + len(u).to_bytes(2, "big") + u + b"\x07" + (2 * i + 1).to_bytes(2, "big")
+        index[n] = 2 * i + 2
+    pool += b"\x01" + len(b"InnerClasses").to_bytes(2, "big") + b"InnerClasses"
+    attribute = 2 * len(names) + 1
+    u2 = lambda v: v.to_bytes(2, "big")  # noqa: E731
+    info = u2(len(entries)) + b"".join(u2(index[i]) + u2(index[o] if o else 0) + u2(0) + u2(0) for i, o in entries)
+    body = b"\x00\x21" + u2(index[name]) + u2(0) + u2(0) + u2(0) + u2(0)  # no interfaces, fields, or methods
+    body += u2(1) + u2(attribute) + len(info).to_bytes(4, "big") + info
+    return b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + u2(attribute + 1) + pool + body
+
+
+def test_lists_itself_tells_an_inner_class_from_a_top_level_class_with_a_dollar():
+    """An inner class of the JVM lists itself in its InnerClasses attribute. The module class Foo$ of a Scala object
+    does not, and a class whose attribute a tool removed does not either (#159)."""
+    assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),)))
+    assert check.lists_itself(_class_with_inner_classes("p/A$B", (("p/A$B", "p/A"),)))
+    assert check.lists_itself(_class_with_inner_classes("p/A", (("p/A$1", "p/A"),))) is False  # its inner class only
+    assert check.lists_itself(_class_with("p/Foo$")) is False  # no InnerClasses attribute
+    assert check.lists_itself(_class_with("p/A$1", utf8=("InnerClasses",))) is False  # a tool kept only the name
+    assert check.lists_itself(b"not a class") is None
+    assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-6]) is None  # a cut file
+    assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-18]) is None  # no attributes
+    full = _class_with_inner_classes("p/A$1", (("p/A$1", None),))
+    assert check.lists_itself(full[:full.index(b"InnerClasses") + 6]) is None  # cut in the constant pool
+
+
 def test_non_java_reads_the_markers_of_kotlin_groovy_and_scala():
     assert check.non_java(_class_with("p/K", utf8=("Lkotlin/Metadata;",)))
     assert check.non_java(_class_with("p/S", utf8=("Lscala/reflect/ScalaSignature;",)))
