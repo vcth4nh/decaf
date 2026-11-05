@@ -533,10 +533,10 @@ def _class_attribute(pool: tuple[dict[int, bytes], dict[int, int], int], data: b
 
 def lists_itself(data: bytes) -> bool | None:
     """Does a class file list itself in its InnerClasses attribute? True for an inner class of the JVM. False for a
-    top-level class, also one with a $ in its name, for example the module class Foo$ of a Scala object: no engine
-    nests it in a file of another class (#159). None when the file does not parse."""
+    top-level class, also one with a $ in its name, for example the module class Foo$ of a Scala object (#159).
+    None when the file is cut or does not parse."""
     pool = _pool(data)
-    if pool is None:
+    if pool is None or pool[2] + 8 > len(data):  # also a file cut in its constant pool
         return None
     if b"InnerClasses" not in data:
         return False

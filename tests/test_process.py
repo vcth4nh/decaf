@@ -655,6 +655,37 @@ def test_decompile_batch_empty_member_file_requeues(make_jar, tmp_path):
     assert [a.rel for a, _, _ in requeue] == ["a.jar"]  # no output: it redoes solo
 
 
+def test_decompile_batch_counts_an_empty_file_as_a_class_that_its_engine_wrote_apart(make_jar, tmp_path):
+    """#159: Fernflower failed A$1 as a whole and wrote an empty file of it (#96), so its flagged A does not hold
+    A$1. Thus the retry file of A$1 fills the gap, as in a run without a batch."""
+    from decaf.engines import EngineResult
+    from decaf.pipeline import _decompile_batch
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        res = merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+        (Path(dest) / "com/a/A.java").write_text("class A {} // FLAG ff")
+        (Path(dest) / "com/a/A$1.java").write_text("")
+        return res
+
+    def retry(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        for name, text in (("A", "class A {} // FLAG vf"), ("A$1", "class A$1 { /* vf */ }")):
+            out = Path(dest) / f"com/a/{name}.java"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text)
+        return EngineResult(spec.name, 0, False, 2, "")
+
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": _class_header(52), "com/a/A$1.class": _class_header(52)})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, batch, chain=["fernflower", "vineflower"])
+    ctx.runner = retry
+    ctx.checker = marker_checker()
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert requeue == []
+    out = tmp_path / "out" / "src"
+    assert (out / "com/a/A.java").read_text() == "class A {} // FLAG ff"
+    assert (out / "com/a/A$1.java").read_text() == "class A$1 { /* vf */ }"
+
+
 def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
     from decaf.engines import EngineResult
     from decaf.pipeline import _decompile_batch
@@ -2997,6 +3028,46 @@ def test_a_stubbed_file_of_a_class_that_is_top_level_for_the_jvm_stays_until_a_b
     }, classes=_a1_class("top"))
     assert written == expected
     assert [s["path"] for s in report.stubs] == ([_A1] if expected[_A1] == _A1_STUB else [])
+
+
+@pytest.mark.parametrize("engine", ["cfr", "procyon"])
+def test_a_retry_file_of_the_outer_class_does_not_nest_an_inner_class_of_a_top_level_class(
+    make_jar, tmp_path: Path, engine,
+):
+    """A$1 does not list itself, so it is a top-level class for the JVM, and A$1$1 is an inner class of A$1. CFR and
+    Procyon get only the outer classes in a class retry (#106), so their file of A holds neither A$1 nor A$1$1, also
+    when no engine wrote a file of A$1. Thus the held A$1$1 of Vineflower stays. Before, it was lost (#159)."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A11: "class A$1$1 { /* vf */ }"}, engine: {_A: f"class A {{ /* {engine} */ }}"},
+    }, classes={
+        "com/x/A$1.class": _class_with("com/x/A$1"),
+        "com/x/A$1$1.class": _class_with_inner_classes("com/x/A$1$1", (("com/x/A$1$1", "com/x/A$1"),)),
+    })
+    assert written == {_A: f"class A {{ /* {engine} */ }}", _A11: "class A$1$1 { /* vf */ }"}
+
+
+def test_a_retry_file_that_loses_an_inner_class_does_not_replace_the_file_that_nests_it(make_jar, tmp_path: Path):
+    """Fernflower failed A$1 as a whole and wrote an empty file of it (#96), so its clean A does not hold A$1. The
+    flagged A of Vineflower nests A$1, so it stays, and the report lists it: a class that no file holds is a known
+    loss, as a stub is. Before, A$1 was lost, and the report did not show it (#159)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // FLAG vf"}, "fernflower": {_A: "class A { /* ff */ }", _A1: ""},
+    })
+    assert written == {_A: "class A {} // FLAG vf"}
+    assert [f["path"] for f in report.flagged] == [_A]
+
+
+def test_a_retry_file_replaces_a_held_file_whose_engine_lost_an_inner_class(make_jar, tmp_path: Path):
+    """Vineflower failed A$1$2 as a whole and wrote an empty file of it (#96), so its clean A$1 does not hold A$1$2.
+    The A$1 of Fernflower nests A$1$2, so it replaces the held A$1, as for a stub. Before, A$1$2 was lost (#159)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // FLAG vf", _A1: "class A$1 { /* vf */ }", "com/x/A$1$2.java": ""},
+        "fernflower": {_A: "class A { /* ff */ }", _A1: "class A$1 { /* ff, nests A$1$2 */ }"},
+    }, classes={"com/x/A$1$2.class": _class_header(52)})
+    assert written == {_A: "class A { /* ff */ }", _A1: "class A$1 { /* ff, nests A$1$2 */ }"}
+    assert report.flagged == []
 
 
 @pytest.mark.parametrize("files, expected", [

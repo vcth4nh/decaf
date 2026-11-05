@@ -894,10 +894,15 @@ def _units(keys: Collection[str]) -> dict[str, list[str]]:
     return out
 
 
+def _between(key: str, family: str) -> list[str]:
+    """The keys between a key and the key of its outer class, by name: p/A$1 for p/A$1$1 in the family p/A."""
+    return [key[:i] for i in range(len(family) + 1, len(key)) if key[i] == "$"]
+
+
 def _read_unnested(source: Path, keys: set[str], held: _Held) -> None:
     """Note for each key whether its class file lists itself in its InnerClasses attribute. A class that does not
-    is a top-level class for the JVM, for example the module class Foo$ of a Scala object, so no engine nests it
-    in a file of another class. CFR and Procyon get only the outer classes in a class retry (#106), so they write
+    is a top-level class for the JVM, for example the module class Foo$ of a Scala object, so decaf takes no file
+    of another class to hold it. CFR and Procyon get only the outer classes in a class retry (#106), so they write
     no file of it (#159)."""
     if held.names is None:
         held.names = {}
@@ -919,14 +924,15 @@ def _is_unchecked(f: _HeldFile) -> bool:
     return f.result is not None and f.result.status == "unchecked"
 
 
-def _replaces(came: list[_HeldFile], gone: list[_HeldFile], fresh: set[int]) -> bool:
+def _replaces(came: list[_HeldFile], gone: list[_HeldFile], fresh: set[int], loses: bool, gains: bool) -> bool:
     """Do the files of came replace the files of gone, as for one file? A stubbed or flagged file replaces
-    nothing, and a stub is a known loss. Else a flagged or unchecked file goes only for retry files (their ids
-    are in fresh) that pass the check. A held file in came is the file of an earlier engine, so it needs no
-    check result (#159)."""
-    if any(f.stub is not None or _is_flagged(f) for f in came):
+    nothing, and a stub is a known loss. A class that no file holds is a known loss too: loses means that the
+    change leaves a class without a file, and gains means that it gives a file to a class without one. Else a
+    flagged or unchecked file goes only for retry files (their ids are in fresh) that pass the check. A held file
+    in came is the file of an earlier engine, so it needs no check result (#159)."""
+    if loses or any(f.stub is not None or _is_flagged(f) for f in came):
         return False
-    if any(f.stub is not None for f in gone):
+    if gains or any(f.stub is not None for f in gone):
         return True
     return any(_is_flagged(f) or _is_unchecked(f) for f in gone) and all(
         f.result is not None and f.result.passes for f in came if id(f) in fresh
@@ -951,23 +957,27 @@ def _plan_family(
     """Choose the files of a family that waits, from its held files (olds) and the files of this output (#159).
 
     A file holds its class and each inner class that its engine did not write apart; an empty file counts as
-    written apart. No file holds a class of unnested: that class is top-level for the JVM. From the outer class
-    down, the file of the earlier engine holds a class, unless the file of this output and the files that it
-    needs replace the files that go, as for one file; with replace=False, nothing replaces a held file. A class
-    without a held file takes the file of this output, also a stubbed or flagged one: it fills the gap.
+    written apart. No file of another class holds a class of unnested: that class is top-level for the JVM. From
+    the outer class down, the file of the earlier engine holds a class, unless the file of this output and the
+    files that it needs replace the files that go, as for one file (_replaces): a class that no file holds is a
+    loss, as a stub is. With replace=False, nothing replaces a held file. A class without a held file takes the
+    file of this output, also a stubbed or flagged one: it fills the gap.
     """
     fresh = {id(f) for f in new.values()}
     memo: dict[str, dict[str, _HeldFile]] = {}
+    lost: dict[str, frozenset[str]] = {}  # key -> the classes at or below key that no file of memo[key] holds
     units: dict[int, dict[str, list[str]]] = {}  # id of a peers set -> its units, made once
 
-    def holding(key: str, f: _HeldFile) -> dict[str, _HeldFile]:
-        """f holds key and the inner classes that it nests; the best files hold the inner classes of its peers."""
+    def holding(key: str, f: _HeldFile) -> tuple[dict[str, _HeldFile], frozenset[str]]:
+        """f holds key and the inner classes that it nests; the best files hold the inner classes of its peers.
+        Also the classes that no file holds."""
         if id(f.peers) not in units:
             units[id(f.peers)] = _units((f.peers | unnested) - written)
-        out = {key: f}
+        out, gaps = {key: f}, frozenset()
         for k in units[id(f.peers)].get(key, ()):
             out |= best(k)
-        return out
+            gaps |= lost[k]
+        return out, gaps
 
     def best(key: str) -> dict[str, _HeldFile]:
         """The files that hold key and its inner classes, when no chosen file of an outer class nests key."""
@@ -975,16 +985,21 @@ def _plan_family(
             old, now = olds.get(key), new.get(key)
             if old is None and now is None:  # no file of this class: its inner classes take their own files
                 out: dict[str, _HeldFile] = {}
+                gaps = frozenset({key})
                 for k in _units(olds.keys() | new.keys() | {key}).get(key, ()):
                     out |= best(k)
+                    gaps |= lost[k]
             elif old is None or now is None:
-                out = holding(key, old or now)
+                out, gaps = holding(key, old or now)
             else:
-                keep, take = holding(key, old), holding(key, now)
+                (keep, kept_gaps), (take, take_gaps) = holding(key, old), holding(key, now)
                 came = [f for k, f in take.items() if keep.get(k) is not f]
                 gone = [f for k, f in keep.items() if take.get(k) is not f]
-                out = take if replace and _replaces(came, gone, fresh) else keep
-            memo[key] = out
+                if replace and _replaces(came, gone, fresh, bool(take_gaps - kept_gaps), bool(kept_gaps - take_gaps)):
+                    out, gaps = take, take_gaps
+                else:
+                    out, gaps = keep, kept_gaps
+            memo[key], lost[key] = out, gaps
         return memo[key]
 
     chosen = best(family)
@@ -1108,7 +1123,10 @@ def _apply_hold(
         for k, f in held.files.items():
             if top(k) in olds:
                 olds[top(k)][k] = f
-        unknown = {k for family in planned for k in olds[family].keys() | members[family] if top(k) != k}
+        unknown = {  # also the classes between: a class without a file can be top-level for the JVM too
+            a for family in planned for k in olds[family].keys() | members[family] if top(k) != k
+            for a in (k, *_between(k, family))
+        }
         if unknown - held.unnested.keys():
             _read_unnested(source, unknown - held.unnested.keys(), held)
     plans: dict[str, _FamilyPlan] = {}
@@ -1117,8 +1135,10 @@ def _apply_hold(
         for rel, key, stub, r in by_family[family]:  # a file of a class that an earlier output wrote goes (#107)
             if key not in held.written:
                 new.setdefault(key, _HeldFile(engine, rel, stub, r, peers[family]))
-        unnested = {k for k in olds[family].keys() | new.keys() if held.unnested.get(k)}
-        plans[family] = plan = _plan_family(  # after Ctrl-C a retry file can be cut off, so it replaces nothing (#112)
+        unnested = {
+            a for k in olds[family].keys() | new.keys() for a in (k, *_between(k, family)) if held.unnested.get(a)
+        }
+        plans[family] = plan = _plan_family(  # after Ctrl-C the check did not run or end, so replace=False (#112)
             family, olds[family], new, held.written, unnested, replace=not engines.PROCESSES.closed,
         )
         for k in plan.drop | (plan.spares if plan.done else set()):
@@ -1828,16 +1848,20 @@ def _decompile_batch(
     produced: dict[int, set[str]] = {i: set() for i in range(len(members))}
     helds: dict[int, _Held] = {}
     counts: dict[int, tuple[list[stubs.Stub], int]] = {}  # member -> (stubs, flagged) of the batch output
+    empty: dict[int, list[str]] = {}  # member -> the rels of its empty files
     try:
         if res.returncode == 0 and not res.timed_out:
             for p in sorted(dest.rglob("*")):
-                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES or p.stat().st_size == 0:
-                    continue  # an empty file is no output (#96)
+                if not p.is_file() or p.suffix not in SOURCE_SUFFIXES:
+                    continue
                 rel = p.relative_to(dest).as_posix()
                 stem = normalize_java_rel(rel)[: -len(p.suffix)]
                 i = _owner_index(stem, owners)
                 if i is None:
                     continue  # engine banner/stray file; real resources come from the member jar
+                if p.stat().st_size == 0:  # no output (#96), but the engine wrote the class apart (#159)
+                    empty.setdefault(i, []).append(rel)
+                    continue
                 tree = trees.setdefault(i, _tmp_dir(ctx))
                 target = tree / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -1851,7 +1875,7 @@ def _decompile_batch(
             by_path = results[n] if results is not None else None
             counts[i] = (
                 list(found[i].values()),
-                _apply_hold(trees[i], members[i][1], found[i], by_path, name, helds[i], ctx),
+                _apply_hold(trees[i], members[i][1], found[i], by_path, name, helds[i], ctx, empty.get(i, ())),
             )
     except Exception:
         trees = {}  # split unusable; every member requeues and redoes solo (self-healing)
