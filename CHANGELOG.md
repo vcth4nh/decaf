@@ -13,14 +13,27 @@
 - In a family that waits, decaf now chooses the file of each class alone
   (#159). A file holds its class and each inner class that its engine did
   not write apart. For each class, the held file of the earlier engine stays,
-  unless the retry file is better, as for one file. A better file has no
-  stub and no flag, and it passes the check or replaces a stub. Before, only
-  a whole retry family replaced a held family. Thus one stubbed or flagged
-  retry file kept all the held files, also a flagged file of the outer class.
-  When no engine wrote a file of the outer class yet, decaf keeps the first
-  one, also a stubbed or flagged one. Thus the outer class is not missing at
-  the end. The outer class gets retries until it has a file and no file of
-  its family has a stub or a flag.
+  as for one file. A retry file replaces it only in two cases. The held file
+  has a stub, or the held file is flagged or unchecked and the retry file
+  passes the check. A stubbed or flagged retry file replaces nothing. Before,
+  only a whole retry family replaced a held family. Thus one stubbed or
+  flagged retry file kept all the held files, also a flagged file of the
+  outer class. When no engine wrote a file of the outer class yet, decaf
+  keeps the first one, also a stubbed or flagged one. Thus the outer class is
+  not missing at the end. After Ctrl-C, a retry file replaces no held file
+  (#112), but it still goes in for a class without one, as for one file.
+  Until no file of the family has a stub or a flag, the outer class gets
+  more retries, within the limits of #108 and #101.
+- A class could be lost without a report entry when its class file does not
+  list itself in its InnerClasses attribute (#159). Examples are the module
+  class `Foo$` of a Scala object, and a class whose attribute a tool removed.
+  decaf took the retry file of the outer class to hold such a class too, and
+  deleted the held file of the class. But CFR and Procyon get only the outer
+  classes in a class retry (#106), so they do not write such a class. The
+  families of #101 and #150 had this fault too. Now no file of another class
+  holds such a class, so its held file stays. Also, an empty file that decaf
+  deletes (#96) now counts as a class that the engine wrote apart, so the
+  held file of that class stays.
 - A stubbed file of an inner class that an engine wrote apart went out with
   its stub, and its outer class got no retry (#160). Now such a file holds
   its family, as a flagged one does, and the outer class gets a retry.

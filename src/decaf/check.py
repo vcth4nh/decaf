@@ -500,6 +500,13 @@ def language(data: bytes) -> str | None:
 
 def _source_file(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int) -> bytes | None:
     """The SourceFile attribute of a class file, e.g. b"A.groovy"; pos is the offset of fields_count."""
+    at = _class_attribute(pool, data, pos, b"SourceFile")
+    return pool[0].get(int.from_bytes(data[at:at + 2], "big")) if at is not None else None
+
+
+def _class_attribute(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int, name: bytes) -> int | None:
+    """The offset of the data of a class attribute, or None when the class has no such attribute or the file is
+    cut; pos is the offset of fields_count."""
     utf8 = pool[0]
     u2 = lambda at: int.from_bytes(data[at:at + 2], "big")  # noqa: E731
     for _ in range(2):  # the fields, then the methods: skip each with its attributes
@@ -510,12 +517,32 @@ def _source_file(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes
                 pos += 6 + int.from_bytes(data[pos + 2:pos + 6], "big")
     count, pos = u2(pos), pos + 2
     for _ in range(count):
-        if pos + 8 > len(data):
+        length = int.from_bytes(data[pos + 2:pos + 6], "big")
+        if pos + 6 + length > len(data):
             return None
-        if utf8.get(u2(pos)) == b"SourceFile":
-            return utf8.get(u2(pos + 6))
-        pos += 6 + int.from_bytes(data[pos + 2:pos + 6], "big")
+        if utf8.get(u2(pos)) == name:
+            return pos + 6
+        pos += 6 + length
     return None
+
+
+def lists_itself(data: bytes) -> bool | None:
+    """Does a class file list itself in its InnerClasses attribute? True for an inner class of the JVM. False for a
+    top-level class, also one with a $ in its name, for example the module class Foo$ of a Scala object: no engine
+    nests it in a file of another class (#159). None when the file does not parse."""
+    pool = _pool(data)
+    if pool is None:
+        return None
+    if b"InnerClasses" not in data:
+        return False
+    this_class = int.from_bytes(data[pool[2] + 2:pool[2] + 4], "big")
+    start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
+    count = int.from_bytes(data[start - 2:start], "big")
+    at = _class_attribute(pool, data, start + 2 * count, b"InnerClasses")
+    if at is None:
+        return None  # a cut file, or the name is only a constant
+    entries = int.from_bytes(data[at:at + 2], "big")
+    return any(int.from_bytes(data[at + 2 + 8 * k:at + 4 + 8 * k], "big") == this_class for k in range(entries))
 
 
 SOURCE = Path(__file__).with_name("checker") / "Checker.java"

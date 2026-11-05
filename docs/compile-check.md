@@ -62,8 +62,10 @@ limits retries for these cases:
   another engine can nest it correctly. The files are held together during
   retries to avoid duplicate output, also when the engine wrote no file of
   the outer class. Each class keeps the file of the earliest engine, unless
-  a later file replaces a stub or a flag in it. A file of the outer class
-  also covers each inner class that its engine did not write apart.
+  that file has a stub, a flag, or no check result and a later file is
+  better. A file of the outer class also covers each inner class that its
+  engine did not write apart, except a class that is top-level in the
+  bytecode, such as the module class of a Scala object.
 
 ## Cost and controls
 
