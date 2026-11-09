@@ -1219,6 +1219,34 @@ def test_sources_gap_counts_the_uncovered_classes_of_an_archive_that_cannot_be_r
     assert _sources_gap(binary, {"com/x/A", "com/x/B"}, tree) == {"com/x/B"}
 
 
+def test_sources_gap_takes_a_file_at_its_declared_package(make_jar, tmp_path: Path):
+    """Final review C1: okio-jvm and kotlin-stdlib keep their files under jvmMain/..., not at the package path."""
+    jar = make_jar("lib.jar", {"okio/Buffer.class": b"x"})
+    tree = _files(tmp_path / "tree", {"jvmMain/okio/Buffer.kt": "package okio\n\nclass Buffer"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_a_java_file_under_a_source_root(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": b"x", "Main.class": b"x"})
+    tree = _files(tmp_path / "tree", {
+        "src/main/java/com/x/A.java": "/*\n * license\n */\npackage com.x;\n\nclass A {}",
+        "src/Main.java": "class Main {}",  # no package line: the default package
+    })
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_the_attribute_file_at_its_declared_package(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"kotlin/Lazy.class": b"x", "kotlin/LazyKt.class": class_file("kotlin/LazyKt", "Lazy.kt")})
+    tree = _files(tmp_path / "tree", {"commonMain/kotlin/util/Lazy.kt": '@file:JvmName("LazyKt")\npackage kotlin\n\nclass Lazy'})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_ignores_a_package_word_in_a_comment(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": b"x"})
+    tree = _files(tmp_path / "tree", {"other/A.java": "// package com.x\nclass A {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/A"}
+
+
 def _hit(sources: Path, **over):
     def resolver(jar_path, repos, client, cache_dir, **kw):
         return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources, repo="https://r.test/m2",
@@ -1240,6 +1268,19 @@ def test_maven_sources_that_lack_a_class_get_it_from_the_engines(make_jar, tmp_p
     assert not report.partial and report.sources_miss is None
     assert "upstream" in (tmp_path / "out/src/com/x/A.java").read_text()
     assert "engine" in (tmp_path / "out/src/com/x/B.java").read_text()
+
+
+def test_maven_sources_in_a_source_set_folder_are_no_gap(make_jar, class_file, tmp_path: Path):
+    """Final review C1: the row is complete, no engine runs, and the .kt file keeps its path."""
+    jar = make_jar("okio-3.4.jar", {"okio/Buffer.class": b"x", "okio/BufferKt.class": class_file("okio/BufferKt", "Buffer.kt")})
+    sources = make_jar("okio-3.4-sources.jar", {"jvmMain/okio/Buffer.kt": "package okio\n\nclass Buffer"})
+    runner = writing_runner({"vineflower": {"okio/Buffer.java": "class Buffer {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "okio-3.4.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.classes, report.sources_gap, report.missing_classes) == ("ok", "maven", 2, 0, 0)
+    assert runner.calls == [] and not report.partial
+    assert (tmp_path / "out/src/jvmMain/okio/Buffer.kt").exists()
+    assert not (tmp_path / "out/src/okio/Buffer.java").exists()
 
 
 def test_a_gap_class_that_no_engine_writes_stays_missing(make_jar, tmp_path: Path):

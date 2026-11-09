@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -508,10 +509,37 @@ def produced_stems(dest: Path) -> set[str]:
     }
 
 
+_PACKAGE_LINE = re.compile(r"^[ \t]*package\s+([\w.]+)", re.MULTILINE)
+_PACKAGE_HEAD = 16384  # bytes: room for a license header before the package line
+
+
+def _declared_package(path: Path) -> str | None:
+    """The package of a source file from its package line ("okio", "com.x"); None without one or unreadable."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(_PACKAGE_HEAD)
+    except OSError:
+        return None
+    m = _PACKAGE_LINE.search(head.decode("utf-8", "replace"))
+    return m.group(1) if m else None
+
+
 def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
     """The top-level classes of the binary that the extracted Maven sources do not hold (#180)."""
     written = {normalize_java_rel(p.relative_to(tree).as_posix()) for p in tree.rglob("*") if p.is_file()}
     rest = {s for s in expected if not any(s + suffix in written for suffix in maven.MAVEN_SOURCE_SUFFIXES)}
+    if rest:
+        # A file in a source-set folder (jvmMain/..., src/main/java/...) counts by its package line (final review C1).
+        for p in tree.rglob("*"):
+            if not p.is_file() or p.suffix not in maven.MAVEN_SOURCE_SUFFIXES:
+                continue
+            rel = normalize_java_rel(p.relative_to(tree).as_posix())
+            name = rel.rsplit("/", 1)[-1]
+            pkg = _declared_package(p)
+            alias = (pkg.replace(".", "/") + "/" + name) if pkg else name
+            if alias != rel:
+                written.add(alias)
+        rest = {s for s in rest if not any(s + suffix in written for suffix in maven.MAVEN_SOURCE_SUFFIXES)}
     covered: set[str] = set()
     try:
         with zipfile.ZipFile(binary) as zf:
