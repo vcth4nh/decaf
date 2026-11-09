@@ -40,7 +40,8 @@ Typical flow:
 - **Compile check.** decaf compiles each decompiled file with `javac`, one file at a time,
   with the input archives on the classpath, and writes no class files. A file with a parse,
   name, or flow error goes to the next engine; the first version without such errors stays.
-  Maven sources are not checked.
+  Maven sources are not checked; the classes that a sources jar lacks are decompiled and
+  checked.
 - **Inputs.** One archive, one `.class` file, or a folder, scanned recursively. Archives
   inside archives are unpacked one level deep by default: the jars under `WEB-INF/lib` of a
   war are level 1, the jars of a war inside an `.ear` are level 2 (`--max-depth 2`). A deeper
@@ -103,19 +104,23 @@ Typical flow:
   ending line `Memory  budget … · largest peak 0.2 GB` shows the real use.
 - **The ending block.** One line per artifact: `✓` complete, `!` partial, `✗` failed, with
   the source of its code: `(maven sources, org.jsoup:jsoup:1.17.2, cached)` or `(vineflower,
-  4 classes)`. `cached` appears only on a Maven line and means the sources jar came from the
-  cache, not the network; a cached "no sources" verdict shows only in the report, as
-  `sources_miss=cached verdict: …`. Then `Artifacts N processed · N complete`, plus
-  `· N partial` and `· N failed` when they are not zero, `Sources N Maven · N decompiled ·
-  N extracted` (extracted: an input archive that already held source files), the failures
-  grouped by cause, and the paths of OUT and the report. The ending shows no compile-check
-  counts; `decaf report out --artifact` and the JSON do. When stdout is not a terminal,
-  lines wrap at 80 columns, and a long path can break in two: use the path you gave `-o`.
+  4 classes)`. A Maven line can add `, 32 decompiled`: the sources jar lacked 32 classes,
+  and the engines wrote them. `cached` appears only on a Maven line and means the sources
+  jar came from the cache, not the network; a cached "no sources" verdict shows only in the
+  report, as `sources_miss=cached verdict: …`. Then `Artifacts N processed · N complete`,
+  plus `· N partial` and `· N failed` when they are not zero, `Sources N Maven · N
+  decompiled · N extracted` (extracted: an input archive that already held source files),
+  the failures grouped by cause, and the paths of OUT and the report. The ending shows no
+  compile-check counts; `decaf report out --artifact` and the JSON do. When stdout is not a
+  terminal, lines wrap at 80 columns, and a long path can break in two: use the path you
+  gave `-o`.
 - **Counts.** `N classes` counts top-level classes. Inner and anonymous classes (`Outer$1`,
   `Outer$Config`) are nested inside `Outer.java`; there is no `Outer$1.java`. `java_files`
   also counts `package-info.java` files, so it can exceed `classes`. For Maven sources,
-  `classes` is 0. A jar built without debug info gives names such as `var1`; that is the
-  bytecode, not a defect.
+  `classes` counts the top-level classes of the binary too; `sources_gap` counts the classes
+  that the sources jar lacks, the engines write them, and `missing_classes` counts the ones
+  that no engine wrote. A jar built without debug info gives names such as `var1`; that is
+  the bytecode, not a defect.
 
 ## Exit codes
 
@@ -166,12 +171,17 @@ Typical flow:
   `maven`, `extracted`, or the engine name, and `gav`, `resolved_by`, and `sources_miss`
   say how the lookup went. Vineflower files carry no header comment; CFR files start with
   `Decompiled with CFR`. Maven sources are the upstream sources of that exact version, with
-  javadoc and real names.
+  javadoc and real names. A Maven row can hold engine files too: `sources_gap` > 0 says how
+  many classes the sources jar lacked, `attempts[]` names the engines that wrote them, and
+  `check` covers only those files. The sources of a Groovy or Scala library are its
+  `.groovy` or `.scala` files.
 - **Multi-release jars.** The classes under `META-INF/versions/N` are variants for newer
   Javas. A sources jar can lack them, the default chain writes only the base version, the
-  mirror does not carry their `.class` files, and `missing_classes` does not count them. No
-  engine writes `module-info`. When completeness matters, run `unzip -l lib.jar | grep
-  META-INF/versions`; `--engine cfr --no-maven` (or `--engine jd`) writes the variants to
+  mirror does not carry their `.class` files, and `missing_classes` does not count them. A
+  class that exists only under `META-INF/versions/N` counts; in a Maven row it is a gap when
+  the sources jar has no file for it. No engine writes `module-info`. When completeness
+  matters, run `unzip -l lib.jar | grep META-INF/versions`; `--engine cfr --no-maven` (or
+  `--engine jd`) writes the variants to
   `out/lib.jar/META-INF/versions/N/<package path>/<Class>.java`.
 - **Trust.** The compile check finds Java diagnostics; it does not compare behavior with
   the original bytecode. Even a file with no diagnostics can have incorrect logic. When a
@@ -193,14 +203,14 @@ Typical flow:
 `outcome` (`ok`, `failed`, `skipped`; partial is `ok` with `missing_classes` > 0, `stubs[]`,
 `flagged[]`, or a `sources_miss` that starts with `network:`, which is a network miss:
 the lookup failed and the jar was decompiled), `method`, `gav`, `repo`, `resolved_by`,
-`sources_miss`, `sources_cached`, `classes`, `java_files`, `missing_classes`, `collisions`,
-`failure`, `attempts[]` (`engine`, `level` = `archive`, `class`, or `batch`, `returncode`,
-`timed_out`, `out_of_memory`, `stderr_tail`, `peak_rss_mb`), `check` (`checked`,
-`flagged`, `noted`, `unchecked`, `unchecked_reasons`; `null` when no check ran), and the
-lists `flagged[]` and `noted[]` (`path` under the artifact folder, `engine`, `first`,
-`messages`). `unchecked[]` lists `path`, `engine`, `reason`, `needs_java`, and `first`;
-`needs_java` and `first` can be `null`. An attempt with `level: "batch"` ran in an engine
-JVM shared by several archives. `--format ndjson` streams one object per line with
+`sources_miss`, `sources_cached`, `classes`, `java_files`, `missing_classes`, `sources_gap`,
+`collisions`, `failure`, `attempts[]` (`engine`, `level` = `archive`, `class`, or `batch`,
+`returncode`, `timed_out`, `out_of_memory`, `stderr_tail`, `peak_rss_mb`), `check`
+(`checked`, `flagged`, `noted`, `unchecked`, `unchecked_reasons`; `null` when no check ran),
+and the lists `flagged[]` and `noted[]` (`path` under the artifact folder, `engine`,
+`first`, `messages`). `unchecked[]` lists `path`, `engine`, `reason`, `needs_java`, and
+`first`; `needs_java` and `first` can be `null`. An attempt with `level: "batch"` ran in an
+engine JVM shared by several archives. `--format ndjson` streams one object per line with
 `event` = `scan`, `artifact`, `warning`, and one final `summary`.
 
 ## Common mistakes

@@ -90,7 +90,8 @@ flowchart TD
     engine -->|"All engines fail"| report
 ```
 
-Maven sources skip decompilation and compile checks. Unresolved problems stay
+Maven sources skip decompilation and compile checks; the classes that a sources
+jar lacks are decompiled and checked. Unresolved problems stay
 in the [report](docs/reports.md); [compile checks](docs/compile-check.md) explain
 which diagnostics trigger retries.
 

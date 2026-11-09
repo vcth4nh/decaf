@@ -14,6 +14,11 @@ to Maven coordinates: group, artifact, and version.
   `.jar.sha1` files; SHA-1 search itself is Central-only.
 - Patched, shaded, or re-signed jars whose SHA-1 differs from the published
   binary are decompiled instead of receiving upstream sources.
+- A published sources jar can lack classes: generated, shaded, or bundled
+  ones. decaf compares the sources with the binary, decompiles the classes
+  without a source, and counts them in `sources_gap`.
+- The `.groovy` and `.scala` files of a sources jar are sources too: a
+  Groovy or Scala library gets them, not a decompile.
 - The report records each match or miss. `--no-maven` skips source lookup.
 
 See [configuration](configuration.md) to add private or public repositories.
