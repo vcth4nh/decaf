@@ -831,6 +831,16 @@ def test_language_names_the_source_language_of_a_class_file():
     assert check.language(b"not a class") is None
 
 
+def test_source_file_reads_the_attribute(class_file):
+    """#180: the SourceFile attribute pairs a class with its source file."""
+    assert check.source_file(class_file("com/x/B", "A.java")) == "A.java"
+    assert check.source_file(class_file("com/x/UtilKt", "Util.kt")) == "Util.kt"
+    assert check.source_file(class_file("com/x/A")) is None  # no attribute
+    assert check.source_file(_class_file("p/A")) is None  # cut after super_class
+    assert check.source_file(b"not a class") is None
+    assert check.source_file(class_file("com/x/B", "A.java")[:-3]) is None  # cut inside the attribute
+
+
 def test_run_check_notes_bytecode_only_errors_of_the_non_java_files(tmp_path: Path, monkeypatch):
     def fake_process(cmd, timeout, on_stderr_line=None):
         Path(cmd[-2]).write_text("".join(
