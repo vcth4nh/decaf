@@ -6,21 +6,22 @@
 
 - A Maven sources jar that lacks classes of the binary gave a complete row
   (#180). A published sources jar can lack generated classes, shaded or
-  bundled libraries, the classes under `META-INF/versions`, and the classes
-  written in Groovy or Scala. decaf wrote the sources it had and reported no
-  gap: `classes 0, missing_classes 0`. Now decaf compares the sources with
-  the top-level classes of the binary. A class has a source when a file of
-  its name is in the sources jar, or when the file that its `SourceFile`
-  attribute names is there, for example a secondary type or a Kotlin facade.
-  The file can sit in a source-set folder such as `jvmMain/okio/`: decaf
-  reads its package line. The other classes go to the engines, as the class
-  retries do, with the compile check. The row counts them in the new field
-  `sources_gap`, counts the classes that no engine wrote in
-  `missing_classes`, and shows `N decompiled` and `N missing`. The row is
-  partial when a class stays missing. `classes` of a Maven row now counts the
-  top-level classes of the binary (it was 0). decaf also extracts the
-  `.groovy` and `.scala` files of a Maven sources jar, so the sources jar of
-  a Groovy or Scala library is now a hit.
+  bundled libraries, the classes that exist only under `META-INF/versions`,
+  and the classes written in Groovy or Scala. decaf wrote the sources it had
+  and reported no gap: `classes 0, missing_classes 0`. Now decaf compares the
+  sources with the top-level classes of the binary. A class has a source when
+  a file of its name is in the sources jar, or when the file that its
+  `SourceFile` attribute names is there, for example a secondary type or a
+  Kotlin facade. The file can sit in a source-set folder such as
+  `jvmMain/okio/`: decaf reads its package line. The other classes go to the
+  engines, as the class retries do, with the compile check. The row counts
+  them in the new field `sources_gap`, counts the classes that no engine
+  wrote in `missing_classes`, and shows `N decompiled` and `N missing`. The
+  row is partial when a class stays missing, or when a gap file is stubbed or
+  flagged. `classes` of a Maven row now counts the top-level classes of the
+  binary (it was 0). decaf also extracts the `.groovy` and `.scala` files of
+  a Maven sources jar, so the sources jar of a Groovy or Scala library is now
+  a hit.
 - An inner class could be in the output two times (#159). An engine wrote the
   file of the inner class apart, but it wrote no file of the outer class. For
   example, Fernflower failed the outer class as a whole. decaf wrote the file

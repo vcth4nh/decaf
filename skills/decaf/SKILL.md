@@ -104,16 +104,17 @@ Typical flow:
   ending line `Memory  budget … · largest peak 0.2 GB` shows the real use.
 - **The ending block.** One line per artifact: `✓` complete, `!` partial, `✗` failed, with
   the source of its code: `(maven sources, org.jsoup:jsoup:1.17.2, cached)` or `(vineflower,
-  4 classes)`. A Maven line can add `, 32 decompiled`: the sources jar lacked 32 classes,
-  and the engines wrote them. `cached` appears only on a Maven line and means the sources
-  jar came from the cache, not the network; a cached "no sources" verdict shows only in the
-  report, as `sources_miss=cached verdict: …`. Then `Artifacts N processed · N complete`,
-  plus `· N partial` and `· N failed` when they are not zero, `Sources N Maven · N
-  decompiled · N extracted` (extracted: an input archive that already held source files),
-  the failures grouped by cause, and the paths of OUT and the report. The ending shows no
-  compile-check counts; `decaf report out --artifact` and the JSON do. When stdout is not a
-  terminal, lines wrap at 80 columns, and a long path can break in two: use the path you
-  gave `-o`.
+  4 classes)`. A Maven line can add `, 32 decompiled`: the engines wrote 32 classes that the
+  sources jar lacked, and `, 2 missing` counts the ones that no engine wrote. The artifact
+  still counts as Maven in the `Sources` line. `cached` appears only on a Maven line and
+  means the sources jar came from the cache, not the network; a cached "no sources" verdict
+  shows only in the report, as `sources_miss=cached verdict: …`. Then
+  `Artifacts N processed · N complete`, plus `· N partial` and `· N failed` when they are
+  not zero, `Sources N Maven · N decompiled · N extracted` (extracted: an input archive that
+  already held source files), the failures grouped by cause, and the paths of OUT and the
+  report. The ending shows no compile-check counts; `decaf report out --artifact` and the
+  JSON do. When stdout is not a terminal, lines wrap at 80 columns, and a long path can
+  break in two: use the path you gave `-o`.
 - **Counts.** `N classes` counts top-level classes. Inner and anonymous classes (`Outer$1`,
   `Outer$Config`) are nested inside `Outer.java`; there is no `Outer$1.java`. `java_files`
   also counts `package-info.java` files, so it can exceed `classes`. For Maven sources,
@@ -172,16 +173,16 @@ Typical flow:
   say how the lookup went. Vineflower files carry no header comment; CFR files start with
   `Decompiled with CFR`. Maven sources are the upstream sources of that exact version, with
   javadoc and real names. A Maven row can hold engine files too: `sources_gap` > 0 says how
-  many classes the sources jar lacked, `attempts[]` names the engines that wrote them, and
-  `check` covers only those files. The sources of a Groovy or Scala library are its
+  many classes the sources jar lacked, `attempts[]` names the engines that ran on them, and
+  `check` covers only those files. The Maven sources of a Groovy or Scala library are its
   `.groovy` or `.scala` files.
 - **Multi-release jars.** The classes under `META-INF/versions/N` are variants for newer
   Javas. A sources jar can lack them, the default chain writes only the base version, the
   mirror does not carry their `.class` files, and `missing_classes` does not count them. A
-  class that exists only under `META-INF/versions/N` counts; in a Maven row it is a gap when
-  the sources jar has no file for it. No engine writes `module-info`. When completeness
-  matters, run `unzip -l lib.jar | grep META-INF/versions`; `--engine cfr --no-maven` (or
-  `--engine jd`) writes the variants to
+  class that exists only under `META-INF/versions/N` counts in `classes`; in a Maven row it
+  is a gap when the sources jar has no file for it. No engine writes `module-info`. When
+  completeness matters, run `unzip -l lib.jar | grep META-INF/versions`;
+  `--engine cfr --no-maven` (or `--engine jd`) writes the variants to
   `out/lib.jar/META-INF/versions/N/<package path>/<Class>.java`.
 - **Trust.** The compile check finds Java diagnostics; it does not compare behavior with
   the original bytecode. Even a file with no diagnostics can have incorrect logic. When a
