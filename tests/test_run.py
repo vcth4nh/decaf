@@ -852,6 +852,64 @@ def test_an_abort_keeps_a_maven_row_with_a_gap_that_ended_before_the_abort(fake_
             rows["lib-1.2.jar"]["missing_classes"]) == ("maven", 1, 1)
 
 
+def test_an_abort_keeps_a_maven_row_with_a_gap_that_waits_for_its_gap_run(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """#180: a gap row that waits in the ready heap has its Maven sources out, so an abort keeps its row.
+    A jar that waits with no files out gets no row."""
+    import decaf.pipeline as pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("big.jar", {f"com/big/C{i}.class": b"x" for i in range(900)}, base=input_dir)
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"}, base=input_dir)
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// real source\nclass A {}"})
+    make_jar("c.jar", {"com/c/C.class": b"x"}, base=input_dir)
+    big_started, lib_queued, gate = threading.Event(), threading.Event(), threading.Event()
+    real_fetch = pipeline._fetch_stage
+
+    def fetch(a, ctx):
+        if a.rel == "lib-1.2.jar":
+            big_started.wait(timeout=30)  # big.jar takes the one decompile slot first
+        elif a.rel == "c.jar":
+            lib_queued.wait(timeout=30)  # c.jar waits behind lib-1.2.jar
+        return real_fetch(a, ctx)
+
+    def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            big_started.set()
+            gate.wait(timeout=30)  # big.jar keeps the slot until the two rows wait in the ready heap
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        if Path(jar_path).name != "lib-1.2.jar":
+            return Resolution(miss="no sources")
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    def on_event(kind, subject, detail):
+        if kind == "queued" and subject == "lib-1.2.jar":
+            lib_queued.set()
+        elif kind == "queued" and subject == "c.jar":
+            gate.set()
+
+    def on_done(report):
+        if report.rel == "big.jar":  # the error stops the run before the scheduler starts lib-1.2.jar or c.jar
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(pipeline, "_fetch_stage", fetch)
+    out = tmp_path / "out"
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=input_dir, output=out, jobs=1, cpus=1), runner=engine, resolver=resolver,
+                on_event=on_event, on_done=on_done)
+    finally:
+        engines.PROCESSES.reset()
+    assert "real source" in (out / "lib-1.2.jar/com/x/A.java").read_text()
+    assert not (out / "lib-1.2.jar/com/x/B.java").exists()
+    rows = {a["rel"]: a for a in json.loads((out / "decaf-report.json").read_text())["artifacts"]}
+    assert set(rows) == {"big.jar", "lib-1.2.jar"}  # c.jar also waited, but it has no files out
+    assert (rows["lib-1.2.jar"]["method"], rows["lib-1.2.jar"]["sources_gap"],
+            rows["lib-1.2.jar"]["missing_classes"]) == ("maven", 1, 1)
+
+
 def test_an_error_in_on_done_keeps_a_batch_that_ended_before_the_abort(fake_env, make_jar, tmp_path: Path, monkeypatch):
     """Review S3: a batch that ended while on_done failed for another job had its files, but no rows."""
     import decaf.pipeline as pipeline

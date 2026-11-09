@@ -2376,6 +2376,9 @@ def run(
                             reports.extend(fut.result()[0])
                         else:
                             reports.append(fut.result())
+                    for *_, report in ready:  # a Maven row with a gap that waits for its gap run: its sources are out (#180)
+                        if report.method == "maven":
+                            reports.append(report)
                     if aborted:
                         raise  # after the report below
         except DecafError:
