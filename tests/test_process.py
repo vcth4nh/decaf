@@ -6,7 +6,17 @@ import pytest
 from decaf import check
 from decaf.engines import ENGINES, EngineResult
 from decaf.maven import Gav, Resolution
-from decaf.pipeline import Ctx, MergeWriter, MirrorWriter, Settings, _discover_nested, chain_for, process_artifact
+from decaf.pipeline import (
+    Ctx,
+    MergeWriter,
+    MirrorWriter,
+    Settings,
+    _discover_nested,
+    _sources_gap,
+    chain_for,
+    expected_class_stems,
+    process_artifact,
+)
 from decaf.scanner import Artifact, ArtifactKind
 
 
@@ -1124,6 +1134,46 @@ def test_maven_kotlin_sources_jar_used(make_jar, tmp_path: Path):
     assert runner.calls == []
     assert report.sources_miss is None
     assert "real source" in (tmp_path / "out/src/com/x/A.kt").read_text()
+
+
+def _files(base: Path, files: dict[str, str]) -> Path:
+    for rel, text in files.items():
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return base
+
+
+def test_sources_gap_pairs_classes_with_their_source_files(make_jar, class_file, tmp_path: Path):
+    """#180: a class has a source when a file of its name, or the file of its SourceFile attribute, is there."""
+    jar = make_jar("lib.jar", {
+        "com/x/A.class": class_file("com/x/A", "A.java"),  # its own file
+        "META-INF/versions/11/com/x/B.class": class_file("com/x/B"),  # a variant without the attribute
+        "com/x/B.class": class_file("com/x/B", "A.java"),  # a secondary type of A.java: the base entry is read
+        "com/x/UtilKt.class": class_file("com/x/UtilKt", "Util.kt"),  # a Kotlin file facade
+        "g/G.class": class_file("g/G", "G.groovy"),  # written in Groovy
+        "Top.class": class_file("Top", "Top.java"),  # the default package
+        "com/x/Gen.class": class_file("com/x/Gen"),  # no attribute, no file: a gap
+        "com/x/Lost.class": class_file("com/x/Lost", "Lost.java"),  # the attribute names no file: a gap
+        "META-INF/versions/11/com/x/V.class": class_file("com/x/V", "V.java"),  # only a variant, no file: a gap
+        "com/x/A$1.class": b"x",  # an inner class is no top-level class
+        "module-info.class": b"x",
+    })
+    tree = _files(tmp_path / "tree", {
+        "com/x/A.java": "class A {} class B {}", "com/x/Util.kt": "fun u() {}", "g/G.groovy": "class G {}",
+        "Top.java": "class Top {}",
+    })
+    expected = expected_class_stems(jar)
+    assert expected == {"com/x/A", "com/x/B", "com/x/UtilKt", "g/G", "Top", "com/x/Gen", "com/x/Lost", "com/x/V"}
+    assert _sources_gap(jar, expected, tree) == {"com/x/Gen", "com/x/Lost", "com/x/V"}
+
+
+def test_sources_gap_counts_a_class_entry_that_cannot_be_read(make_damaged_jar, class_file, tmp_path: Path):
+    jar = make_damaged_jar("lib.jar", {"com/x/A.class": class_file("com/x/A", "A.java") * 4,
+                                       "com/x/D.class": class_file("com/x/D", "A.java") * 4},
+                           damaged=("com/x/D.class",))
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {} class D {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/D"}
 
 
 def test_sources_jar_artifact_carries_resources(make_jar, tmp_path: Path):

@@ -505,6 +505,37 @@ def produced_stems(dest: Path) -> set[str]:
     }
 
 
+def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
+    """The top-level classes of the binary that the extracted Maven sources do not hold (#180)."""
+    written = {normalize_java_rel(p.relative_to(tree).as_posix()) for p in tree.rglob("*") if p.is_file()}
+    rest = {s for s in expected if not any(s + suffix in written for suffix in maven.MAVEN_SOURCE_SUFFIXES)}
+    covered: set[str] = set()
+    try:
+        with zipfile.ZipFile(binary) as zf:
+            entry: dict[str, str] = {}  # stem -> the entry to read: the base entry, else a META-INF/versions/N entry
+            for name in zf.namelist():
+                if not name.endswith(".class"):
+                    continue
+                stem = _class_stem(name)
+                if stem in rest and (stem not in entry or not _strip_container(name).startswith("META-INF/versions/")):
+                    entry[stem] = name
+            for stem, name in entry.items():
+                try:
+                    with zf.open(name) as f:
+                        data = _bounded(f)
+                except ZIP_ERRORS:
+                    continue  # a damaged entry: a gap
+                source = check.source_file(data) if data is not None else None
+                package = stem.rpartition("/")[0]
+                # The SourceFile of a secondary type or a Kotlin file facade names another file of its package.
+                # A set lookup only: the attribute of a crafted class can hold a path (../A.java).
+                if source is not None and (package + "/" + source if package else source) in written:
+                    covered.add(stem)
+    except ZIP_ERRORS:
+        return rest
+    return rest - covered
+
+
 def _strip_container(rel: str) -> str:
     """rel without its WEB-INF/classes/ or BOOT-INF/classes/ part."""
     for marker in _CONTAINER_ROOTS:
