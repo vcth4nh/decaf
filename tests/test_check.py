@@ -835,6 +835,7 @@ def test_source_file_reads_the_attribute(class_file):
     """#180: the SourceFile attribute pairs a class with its source file."""
     assert check.source_file(class_file("com/x/B", "A.java")) == "A.java"
     assert check.source_file(class_file("com/x/UtilKt", "Util.kt")) == "Util.kt"
+    assert check.source_file(class_file("com/x/B", "A.java", interfaces=1)) == "A.java"  # the interfaces offset
     assert check.source_file(class_file("com/x/A")) is None  # no attribute
     assert check.source_file(_class_file("p/A")) is None  # cut after super_class
     assert check.source_file(b"not a class") is None

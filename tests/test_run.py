@@ -902,6 +902,7 @@ def test_an_abort_keeps_a_maven_row_with_a_gap_that_waits_for_its_gap_run(fake_e
                 on_event=on_event, on_done=on_done)
     finally:
         engines.PROCESSES.reset()
+    assert gate.is_set()  # c.jar waited in the ready heap
     assert "real source" in (out / "lib-1.2.jar/com/x/A.java").read_text()
     assert not (out / "lib-1.2.jar/com/x/B.java").exists()
     rows = {a["rel"]: a for a in json.loads((out / "decaf-report.json").read_text())["artifacts"]}
@@ -3837,6 +3838,26 @@ def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path):
         on_warn=warnings.append,
     )
     assert not any("may need about" in w for w in warnings)  # no cap, no share warning
+
+
+def test_run_gives_no_share_warning_for_a_maven_row_with_a_gap(fake_env, make_jar, tmp_path):
+    """#180: a Maven row with a gap runs only its gap classes, so the size of the whole jar gives no warning."""
+    input_dir = tmp_path / "in"
+    _deflated_jar(input_dir / "big-1.0.jar", {"com/x/A.class": b"\0" * (25 * 2**20), "com/x/B.class": b"x"})
+    sources = make_jar("big-1.0-sources.jar", {"com/x/A.java": "class A {}"})  # B is the gap
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(gav=Gav("com.example", "big", "1.0"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    warnings: list[str] = []
+    run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=True, jobs=1, cpus=1, memory_mb=1400),
+        runner=capped_engine,
+        resolver=resolver,
+        on_warn=warnings.append,
+    )
+    assert not any("may need about" in w for w in warnings)
 
 
 def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_path, monkeypatch):

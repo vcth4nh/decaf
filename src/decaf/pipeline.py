@@ -188,7 +188,7 @@ def _resource_members(archive: Path, include_sources: bool) -> list[str]:
 
 
 class MergeWriter:
-    """Merges source files (.java/.kt) from many trees into one package tree.
+    """Merges source files (.java/.kt by default) from many trees into one package tree.
 
     Collisions are deterministic: the tree with the lowest sort_key wins,
     regardless of the order in which worker threads deliver results. On a
@@ -1733,7 +1733,7 @@ def _fetch_stage(
                     )
                 except Exception as exc:  # e.g. a read-only or full sources cache: the engines decompile (#111)
                     resolution = maven.Resolution(miss=f"sources lookup failed: {exc}")
-            hit = False  # the Maven sources are written
+            hit = False  # True when decaf wrote the Maven sources
             gap: set[str] = set()  # the classes of a hit that its sources lack: stage 2 decompiles them (#180)
             # After an abort, the report gets no row for this artifact, so no sources go out.
             if resolution is not None and resolution.sources_jar is not None and not engines.PROCESSES.closed:
@@ -2363,7 +2363,9 @@ def run(
                                 if target is not None:
                                     if on_event is not None:
                                         on_event("queued", a.rel, "")
-                                    if on_warn is not None:  # also for a jar of a batch: its JVM has one share (#114)
+                                    # also for a jar of a batch: its JVM has one share (#114);
+                                    # a gap row runs only its gap classes (#180)
+                                    if on_warn is not None and report.method != "maven":
                                         text = _share_warning(a, target, ctx)
                                         if text is not None:
                                             on_warn(text)

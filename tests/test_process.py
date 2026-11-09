@@ -25,7 +25,7 @@ def writing_runner(files_per_engine: dict[str, dict[str, str]]):
     calls: list[tuple[str, Path]] = []
     sent: list[list[str] | None] = []  # the class files of a folder target, read in the call: it goes after (#97)
 
-    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, on_stderr_line=None):
         calls.append((spec.name, Path(target)))
         folder = Path(target)
         sent.append(sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*.class")) if folder.is_dir() else None)
@@ -1247,10 +1247,10 @@ def test_sources_gap_ignores_a_package_word_in_a_comment(make_jar, tmp_path: Pat
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/A"}
 
 
-def _hit(sources: Path, **over):
+def _hit(sources: Path):
     def resolver(jar_path, repos, client, cache_dir, **kw):
         return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources, repo="https://r.test/m2",
-                          resolved_by="pom-properties", **over)
+                          resolved_by="pom-properties")
     return resolver
 
 
@@ -1292,6 +1292,18 @@ def test_a_gap_class_that_no_engine_writes_stays_missing(make_jar, tmp_path: Pat
     assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
     assert report.partial
     assert (tmp_path / "out/src/com/x/A.java").is_file()
+
+
+def test_a_damaged_gap_entry_keeps_the_row(make_damaged_jar, make_jar, class_file, tmp_path: Path):
+    """Review focus 4: a class entry that cannot be read is a gap that stays missing; the row is ok and partial."""
+    jar = make_damaged_jar("lib-1.2.jar", {"com/x/A.class": class_file("com/x/A", "A.java") * 4,
+                                           "com/x/D.class": class_file("com/x/D", "D.java") * 4},
+                           damaged=("com/x/D.class",))
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    ctx = make_ctx(tmp_path, writing_runner({}), resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.classes, report.sources_gap, report.missing_classes) == ("ok", "maven", 2, 1, 1)
+    assert report.partial
 
 
 def test_a_class_with_a_source_under_another_name_is_no_gap(make_jar, class_file, tmp_path: Path):
@@ -1337,8 +1349,9 @@ def test_maven_verbose_line_names_the_gap(make_jar, tmp_path: Path):
     lines: list[str] = []
     ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/B.java": "class B {}"}}), resolver=_hit(sources), maven=True)
     ctx.on_stderr = lines.append
-    process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert lines[0] == "maven lib-1.2.jar: pom-properties com.example:lib:1.2 (https://r.test/m2); 1 classes not in the sources jar"
+    assert report.outcome == "ok"
 
 
 def test_a_nested_maven_hit_with_a_gap_writes_the_engine_file_in_its_container_folder(make_jar, tmp_path: Path):
@@ -1384,7 +1397,7 @@ def test_a_gap_row_after_ctrl_c_keeps_its_maven_files_and_counts_the_gap(make_ja
 
 
 def test_a_gap_row_with_a_checker_checks_the_engine_files_only(make_jar, tmp_path: Path):
-    """Review focus 5: `check` and `flagged` of a Maven row come from the gap files; the Maven files are not checked."""
+    """Review focus 5: `check` and `flagged` of a Maven row come from the gap files; the checker does not read the Maven files."""
     jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
     sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
     calls: list = []

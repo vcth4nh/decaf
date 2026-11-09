@@ -50,9 +50,10 @@ def make_damaged_jar(tmp_path: Path):
 
 @pytest.fixture
 def class_file():
-    """A minimal class file: this_class is name; with source_file, a SourceFile attribute names it (#180)."""
+    """A minimal class file: this_class is name; with source_file, a SourceFile attribute names it (#180);
+    with interfaces, it lists that many interface entries."""
 
-    def _make(name: str, source_file: str | None = None) -> bytes:
+    def _make(name: str, source_file: str | None = None, interfaces: int = 0) -> bytes:
         utf = name.encode()
         pool = [b"\x01" + len(utf).to_bytes(2, "big") + utf, b"\x07\x00\x01"]  # 1: Utf8 name, 2: Class -> 1
         attributes = b"\x00\x00"
@@ -63,7 +64,7 @@ def class_file():
         return (
             b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + (len(pool) + 1).to_bytes(2, "big") + b"".join(pool)
             + b"\x00\x21\x00\x02\x00\x00"  # access flags, this_class = 2, super_class = 0
-            + b"\x00\x00"  # interfaces_count
+            + interfaces.to_bytes(2, "big") + b"\x00\x02" * interfaces  # interfaces_count; each entry -> 2, the Class entry
             + b"\x00\x00\x00\x00"  # fields_count, methods_count
             + attributes
         )
