@@ -2344,6 +2344,7 @@ def run(
                                         and not target.is_dir()
                                         and a.classes < _SMALL_CLASSES
                                         and chain[0] in engines.BATCH_ENGINES
+                                        and report.method != "maven"  # a Maven row with a gap: its class retries run alone (#180)
                                     ):
                                         ready_small.append(
                                             (a, target, report, *_stems_and_claims(target))
@@ -2368,7 +2369,8 @@ def run(
                             continue
                         if fut in fetch_futs:
                             report, _, target = fut.result()
-                            if target is None:
+                            # a Maven row with a gap has its sources out; the gap stays missing (#180)
+                            if target is None or report.method == "maven":
                                 reports.append(report)
                         elif dec_futs[fut][0] == "batch":
                             reports.extend(fut.result()[0])

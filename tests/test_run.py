@@ -802,6 +802,56 @@ def test_an_error_in_on_done_keeps_a_lookup_that_ended_before_the_abort(fake_env
     assert rels == {"a.jar", "lib-1.2.jar"}  # b.jar was not decompiled, and the fetch of c.jar failed
 
 
+def test_an_abort_keeps_a_maven_row_with_a_gap_that_ended_before_the_abort(fake_env, make_jar, tmp_path: Path, monkeypatch):
+    """#180: the lookup of a jar with a gap writes the Maven sources and hands the jar to stage 2.
+    An abort before stage 2 keeps its row, and the gap stays missing."""
+    import decaf.pipeline as pipeline
+
+    input_dir = tmp_path / "in"
+    make_jar("a.jar", {"com/a/A.class": b"x"}, base=input_dir)
+    make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"}, base=input_dir)
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// real source\nclass A {}"})
+    a_reported, fetched = threading.Event(), threading.Event()
+    real_fetch = pipeline._fetch_stage
+
+    def fetch(a, ctx):
+        if a.rel == "lib-1.2.jar":
+            a_reported.wait(timeout=30)  # the lookup ends while on_done of a.jar runs
+        try:
+            return real_fetch(a, ctx)
+        finally:
+            if a.rel == "lib-1.2.jar":
+                fetched.set()
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        if Path(jar_path).name != "lib-1.2.jar":
+            return Resolution(miss="no sources")
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    def on_done(report):
+        if report.rel == "a.jar":
+            a_reported.set()
+            assert fetched.wait(timeout=30)
+            time.sleep(0.3)  # the future of the lookup is done just after its stage returns
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(pipeline, "_fetch_stage", fetch)
+    out = tmp_path / "out"
+    try:
+        with pytest.raises(BrokenPipeError):
+            run(Settings(input=input_dir, output=out, jobs=2, cpus=2), runner=perfect_engine,
+                resolver=resolver, on_done=on_done)
+    finally:
+        engines.PROCESSES.reset()
+    assert "real source" in (out / "lib-1.2.jar/com/x/A.java").read_text()
+    assert not (out / "lib-1.2.jar/com/x/B.java").exists()
+    rows = {a["rel"]: a for a in json.loads((out / "decaf-report.json").read_text())["artifacts"]}
+    assert set(rows) == {"a.jar", "lib-1.2.jar"}
+    assert (rows["lib-1.2.jar"]["method"], rows["lib-1.2.jar"]["sources_gap"],
+            rows["lib-1.2.jar"]["missing_classes"]) == ("maven", 1, 1)
+
+
 def test_an_error_in_on_done_keeps_a_batch_that_ended_before_the_abort(fake_env, make_jar, tmp_path: Path, monkeypatch):
     """Review S3: a batch that ended while on_done failed for another job had its files, but no rows."""
     import decaf.pipeline as pipeline
@@ -1838,6 +1888,56 @@ def test_run_batches_ready_smalls_into_one_jvm(fake_env, make_jar, tmp_path):
         assert rels[f"big.jar!/lib/s{i}.jar"].method == "vineflower"
     assert rels["big.jar"].attempts[0].level == "archive"
     assert (tmp_path / "out/src/com/s0/A.java").is_file()
+
+
+def test_a_maven_row_with_a_gap_runs_alone_not_in_a_batch(fake_env, make_jar, tmp_path):
+    """#180: a batch would decompile the whole jar; the gap classes run as class retries."""
+    sources = make_jar("s-sources.jar", {"com/s/A.java": "// upstream\nclass A {}", "com/s/D.java": "// upstream\nclass D {}"})
+    s0 = make_jar("s0.jar", {"com/s/A.class": b"x", "com/s/B.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s/D.class": b"x", "com/s/C.class": b"x"})  # no class of s0.jar: one batch could take both
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/s0.jar": s0.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        if Path(jar_path).name in ("s0.jar", "s1.jar"):
+            return Resolution(gav=Gav("com.example", Path(jar_path).stem, "1.0"), sources_jar=sources,
+                              repo="https://r.test/m2", resolved_by="pom-properties")
+        return Resolution(miss="no pom.properties; 0 candidates")
+
+    batches: list = []
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", mirror=False, jobs=1, cpus=1),
+                 runner=gated_solo, batch_runner=recording_batch, resolver=resolver, on_event=on_event)
+    assert batches == []
+    rows = {r.rel.rsplit("/", 1)[-1]: r for r in report.artifacts}
+    for name in ("s0.jar", "s1.jar"):
+        assert (rows[name].method, rows[name].sources_gap, rows[name].missing_classes) == ("maven", 1, 0)
+        assert [a.level for a in rows[name].attempts] == ["class"]
 
 
 def test_run_overlapping_stems_never_share_a_batch(fake_env, make_jar, tmp_path):
