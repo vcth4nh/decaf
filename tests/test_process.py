@@ -803,7 +803,7 @@ def test_decompile_batch_contains_a_full_disk(make_jar, tmp_path, monkeypatch):
 
 
 def test_stems_and_claims_split_metadata_from_classes(make_jar, tmp_path):
-    from decaf.pipeline import _stems_and_claims, expected_class_stems
+    from decaf.pipeline import _stems_and_claims
 
     jar = make_jar(
         "m.jar",
@@ -1174,6 +1174,48 @@ def test_sources_gap_counts_a_class_entry_that_cannot_be_read(make_damaged_jar, 
                            damaged=("com/x/D.class",))
     tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {} class D {}"})
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/D"}
+
+
+def test_sources_gap_needs_no_attribute_for_a_file_of_the_class_name(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": class_file("com/x/A")})  # no SourceFile attribute (javac -g:none)
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_groovy_and_scala_files_of_the_class_name(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"g/G.class": class_file("g/G"), "s/S.class": class_file("s/S")})
+    tree = _files(tmp_path / "tree", {"g/G.groovy": "class G {}", "s/S.scala": "class S"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_reads_the_base_entry_when_a_variant_comes_after_it(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {
+        "com/x/B.class": class_file("com/x/B", "A.java"),  # a secondary type of A.java
+        "META-INF/versions/11/com/x/B.class": class_file("com/x/B"),  # a variant without the attribute
+    })
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {} class B {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_the_attribute_file_in_the_default_package(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"TopKt.class": class_file("TopKt", "Top.kt")})  # a Kotlin file facade
+    tree = _files(tmp_path / "tree", {"Top.kt": "fun top() {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_reads_the_other_classes_after_a_damaged_entry(make_damaged_jar, class_file, tmp_path: Path):
+    jar = make_damaged_jar("lib.jar", {"com/x/D.class": class_file("com/x/D", "A.java") * 4,
+                                       "com/x/E.class": class_file("com/x/E", "A.java") * 4},
+                           damaged=("com/x/D.class",))
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {} class D {} class E {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/D"}
+
+
+def test_sources_gap_counts_the_uncovered_classes_of_an_archive_that_cannot_be_read(tmp_path: Path):
+    binary = tmp_path / "lib.jar"
+    binary.write_bytes(b"not a zip")
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {}"})
+    assert _sources_gap(binary, {"com/x/A", "com/x/B"}, tree) == {"com/x/B"}
 
 
 def test_sources_jar_artifact_carries_resources(make_jar, tmp_path: Path):
