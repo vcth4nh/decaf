@@ -200,14 +200,14 @@ class MergeWriter:
         self._case_insensitive = case_insensitive
         self._index: dict[str, tuple[tuple[str, bool], str, str]] = {}  # key -> (rank, sha256, rel)
 
-    def add_tree(self, tree: Path, sort_key: str) -> tuple[int, list[dict]]:
+    def add_tree(self, tree: Path, sort_key: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         java = 0
         collisions: list[dict] = []
         files = sorted(tree.rglob("*"))
         # A META-INF/versions twin has the path of its base class here: the base class wins (#107).
         files.sort(key=lambda p: _strip_container(p.relative_to(tree).as_posix()).startswith("META-INF/versions/"))
         for p in files:
-            if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
+            if not p.is_file() or p.suffix.lower() not in suffixes:
                 continue
             java += 1
             raw = p.relative_to(tree).as_posix()
@@ -271,11 +271,11 @@ class MirrorWriter:
     def dest_for(self, rel: str) -> Path:
         return self.root / self._folders.get(rel, rel)
 
-    def add_tree(self, tree: Path, rel: str) -> tuple[int, list[dict]]:
+    def add_tree(self, tree: Path, rel: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         dest = self.dest_for(rel)
         java = 0
         for p in sorted(tree.rglob("*")):
-            if not p.is_file() or p.suffix.lower() not in SOURCE_SUFFIXES:
+            if not p.is_file() or p.suffix.lower() not in suffixes:
                 continue  # engine strays never land; resources come from add_resources
             java += 1
             target = dest / p.relative_to(tree)

@@ -431,6 +431,15 @@ def test_extract_sources_java_and_kt(make_jar, tmp_path: Path):
     assert not (out / "META-INF/MANIFEST.MF").exists()
 
 
+def test_extract_sources_takes_groovy_and_scala_only_with_the_maven_suffixes(make_jar, tmp_path: Path):
+    """#180: a published sources jar holds the .groovy and .scala sources of its classes too."""
+    src = make_jar("s.jar", {"a/A.java": "class A {}", "g/G.groovy": "class G {}", "s/S.scala": "class S", "r/R.txt": "x"})
+    assert extract_sources(src, tmp_path / "d1") == 1
+    assert extract_sources(src, tmp_path / "d2", suffixes=maven.MAVEN_SOURCE_SUFFIXES) == 3
+    assert (tmp_path / "d2/g/G.groovy").is_file() and (tmp_path / "d2/s/S.scala").is_file()
+    assert not (tmp_path / "d2/r/R.txt").exists() and not (tmp_path / "d1/g/G.groovy").exists()
+
+
 def test_resolve_sources_pom_path_skips_sha1(make_jar, tmp_path: Path):
     jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
     sources_payload = make_jar("p.jar", {"com/example/A.java": "class A {}"}).read_bytes()
