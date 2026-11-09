@@ -196,6 +196,7 @@ def test_maven_first_short_circuits_engines(make_jar, tmp_path: Path):
     assert "real source" in (tmp_path / "out/src/com/x/A.java").read_text()
     assert report.resolved_by == "pom-properties"
     assert report.sources_miss is None
+    assert (report.classes, report.sources_gap, report.missing_classes) == (1, 0, 0)
 
 
 def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
@@ -214,7 +215,7 @@ def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
     ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
     report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert report.method == "vineflower"
-    assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no .java/.kt files"
+    assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no source files"
 
 
 def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
@@ -1216,6 +1217,173 @@ def test_sources_gap_counts_the_uncovered_classes_of_an_archive_that_cannot_be_r
     binary.write_bytes(b"not a zip")
     tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {}"})
     assert _sources_gap(binary, {"com/x/A", "com/x/B"}, tree) == {"com/x/B"}
+
+
+def _hit(sources: Path, **over):
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources, repo="https://r.test/m2",
+                          resolved_by="pom-properties", **over)
+    return resolver
+
+
+def test_maven_sources_that_lack_a_class_get_it_from_the_engines(make_jar, tmp_path: Path):
+    """#180: a published sources jar can lack classes (generated, shaded, bundled); the engines write them."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x", "com/x/B$1.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// upstream\nclass A {}"})
+    runner = writing_runner({"vineflower": {"com/x/B.java": "// engine\nclass B {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.gav, report.repo) == ("ok", "maven", "com.example:lib:1.2", "https://r.test/m2")
+    assert (report.classes, report.sources_gap, report.missing_classes, report.java_files) == (2, 1, 0, 2)
+    assert [(a.engine, a.level) for a in report.attempts] == [("vineflower", "class")]
+    assert runner.sent == [["com/x/B$1.class", "com/x/B.class"]]  # the gap with its inner class; never A
+    assert not report.partial and report.sources_miss is None
+    assert "upstream" in (tmp_path / "out/src/com/x/A.java").read_text()
+    assert "engine" in (tmp_path / "out/src/com/x/B.java").read_text()
+
+
+def test_a_gap_class_that_no_engine_writes_stays_missing(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    ctx = make_ctx(tmp_path, writing_runner({}), resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.classes, report.sources_gap, report.missing_classes) == ("ok", "maven", 2, 1, 1)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
+    assert report.partial
+    assert (tmp_path / "out/src/com/x/A.java").is_file()
+
+
+def test_a_class_with_a_source_under_another_name_is_no_gap(make_jar, class_file, tmp_path: Path):
+    """A secondary type and a Kotlin facade have their source in a file of another name."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": class_file("com/x/A", "A.java"),
+                                   "com/x/B.class": class_file("com/x/B", "A.java"),
+                                   "com/x/UtilKt.class": class_file("com/x/UtilKt", "Util.kt")})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {} class B {}", "com/x/Util.kt": "fun u() {}"})
+    runner = writing_runner({})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.classes, report.sources_gap, report.missing_classes, report.attempts) == ("maven", 3, 0, 0, [])
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("mirror", [False, True], ids=["merge", "mirror"])
+def test_groovy_sources_of_a_maven_jar_are_written(make_jar, class_file, tmp_path: Path, mirror):
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("lib-1.2.jar", {"g/G.class": class_file("g/G", "G.groovy")})
+    sources = make_jar("lib-1.2-sources.jar", {"g/G.groovy": "class G {}"})
+    runner = writing_runner({})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, writer=MirrorWriter(tmp_path / "out") if mirror else None)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.classes, report.sources_gap, report.java_files) == ("maven", 1, 0, 1)
+    assert runner.calls == []
+    assert (tmp_path / ("out/lib-1.2.jar/g/G.groovy" if mirror else "out/src/g/G.groovy")).read_text() == "class G {}"
+
+
+def test_a_class_only_under_a_versions_folder_is_a_gap(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "META-INF/versions/11/com/x/V.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    runner = writing_runner({"vineflower": {"com/x/V.java": "class V {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.sources_gap, report.missing_classes) == (1, 0)
+    assert runner.sent == [["META-INF/versions/11/com/x/V.class"]]
+
+
+def test_maven_verbose_line_names_the_gap(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    lines: list[str] = []
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/B.java": "class B {}"}}), resolver=_hit(sources), maven=True)
+    ctx.on_stderr = lines.append
+    process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert lines[0] == "maven lib-1.2.jar: pom-properties com.example:lib:1.2 (https://r.test/m2); 1 classes not in the sources jar"
+
+
+def test_a_nested_maven_hit_with_a_gap_writes_the_engine_file_in_its_container_folder(make_jar, tmp_path: Path):
+    """Review focus 1: the gap retries of a nested jar use the writer paths of the nested rel."""
+    from decaf.pipeline import MirrorWriter
+
+    lib = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    writer = MirrorWriter(tmp_path / "out")
+    writer.nest("app.war!/WEB-INF/lib/lib-1.2.jar", "app.war")
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/B.java": "class B {}"}}), resolver=_hit(sources), maven=True,
+                   writer=writer)
+    report, _ = process_artifact(
+        Artifact(lib, "app.war!/WEB-INF/lib/lib-1.2.jar", ArtifactKind.ARCHIVE, parent="app.war", depth=1), ctx
+    )
+    assert (report.method, report.sources_gap, report.missing_classes) == ("maven", 1, 0)
+    assert (tmp_path / "out/app.war/WEB-INF/lib/lib-1.2.jar/com/x/A.java").is_file()
+    assert (tmp_path / "out/app.war/WEB-INF/lib/lib-1.2.jar/com/x/B.java").is_file()
+
+
+def test_a_gap_row_after_ctrl_c_keeps_its_maven_files_and_counts_the_gap(make_jar, tmp_path: Path):
+    """Review focus 2: Ctrl-C lands while an engine runs for the gap: no file of it goes out (#112)."""
+    from decaf.engines import PROCESSES
+
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    inner = writing_runner({"vineflower": {"com/x/B.java": "class B {}"}})
+
+    def killed(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = inner(spec, jar_path, target, dest, timeout, java=java, cpu_budget=cpu_budget)
+        PROCESSES.kill_all()  # Ctrl-C lands while the engine runs
+        return res
+
+    ctx = make_ctx(tmp_path, killed, resolver=_hit(sources), maven=True)
+    try:
+        report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    finally:
+        PROCESSES.reset()
+    assert (report.outcome, report.method, report.sources_gap, report.missing_classes) == ("ok", "maven", 1, 1)
+    assert [a.engine for a in report.attempts] == ["vineflower"]
+    assert (tmp_path / "out/src/com/x/A.java").is_file()
+    assert not (tmp_path / "out/src/com/x/B.java").exists()
+
+
+def test_a_gap_row_with_a_checker_checks_the_engine_files_only(make_jar, tmp_path: Path):
+    """Review focus 5: `check` and `flagged` of a Maven row come from the gap files; the Maven files are not checked."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    calls: list = []
+    runner = writing_runner({"vineflower": {"com/x/B.java": "class B { FLAG }"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, checker=marker_checker(calls))
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.sources_gap, report.missing_classes) == ("maven", 1, 0)
+    assert [f["path"] for f in report.flagged] == ["com/x/B.java"] and report.partial
+    assert (report.check["checked"], report.check["flagged"]) == (1, 1)
+    assert calls and all(Path(f).name == "B.java" for jobs in calls for job in jobs for f in job.files)
+
+
+def test_a_gap_run_of_the_primary_engine_gets_the_engine_args(make_jar, tmp_path: Path):
+    """Review focus 7: the tokens after `--` go to the primary engine, also for the gap classes."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    seen: list = []
+
+    def runner(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, engine_args=()):
+        seen.append(tuple(engine_args))
+        (Path(dest) / "com/x").mkdir(parents=True)
+        (Path(dest) / "com/x/B.java").write_text("class B {}")
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, fallback=False)
+    ctx.settings.engine_args = ("-dgs=1",)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert seen == [("-dgs=1",)]
+    assert (report.method, report.sources_gap, report.missing_classes) == ("maven", 1, 0)
+
+
+def test_a_groovy_only_sources_jar_is_a_hit(make_jar, class_file, tmp_path: Path):
+    """A Groovy or Scala library publishes .groovy or .scala sources; they are the sources of its classes."""
+    jar = make_jar("lib-1.2.jar", {"g/G.class": class_file("g/G", "G.groovy"), "g/H.class": class_file("g/H", "G.groovy")})
+    sources = make_jar("lib-1.2-sources.jar", {"g/G.groovy": "class G {}\nclass H {}"})
+    runner = writing_runner({})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.classes, report.sources_gap, report.missing_classes, report.java_files) == ("maven", 2, 0, 0, 1)
+    assert runner.calls == []
 
 
 def test_sources_jar_artifact_carries_resources(make_jar, tmp_path: Path):

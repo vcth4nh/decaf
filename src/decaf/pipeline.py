@@ -149,6 +149,7 @@ class ArtifactReport:
     resources_skipped: int = 0
     resources_copied: int = 0
     missing_classes: int = 0
+    sources_gap: int = 0  # top-level classes that the Maven sources jar lacks; the engines write them (#180)
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
     stubs: list[dict] = field(default_factory=list)  # classes left stubbed in the output (#96)
@@ -424,6 +425,8 @@ class Ctx:
     class_roots: dict[str, Path | None] = field(default_factory=dict)  # rel -> extracted WEB-INF/BOOT-INF classes
     entry_names: dict[Path, frozenset[str]] = field(default_factory=dict)  # classpath entry -> its class names (#108)
     family_lock: threading.Lock = field(default_factory=threading.Lock)
+    # rel -> the top-level classes that its Maven sources lack; stage 2 decompiles them (#180)
+    maven_gaps: dict[str, set[str]] = field(default_factory=dict)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -1442,6 +1445,8 @@ def _retry_missing_classes(
                     ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
                     ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
                     **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
+                    # the primary engine runs here only for a Maven gap (#180)
+                    **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args and name == ctx.chain[0] else {}),
                     **({"heap_mb": heap} if heap is not None else {}),
                     **_stream_kw_for(ctx, name, artifact.rel),
                 )
@@ -1465,6 +1470,10 @@ def _retry_missing_classes(
 
 
 def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport) -> None:
+    gap = ctx.maven_gaps.pop(artifact.rel, None)
+    if gap is not None:  # a Maven hit whose sources lack classes: the engines write them (#180)
+        _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held())
+        return
     source = target if target.is_dir() else artifact.path
     expected = expected_class_stems(source)
     report.classes = len(expected)
@@ -1696,40 +1705,50 @@ def _fetch_stage(
                     )
                 except Exception as exc:  # e.g. a read-only or full sources cache: the engines decompile (#111)
                     resolution = maven.Resolution(miss=f"sources lookup failed: {exc}")
-            done = False
+            hit = False  # the Maven sources are written
+            gap: set[str] = set()  # the classes of a hit that its sources lack: stage 2 decompiles them (#180)
             # After an abort, the report gets no row for this artifact, so no sources go out.
             if resolution is not None and resolution.sources_jar is not None and not engines.PROCESSES.closed:
                 state("extracting")
                 tmp = _tmp_dir(ctx)
                 damaged = []
-                if extract_sources(resolution.sources_jar, tmp, damaged) > 0 and not damaged:
-                    java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+                if extract_sources(resolution.sources_jar, tmp, damaged, suffixes=maven.MAVEN_SOURCE_SUFFIXES) > 0 and not damaged:
+                    expected = expected_class_stems(artifact.path)
+                    gap = _sources_gap(artifact.path, expected, tmp)
+                    java, collisions = ctx.writer.add_tree(tmp, artifact.rel, suffixes=maven.MAVEN_SOURCE_SUFFIXES)
                     report.method = "maven"
                     report.repo = resolution.repo
                     report.resolved_by = resolution.resolved_by
                     report.sources_cached = resolution.cached
                     report.java_files = java
                     report.collisions = collisions
-                    done = True
+                    report.classes = len(expected)
+                    report.sources_gap = len(gap)
+                    report.missing_classes = len(gap)  # until stage 2: then the classes that no engine writes
+                    if gap:
+                        ctx.maven_gaps[artifact.rel] = gap
+                    hit = True
                 elif damaged:  # a part of the sources is no complete output: the engines decompile (#109)
                     maven.drop_cached_sources(resolution.sources_jar)  # the next run downloads it again (#111)
                     resolution.miss = f"sources jar for {resolution.gav} has a damaged entry: {damaged[0]}"
                 else:
-                    resolution.miss = f"sources jar for {resolution.gav} contained no .java/.kt files"
+                    resolution.miss = f"sources jar for {resolution.gav} contained no source files"
                 _drop(tmp)
             if resolution is not None:
                 if resolution.gav is not None:
                     report.gav = str(resolution.gav)
-                if not done:
+                if not hit:
                     report.sources_miss = resolution.miss
                 if ctx.on_stderr is not None:
                     msg = (
                         f"{resolution.resolved_by} {resolution.gav} ({resolution.repo})"
-                        if done
+                        if hit
                         else resolution.miss
                     )
+                    if gap:
+                        msg += f"; {len(gap)} classes not in the sources jar"
                     ctx.on_stderr(f"maven {artifact.rel}: {msg}")
-            if not done:
+            if not hit or gap:
                 return report, nested, artifact.path
     except Exception:
         report.outcome = "failed"
