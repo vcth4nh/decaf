@@ -1231,9 +1231,9 @@ def test_sources_gap_takes_a_java_file_under_a_source_root(make_jar, tmp_path: P
     jar = make_jar("lib.jar", {"com/x/A.class": b"x", "Main.class": b"x"})
     tree = _files(tmp_path / "tree", {
         "src/main/java/com/x/A.java": "/*\n * license\n */\npackage com.x;\n\nclass A {}",
-        "src/Main.java": "class Main {}",  # no package line: the default package
+        "src/Main.java": "class Main {}",  # no package line: its package is not sure, so Main stays a gap
     })
-    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"Main"}
 
 
 def test_sources_gap_takes_the_attribute_file_at_its_declared_package(make_jar, class_file, tmp_path: Path):
@@ -1269,7 +1269,7 @@ def test_sources_gap_takes_no_package_from_a_file_with_two_package_lines(make_ja
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/old/A", "com/x/A"}  # not sure: both are gaps
 
 
-def test_sources_gap_takes_no_default_package_from_a_cut_head(make_jar, tmp_path: Path):
+def test_sources_gap_takes_no_package_from_a_cut_head(make_jar, tmp_path: Path):
     jar = make_jar("lib.jar", {"Buffer.class": b"x", "okio/Buffer.class": b"x"})
     tree = _files(tmp_path / "tree", {"jvmMain/okio/Buffer.kt": "// " + "x" * 17000 + "\npackage okio\n\nclass Buffer"})
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"Buffer", "okio/Buffer"}
@@ -1279,8 +1279,10 @@ def test_declared_package_reads_one_package_line(tmp_path: Path):
     p = tmp_path / "A.java"
     p.write_text("package com.x$y;\nclass A {}")
     assert _declared_package(p) == "com.x$y"  # a Java name can hold a dollar sign
+    p.write_text("/* (c) */ package com.x;\nclass A {}")
+    assert _declared_package(p) is None  # no line that starts with the package word: not sure
     p.write_text("class A {}")
-    assert _declared_package(p) == ""  # the default package
+    assert _declared_package(p) is None
     assert _declared_package(tmp_path / "absent.java") is None
 
 

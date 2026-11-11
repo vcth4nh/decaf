@@ -514,10 +514,11 @@ _PACKAGE_HEAD = 16384  # bytes: room for a license header before the package lin
 
 
 def _declared_package(path: Path) -> str | None:
-    """The package of a source file from its package line ("okio", "com.x"); "" for the default package.
+    """The package of a source file from its package line ("okio", "com.x").
 
-    None when the package is not sure: the file cannot be read, its head has more than one package line
-    (chained Scala clauses, a line of a comment or a text block), or a cut head has none.
+    None when the package is not sure: the file cannot be read, or its head does not have exactly one package
+    line. No line: the default package, or a line that the pattern does not see. More than one: chained Scala
+    clauses, or a line of a comment or a text block.
     """
     try:
         with path.open("rb") as f:
@@ -525,9 +526,7 @@ def _declared_package(path: Path) -> str | None:
     except OSError:
         return None
     found = _PACKAGE_LINE.findall(head.decode("utf-8-sig", "replace"))  # -sig: a byte order mark is no text
-    if len(found) == 1:
-        return found[0]
-    return "" if not found and len(head) < _PACKAGE_HEAD else None
+    return found[0] if len(found) == 1 else None
 
 
 def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
@@ -539,14 +538,9 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
         for p in tree.rglob("*"):
             if not p.is_file() or p.suffix not in maven.MAVEN_SOURCE_SUFFIXES:
                 continue
-            rel = normalize_java_rel(p.relative_to(tree).as_posix())
-            name = rel.rsplit("/", 1)[-1]
             pkg = _declared_package(p)
-            if pkg is None:
-                continue  # not sure: the file counts only at its path, so its class can stay a gap
-            alias = (pkg.replace(".", "/") + "/" + name) if pkg else name
-            if alias != rel:
-                written.add(alias)
+            if pkg is not None:  # None: not sure, so the file counts only at its path and its class can stay a gap
+                written.add(pkg.replace(".", "/") + "/" + p.name)
         rest = {s for s in rest if not any(s + suffix in written for suffix in maven.MAVEN_SOURCE_SUFFIXES)}
     covered: set[str] = set()
     try:
