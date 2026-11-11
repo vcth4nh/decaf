@@ -6,7 +6,18 @@ import pytest
 from decaf import check
 from decaf.engines import ENGINES, EngineResult
 from decaf.maven import Gav, Resolution
-from decaf.pipeline import Ctx, MergeWriter, MirrorWriter, Settings, _discover_nested, chain_for, process_artifact
+from decaf.pipeline import (
+    Ctx,
+    MergeWriter,
+    MirrorWriter,
+    Settings,
+    _declared_package,
+    _discover_nested,
+    _sources_gap,
+    chain_for,
+    expected_class_stems,
+    process_artifact,
+)
 from decaf.scanner import Artifact, ArtifactKind
 
 
@@ -15,7 +26,7 @@ def writing_runner(files_per_engine: dict[str, dict[str, str]]):
     calls: list[tuple[str, Path]] = []
     sent: list[list[str] | None] = []  # the class files of a folder target, read in the call: it goes after (#97)
 
-    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, on_stderr_line=None):
         calls.append((spec.name, Path(target)))
         folder = Path(target)
         sent.append(sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*.class")) if folder.is_dir() else None)
@@ -186,6 +197,7 @@ def test_maven_first_short_circuits_engines(make_jar, tmp_path: Path):
     assert "real source" in (tmp_path / "out/src/com/x/A.java").read_text()
     assert report.resolved_by == "pom-properties"
     assert report.sources_miss is None
+    assert (report.classes, report.sources_gap, report.missing_classes) == (1, 0, 0)
 
 
 def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
@@ -204,7 +216,7 @@ def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
     ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
     report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert report.method == "vineflower"
-    assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no .java/.kt files"
+    assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no source files"
 
 
 def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
@@ -793,7 +805,7 @@ def test_decompile_batch_contains_a_full_disk(make_jar, tmp_path, monkeypatch):
 
 
 def test_stems_and_claims_split_metadata_from_classes(make_jar, tmp_path):
-    from decaf.pipeline import _stems_and_claims, expected_class_stems
+    from decaf.pipeline import _stems_and_claims
 
     jar = make_jar(
         "m.jar",
@@ -1124,6 +1136,347 @@ def test_maven_kotlin_sources_jar_used(make_jar, tmp_path: Path):
     assert runner.calls == []
     assert report.sources_miss is None
     assert "real source" in (tmp_path / "out/src/com/x/A.kt").read_text()
+
+
+def _files(base: Path, files: dict[str, str]) -> Path:
+    for rel, text in files.items():
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return base
+
+
+def test_sources_gap_pairs_classes_with_their_source_files(make_jar, class_file, tmp_path: Path):
+    """#180: a class has a source when a file of its name, or the file of its SourceFile attribute, is there."""
+    jar = make_jar("lib.jar", {
+        "com/x/A.class": class_file("com/x/A", "A.java"),  # its own file
+        "META-INF/versions/11/com/x/B.class": class_file("com/x/B"),  # a variant without the attribute
+        "com/x/B.class": class_file("com/x/B", "A.java"),  # a secondary type of A.java: the base entry is read
+        "com/x/UtilKt.class": class_file("com/x/UtilKt", "Util.kt"),  # a Kotlin file facade
+        "g/G.class": class_file("g/G", "G.groovy"),  # written in Groovy
+        "Top.class": class_file("Top", "Top.java"),  # the default package
+        "com/x/Gen.class": class_file("com/x/Gen"),  # no attribute, no file: a gap
+        "com/x/Lost.class": class_file("com/x/Lost", "Lost.java"),  # the attribute names no file: a gap
+        "META-INF/versions/11/com/x/V.class": class_file("com/x/V", "V.java"),  # only a variant, no file: a gap
+        "com/x/A$1.class": b"x",  # an inner class is no top-level class
+        "module-info.class": b"x",
+    })
+    tree = _files(tmp_path / "tree", {
+        "com/x/A.java": "class A {} class B {}", "com/x/Util.kt": "fun u() {}", "g/G.groovy": "class G {}",
+        "Top.java": "class Top {}",
+    })
+    expected = expected_class_stems(jar)
+    assert expected == {"com/x/A", "com/x/B", "com/x/UtilKt", "g/G", "Top", "com/x/Gen", "com/x/Lost", "com/x/V"}
+    assert _sources_gap(jar, expected, tree) == {"com/x/Gen", "com/x/Lost", "com/x/V"}
+
+
+def test_sources_gap_counts_a_class_entry_that_cannot_be_read(make_damaged_jar, class_file, tmp_path: Path):
+    jar = make_damaged_jar("lib.jar", {"com/x/A.class": class_file("com/x/A", "A.java") * 4,
+                                       "com/x/D.class": class_file("com/x/D", "A.java") * 4},
+                           damaged=("com/x/D.class",))
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {} class D {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/D"}
+
+
+def test_sources_gap_needs_no_attribute_for_a_file_of_the_class_name(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": class_file("com/x/A")})  # no SourceFile attribute (javac -g:none)
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_groovy_and_scala_files_of_the_class_name(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"g/G.class": class_file("g/G"), "s/S.class": class_file("s/S")})
+    tree = _files(tmp_path / "tree", {"g/G.groovy": "class G {}", "s/S.scala": "class S"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_reads_the_base_entry_when_a_variant_comes_after_it(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {
+        "com/x/B.class": class_file("com/x/B", "A.java"),  # a secondary type of A.java
+        "META-INF/versions/11/com/x/B.class": class_file("com/x/B"),  # a variant without the attribute
+    })
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {} class B {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_the_attribute_file_in_the_default_package(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"TopKt.class": class_file("TopKt", "Top.kt")})  # a Kotlin file facade
+    tree = _files(tmp_path / "tree", {"Top.kt": "fun top() {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_reads_the_other_classes_after_a_damaged_entry(make_damaged_jar, class_file, tmp_path: Path):
+    jar = make_damaged_jar("lib.jar", {"com/x/D.class": class_file("com/x/D", "A.java") * 4,
+                                       "com/x/E.class": class_file("com/x/E", "A.java") * 4},
+                           damaged=("com/x/D.class",))
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {} class D {} class E {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/D"}
+
+
+def test_sources_gap_counts_the_uncovered_classes_of_an_archive_that_cannot_be_read(tmp_path: Path):
+    binary = tmp_path / "lib.jar"
+    binary.write_bytes(b"not a zip")
+    tree = _files(tmp_path / "tree", {"com/x/A.java": "class A {}"})
+    assert _sources_gap(binary, {"com/x/A", "com/x/B"}, tree) == {"com/x/B"}
+
+
+def test_sources_gap_takes_a_file_at_its_declared_package(make_jar, tmp_path: Path):
+    """#180: okio-jvm and kotlin-stdlib keep their files under jvmMain/..., not at the package path."""
+    jar = make_jar("lib.jar", {"okio/Buffer.class": b"x"})
+    tree = _files(tmp_path / "tree", {"jvmMain/okio/Buffer.kt": "package okio\n\nclass Buffer"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_a_java_file_under_a_source_root(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": b"x", "Main.class": b"x"})
+    tree = _files(tmp_path / "tree", {
+        "src/main/java/com/x/A.java": "/*\n * license\n */\npackage com.x;\n\nclass A {}",
+        "src/Main.java": "class Main {}",  # no package line: its package is not sure, so Main stays a gap
+    })
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"Main"}
+
+
+def test_sources_gap_takes_the_attribute_file_at_its_declared_package(make_jar, class_file, tmp_path: Path):
+    jar = make_jar("lib.jar", {"demo/Lazy.class": b"x", "demo/LazyKt.class": class_file("demo/LazyKt", "Lazy.kt")})
+    tree = _files(tmp_path / "tree", {"commonMain/kotlin/util/Lazy.kt": '@file:JvmName("LazyKt")\npackage demo\n\nclass Lazy'})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_ignores_a_package_word_in_a_comment(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": b"x"})
+    tree = _files(tmp_path / "tree", {"other/A.java": "// package com.x\nclass A {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/A"}
+
+
+def test_sources_gap_reads_the_package_line_after_a_byte_order_mark(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": b"x"})
+    tree = tmp_path / "tree"
+    (tree / "src").mkdir(parents=True)
+    (tree / "src/A.java").write_bytes(b"\xef\xbb\xbfpackage com.x;\nclass A {}")
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_takes_no_package_from_chained_scala_clauses(make_jar, tmp_path: Path):
+    """`package scala` then `package collection` is scala.collection: the first clause alone names a wrong package."""
+    jar = make_jar("lib.jar", {"scala/X.class": b"x", "scala/collection/X.class": b"x"})
+    tree = _files(tmp_path / "tree", {"scala/collection/X.scala": "package scala\npackage collection\n\nclass X"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"scala/X"}
+
+
+def test_sources_gap_takes_no_package_from_a_file_with_two_package_lines(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/old/A.class": b"x", "com/x/A.class": b"x"})
+    tree = _files(tmp_path / "tree", {"src/A.java": "/*\npackage com.old;\n*/\npackage com.x;\nclass A {}"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/old/A", "com/x/A"}  # not sure: both are gaps
+
+
+def test_sources_gap_takes_no_package_from_a_cut_head(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"Buffer.class": b"x", "okio/Buffer.class": b"x"})
+    tree = _files(tmp_path / "tree", {"jvmMain/okio/Buffer.kt": "// " + "x" * 17000 + "\npackage okio\n\nclass Buffer"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == {"Buffer", "okio/Buffer"}
+
+
+def test_declared_package_reads_one_package_line(tmp_path: Path):
+    p = tmp_path / "A.java"
+    p.write_text("package com.x$y;\nclass A {}")
+    assert _declared_package(p) == "com.x$y"  # a Java name can hold a dollar sign
+    p.write_text("/* (c) */ package com.x;\nclass A {}")
+    assert _declared_package(p) is None  # no line that starts with the package word: not sure
+    p.write_text("class A {}")
+    assert _declared_package(p) is None
+    assert _declared_package(tmp_path / "absent.java") is None
+
+
+def _hit(sources: Path):
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources, repo="https://r.test/m2",
+                          resolved_by="pom-properties")
+    return resolver
+
+
+def test_maven_sources_that_lack_a_class_get_it_from_the_engines(make_jar, tmp_path: Path):
+    """#180: a published sources jar can lack classes (generated, shaded, bundled); the engines write them."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x", "com/x/B$1.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "// upstream\nclass A {}"})
+    runner = writing_runner({"vineflower": {"com/x/B.java": "// engine\nclass B {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.gav, report.repo) == ("ok", "maven", "com.example:lib:1.2", "https://r.test/m2")
+    assert (report.classes, report.sources_gap, report.missing_classes, report.java_files) == (2, 1, 0, 2)
+    assert [(a.engine, a.level) for a in report.attempts] == [("vineflower", "class")]
+    assert runner.sent == [["com/x/B$1.class", "com/x/B.class"]]  # the gap with its inner class; never A
+    assert not report.partial and report.sources_miss is None
+    assert "upstream" in (tmp_path / "out/src/com/x/A.java").read_text()
+    assert "engine" in (tmp_path / "out/src/com/x/B.java").read_text()
+
+
+def test_maven_sources_in_a_source_set_folder_are_no_gap(make_jar, class_file, tmp_path: Path):
+    """#180: the row is complete, no engine runs, and the .kt file keeps its path."""
+    jar = make_jar("okio-3.4.jar", {"okio/Buffer.class": b"x", "okio/BufferKt.class": class_file("okio/BufferKt", "Buffer.kt")})
+    sources = make_jar("okio-3.4-sources.jar", {"jvmMain/okio/Buffer.kt": "package okio\n\nclass Buffer"})
+    runner = writing_runner({"vineflower": {"okio/Buffer.java": "class Buffer {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "okio-3.4.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.classes, report.sources_gap, report.missing_classes) == ("ok", "maven", 2, 0, 0)
+    assert runner.calls == [] and not report.partial
+    assert (tmp_path / "out/src/jvmMain/okio/Buffer.kt").exists()
+    assert not (tmp_path / "out/src/okio/Buffer.java").exists()
+
+
+def test_a_gap_class_that_no_engine_writes_stays_missing(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    ctx = make_ctx(tmp_path, writing_runner({}), resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.classes, report.sources_gap, report.missing_classes) == ("ok", "maven", 2, 1, 1)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr", "fernflower", "procyon", "jd"]
+    assert report.partial
+    assert (tmp_path / "out/src/com/x/A.java").is_file()
+
+
+def test_a_damaged_gap_entry_keeps_the_row(make_damaged_jar, make_jar, class_file, tmp_path: Path):
+    """#180: a class entry that cannot be read is a gap that stays missing; the row is ok and partial."""
+    jar = make_damaged_jar("lib-1.2.jar", {"com/x/A.class": class_file("com/x/A", "A.java") * 4,
+                                           "com/x/D.class": class_file("com/x/D", "D.java") * 4},
+                           damaged=("com/x/D.class",))
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    ctx = make_ctx(tmp_path, writing_runner({}), resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method, report.classes, report.sources_gap, report.missing_classes) == ("ok", "maven", 2, 1, 1)
+    assert report.partial
+
+
+def test_a_class_with_a_source_under_another_name_is_no_gap(make_jar, class_file, tmp_path: Path):
+    """A secondary type and a Kotlin facade have their source in a file of another name."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": class_file("com/x/A", "A.java"),
+                                   "com/x/B.class": class_file("com/x/B", "A.java"),
+                                   "com/x/UtilKt.class": class_file("com/x/UtilKt", "Util.kt")})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {} class B {}", "com/x/Util.kt": "fun u() {}"})
+    runner = writing_runner({})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.classes, report.sources_gap, report.missing_classes, report.attempts) == ("maven", 3, 0, 0, [])
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("mirror", [False, True], ids=["merge", "mirror"])
+def test_groovy_sources_of_a_maven_jar_are_written(make_jar, class_file, tmp_path: Path, mirror):
+    from decaf.pipeline import MirrorWriter
+
+    jar = make_jar("lib-1.2.jar", {"g/G.class": class_file("g/G", "G.groovy")})
+    sources = make_jar("lib-1.2-sources.jar", {"g/G.groovy": "class G {}"})
+    runner = writing_runner({})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, writer=MirrorWriter(tmp_path / "out") if mirror else None)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.classes, report.sources_gap, report.java_files) == ("maven", 1, 0, 1)
+    assert runner.calls == []
+    assert (tmp_path / ("out/lib-1.2.jar/g/G.groovy" if mirror else "out/src/g/G.groovy")).read_text() == "class G {}"
+
+
+def test_a_class_only_under_a_versions_folder_is_a_gap(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "META-INF/versions/11/com/x/V.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    runner = writing_runner({"vineflower": {"com/x/V.java": "class V {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.sources_gap, report.missing_classes) == (1, 0)
+    assert runner.sent == [["META-INF/versions/11/com/x/V.class"]]
+
+
+def test_maven_verbose_line_names_the_gap(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    lines: list[str] = []
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/B.java": "class B {}"}}), resolver=_hit(sources), maven=True)
+    ctx.on_stderr = lines.append
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert lines[0] == "maven lib-1.2.jar: pom-properties com.example:lib:1.2 (https://r.test/m2); 1 classes not in the sources jar"
+    assert report.outcome == "ok"
+
+
+def test_a_nested_maven_hit_with_a_gap_writes_the_engine_file_in_its_container_folder(make_jar, tmp_path: Path):
+    """#180: the gap retries of a nested jar use the writer paths of the nested rel."""
+    from decaf.pipeline import MirrorWriter
+
+    lib = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    writer = MirrorWriter(tmp_path / "out")
+    writer.nest("app.war!/WEB-INF/lib/lib-1.2.jar", "app.war")
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/B.java": "class B {}"}}), resolver=_hit(sources), maven=True,
+                   writer=writer)
+    report, _ = process_artifact(
+        Artifact(lib, "app.war!/WEB-INF/lib/lib-1.2.jar", ArtifactKind.ARCHIVE, parent="app.war", depth=1), ctx
+    )
+    assert (report.method, report.sources_gap, report.missing_classes) == ("maven", 1, 0)
+    assert (tmp_path / "out/app.war/WEB-INF/lib/lib-1.2.jar/com/x/A.java").is_file()
+    assert (tmp_path / "out/app.war/WEB-INF/lib/lib-1.2.jar/com/x/B.java").is_file()
+
+
+def test_a_gap_row_after_ctrl_c_keeps_its_maven_files_and_counts_the_gap(make_jar, tmp_path: Path):
+    """#180: Ctrl-C lands while an engine runs for the gap: no file of it goes out (#112)."""
+    from decaf.engines import PROCESSES
+
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    inner = writing_runner({"vineflower": {"com/x/B.java": "class B {}"}})
+
+    def killed(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        res = inner(spec, jar_path, target, dest, timeout, java=java, cpu_budget=cpu_budget)
+        PROCESSES.kill_all()  # Ctrl-C lands while the engine runs
+        return res
+
+    ctx = make_ctx(tmp_path, killed, resolver=_hit(sources), maven=True)
+    try:
+        report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    finally:
+        PROCESSES.reset()
+    assert (report.outcome, report.method, report.sources_gap, report.missing_classes) == ("ok", "maven", 1, 1)
+    assert [a.engine for a in report.attempts] == ["vineflower"]
+    assert (tmp_path / "out/src/com/x/A.java").is_file()
+    assert not (tmp_path / "out/src/com/x/B.java").exists()
+
+
+def test_a_gap_row_with_a_checker_checks_the_engine_files_only(make_jar, tmp_path: Path):
+    """#180: `check` and `flagged` of a Maven row come from the gap files; the checker does not read the Maven files."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    calls: list = []
+    runner = writing_runner({"vineflower": {"com/x/B.java": "class B { FLAG }"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, checker=marker_checker(calls))
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.sources_gap, report.missing_classes) == ("maven", 1, 0)
+    assert [f["path"] for f in report.flagged] == ["com/x/B.java"] and report.partial
+    assert (report.check["checked"], report.check["flagged"]) == (1, 1)
+    assert calls and all(Path(f).name == "B.java" for jobs in calls for job in jobs for f in job.files)
+
+
+def test_a_gap_run_of_the_primary_engine_gets_the_engine_args(make_jar, tmp_path: Path):
+    """#180: the tokens after `--` go to the primary engine, also for the gap classes."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
+    sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
+    seen: list = []
+
+    def runner(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None, engine_args=()):
+        seen.append(tuple(engine_args))
+        (Path(dest) / "com/x").mkdir(parents=True)
+        (Path(dest) / "com/x/B.java").write_text("class B {}")
+        return EngineResult(spec.name, 0, False, 1, "")
+
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, fallback=False)
+    ctx.settings.engine_args = ("-dgs=1",)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert seen == [("-dgs=1",)]
+    assert (report.method, report.sources_gap, report.missing_classes) == ("maven", 1, 0)
+
+
+def test_a_groovy_only_sources_jar_is_a_hit(make_jar, class_file, tmp_path: Path):
+    """A Groovy or Scala library publishes .groovy or .scala sources; they are the sources of its classes."""
+    jar = make_jar("lib-1.2.jar", {"g/G.class": class_file("g/G", "G.groovy"), "g/H.class": class_file("g/H", "G.groovy")})
+    sources = make_jar("lib-1.2-sources.jar", {"g/G.groovy": "class G {}\nclass H {}"})
+    runner = writing_runner({})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.classes, report.sources_gap, report.missing_classes, report.java_files) == ("maven", 2, 0, 0, 1)
+    assert runner.calls == []
 
 
 def test_sources_jar_artifact_carries_resources(make_jar, tmp_path: Path):

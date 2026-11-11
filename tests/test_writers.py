@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from decaf import casefs
+from decaf.maven import MAVEN_SOURCE_SUFFIXES
 from decaf.pipeline import (
     ArtifactReport,
     MergeWriter,
@@ -181,6 +182,17 @@ def test_mirror_writer_counts_kotlin_as_source(tmp_path):
     assert java == 1
     assert (tmp_path / "out/a.jar/com/A.kt").is_file()
     assert not (tmp_path / "out/a.jar/com/notes.txt").exists()
+
+
+def test_writers_copy_groovy_and_scala_only_with_the_maven_suffixes(tmp_path: Path):
+    """#180: the Maven sources of a row can be .groovy or .scala files; engine strays still never land."""
+    t = tree(tmp_path / "t", {"g/G.groovy": "class G {}", "s/S.scala": "class S", "a/A.java": "class A {}"})
+    assert MergeWriter(tmp_path / "m1").add_tree(t, "x.jar") == (1, [])
+    assert MergeWriter(tmp_path / "m2").add_tree(t, "x.jar", suffixes=MAVEN_SOURCE_SUFFIXES) == (3, [])
+    assert (tmp_path / "m2/g/G.groovy").is_file() and not (tmp_path / "m1/g/G.groovy").exists()
+    assert MirrorWriter(tmp_path / "o1").add_tree(t, "x.jar") == (1, [])
+    assert MirrorWriter(tmp_path / "o2").add_tree(t, "x.jar", suffixes=MAVEN_SOURCE_SUFFIXES) == (3, [])
+    assert (tmp_path / "o2/x.jar/s/S.scala").is_file() and not (tmp_path / "o1/x.jar/s/S.scala").exists()
 
 
 def test_mirror_add_resources_extracts_non_class_non_archive(make_jar, tmp_path: Path):

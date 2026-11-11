@@ -166,25 +166,30 @@ def _bucket_groups(failed: list[ArtifactReport]) -> dict[str, list[ArtifactRepor
 
 def _status_line(r: ArtifactReport, mark: tuple[str, str] = _MARKS) -> str:
     if r.outcome == "ok":
+        problems = ""
+        if r.missing_classes:
+            problems += f", [yellow]{r.missing_classes} missing[/]"
+        if r.stubs:
+            problems += f", [yellow]{len(r.stubs)} stubbed[/]"
+        if r.flagged:
+            problems += f", [yellow]{len(r.flagged)} flagged[/]"
         if r.method == "maven":
             detail = f"maven sources, {safe(r.gav)}"
             if r.sources_cached:
                 detail += ", cached"
+            decompiled = r.sources_gap - r.missing_classes  # the gap classes that an engine wrote (#180)
+            if decompiled > 0:
+                detail += f", {decompiled} decompiled"
+            detail += problems
         elif r.method == "extracted":
             detail = "extracted sources jar"
         elif r.method is None and r.kind == "resource_only":
             detail = f"resources only, {r.resources_copied} files"
         else:
-            detail = f"{safe(r.method)}, {r.classes} classes"
-            if r.missing_classes:
-                detail += f", [yellow]{r.missing_classes} missing[/]"
-            if r.stubs:
-                detail += f", [yellow]{len(r.stubs)} stubbed[/]"
-            if r.flagged:
-                detail += f", [yellow]{len(r.flagged)} flagged[/]"
+            detail = f"{safe(r.method)}, {r.classes} classes{problems}"
         glyph = "[yellow]![/]" if r.partial else f"[green]{mark[0]}[/]"
         line = f"{glyph} {safe(r.rel)} ({detail})"
-        if r.method == "maven" and r.sources_cached:
+        if r.method == "maven" and r.sources_cached and not r.sources_gap:
             return f"[dim]{line}[/]"
         return line
     if r.outcome == "skipped":
@@ -355,7 +360,8 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
         console.print(
             f"  classes={r.classes} java_files={r.java_files} "
             f"resources_copied={r.resources_copied} resources_skipped={r.resources_skipped} "
-            f"missing_classes={r.missing_classes} stubbed={len(r.stubs)} collisions={len(r.collisions)}"
+            f"missing_classes={r.missing_classes} sources_gap={r.sources_gap} "
+            f"stubbed={len(r.stubs)} collisions={len(r.collisions)}"
         )
         if r.check:
             reasons = ", ".join(f"{k} {v}" for k, v in (r.check.get("unchecked_reasons") or {}).items() if v)

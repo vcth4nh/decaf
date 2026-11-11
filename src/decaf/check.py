@@ -498,6 +498,18 @@ def language(data: bytes) -> str | None:
     return next((name for suffix, name in _SOURCE_SUFFIXES.items() if source is not None and source.endswith(suffix)), None)
 
 
+def source_file(data: bytes) -> str | None:
+    """The SourceFile attribute of a class file, for example "A.java"; None when the class has none or the file
+    does not parse (#180)."""
+    pool = _pool(data)
+    if pool is None or pool[2] + 8 > len(data):  # also a file cut in its constant pool
+        return None
+    start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
+    count = int.from_bytes(data[start - 2:start], "big")
+    source = _source_file(pool, data, start + 2 * count)  # None also for a cut file
+    return source.decode("utf-8", "replace") if source else None
+
+
 def _source_file(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int) -> bytes | None:
     """The SourceFile attribute of a class file, e.g. b"A.groovy"; pos is the offset of fields_count."""
     try:

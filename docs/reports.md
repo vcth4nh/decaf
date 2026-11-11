@@ -28,6 +28,8 @@ decaf report out --memory            # ten JVMs with the largest memory peaks
   It gets a yellow `!` in terminal output.
 - **Failed:** the artifact could not be processed. The report groups failures
   by cause, such as an unreadable archive or an engine timeout.
+- A Maven artifact follows the same rules. The classes that its sources jar
+  lacks are decompiled, and the ones that no engine wrote count as missing.
 - Skipped archives and merge collisions are recorded separately. Check
   `totals.partial`, `totals.skipped`, and `totals.collisions` when completeness
   matters.

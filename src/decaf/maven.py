@@ -20,6 +20,8 @@ from .scanner import SOURCE_SUFFIXES, ZIP_ERRORS, safe_extract_zip
 from .verdicts import VerdictCache
 
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
+# the sources of a published jar; SOURCE_SUFFIXES stays the rule for inputs and engine output (#180)
+MAVEN_SOURCE_SUFFIXES = (".java", ".kt", ".groovy", ".scala")
 
 
 _SCHEME = re.compile(r"[^:/?#@]*://")
@@ -692,10 +694,12 @@ def drop_cached_sources(sources_jar: Path) -> None:
             pass
 
 
-def extract_sources(sources_jar: Path, dest: Path, damaged: list[str] | None = None) -> int:
+def extract_sources(
+    sources_jar: Path, dest: Path, damaged: list[str] | None = None, suffixes: tuple[str, ...] = SOURCE_SUFFIXES
+) -> int:
     """Extract the source files; the names of entries that cannot be read go to damaged (#109)."""
     try:
-        return safe_extract_zip(sources_jar, dest, suffixes=SOURCE_SUFFIXES, failed=damaged)
+        return safe_extract_zip(sources_jar, dest, suffixes=suffixes, failed=damaged)
     except ZIP_ERRORS:
         return 0
 

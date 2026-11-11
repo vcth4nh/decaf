@@ -270,6 +270,7 @@ def test_load_report_v0_and_unknown_keys(tmp_path: Path):
         del data[key]
     data["future"] = 1
     data["artifacts"][0]["unknown_field"] = "surprise"
+    del data["artifacts"][0]["sources_gap"]  # a decaf before #180 wrote no sources_gap
     path = tmp_path / "decaf-report.json"
     path.write_text(json.dumps(data))
 
@@ -280,6 +281,7 @@ def test_load_report_v0_and_unknown_keys(tmp_path: Path):
     assert loaded.started_at == ""
     assert loaded.ended_at == ""
     assert loaded.artifacts[0].rel == rep.artifacts[0].rel
+    assert loaded.artifacts[0].sources_gap == 0
 
 
 def test_load_report_errors(tmp_path: Path):
@@ -550,7 +552,7 @@ def test_render_artifact_lists_stubs_and_attempt_counts():
     console = _console()
     assert render_artifact(console, rep, ["s.jar"]) == 1
     plain = console.file.getvalue()
-    assert "missing_classes=0 stubbed=2 collisions=0" in plain
+    assert "missing_classes=0 sources_gap=0 stubbed=2 collisions=0" in plain
     assert "stub p/A.java (vineflower, 2 methods): java.lang.OutOfMemoryError" in plain
     assert "stub p/B.java (jd, 1 methods): no exception name" in plain
     assert "vineflower archive rc=0 timed_out=False java_files=2 stubbed=2" in plain
@@ -685,3 +687,34 @@ def test_render_memory_without_data():
     assert console.file.getvalue().strip() == (
         "no memory data in this report (an older decaf wrote it, or no engine ran)"
     )
+
+
+def test_status_line_of_a_maven_row_with_a_gap():
+    """#180: a Maven row says how many classes the engines wrote and how many stay missing."""
+    cached = ArtifactReport(rel="g.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1",
+                            sources_cached=True, classes=280, sources_gap=32)
+    assert _status_line(cached) == "[green]✓[/] g.jar (maven sources, g:a:1, cached, 32 decompiled)"
+    lost = ArtifactReport(rel="l.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1",
+                          classes=10, sources_gap=3, missing_classes=2)
+    assert _status_line(lost) == "[yellow]![/] l.jar (maven sources, g:a:1, 1 decompiled, [yellow]2 missing[/])"
+    none = ArtifactReport(rel="n.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1",
+                          classes=10, sources_gap=2, missing_classes=2)
+    assert _status_line(none) == "[yellow]![/] n.jar (maven sources, g:a:1, [yellow]2 missing[/])"
+    complete = ArtifactReport(rel="c.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1", sources_cached=True)
+    assert _status_line(complete) == "[dim][green]✓[/] c.jar (maven sources, g:a:1, cached)[/]"
+
+
+def test_status_line_of_a_maven_row_counts_the_stubbed_and_flagged_files():
+    """#180: a Maven row shows the stubbed and flagged files of its gap, as an engine row does."""
+    r = ArtifactReport(rel="s.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1",
+                       classes=10, sources_gap=2, stubs=[_OOM_STUB], flagged=[_FLAG])
+    assert _status_line(r) == (
+        "[yellow]![/] s.jar (maven sources, g:a:1, 2 decompiled, [yellow]1 stubbed[/], [yellow]1 flagged[/])"
+    )
+
+
+def test_render_artifact_shows_the_sources_gap():
+    console = _plain_console()
+    r = ArtifactReport(rel="g.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1", classes=280, sources_gap=32)
+    render_artifact(console, report(artifacts=[r]), ["g.jar"])
+    assert "missing_classes=0 sources_gap=32 stubbed=0" in console.file.getvalue()

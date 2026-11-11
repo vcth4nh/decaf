@@ -26,7 +26,8 @@ decaf report out --artifact bytecode.jar
 | `unchecked` | The checker could not examine the file; the report gives a reason |
 
 - Each flagged or noted file includes up to 100 `javac` diagnostics in line order.
-- Kotlin `.kt` output is unchecked. Maven sources are not checked.
+- Kotlin `.kt` output is unchecked. Maven sources are not checked; the
+  classes that a sources jar lacks are decompiled and checked.
 - Passing this per-file check does not establish that the whole project builds
   or that the decompiled code behaves identically to the original.
 
