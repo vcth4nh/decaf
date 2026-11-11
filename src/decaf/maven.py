@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from .scanner import SOURCE_SUFFIXES, ZIP_ERRORS, safe_extract_zip
+from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, ZIP_ERRORS, safe_extract_zip
 from .verdicts import VerdictCache
 
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
@@ -71,10 +71,10 @@ class Gav:
             f"{self.artifact}-{self.version}-sources.jar"
         )
 
-    def jar_path(self) -> str:
+    def jar_path(self, suffix: str = ".jar") -> str:
         return (
             f"{self.group.replace('.', '/')}/{self.artifact}/{self.version}/"
-            f"{self.artifact}-{self.version}.jar"
+            f"{self.artifact}-{self.version}{suffix}"
         )
 
 
@@ -455,8 +455,12 @@ def verify_gav(
     budget: int = MAX_PROBES,
     net: NetState | None = None,
     log: ResolutionLog | None = None,
+    suffix: str = ".jar",
 ) -> tuple[str | None, int]:
-    """Probe each repo's .jar.sha1 sidecar for gav. Returns (verifying repo, probes spent)."""
+    """Probe the .sha1 sidecar of the main artifact file of gav in each repo.
+
+    suffix is the file type of that file: .jar, .war, .ear, or .aar. Returns (verifying repo, probes spent).
+    """
     if net is None:
         net = NetState()
     if log is None:
@@ -469,7 +473,7 @@ def verify_gav(
         try:
             resp = _get_retry(
                 client,
-                f"{repo}/{gav.jar_path()}.sha1",
+                f"{repo}/{gav.jar_path(suffix)}.sha1",
                 net=net,
                 log=log,
                 step="candidate probe",
@@ -510,6 +514,12 @@ def sha1_of(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _artifact_suffix(jar_path: Path) -> str:
+    """The file type of the input for its .sha1 sidecar: an aar or a war has no .jar.sha1 (#180)."""
+    suffix = jar_path.suffix.lower()
+    return suffix if suffix in ARCHIVE_EXTS else ".jar"
 
 
 def gav_from_central_sha1(
@@ -760,6 +770,7 @@ def resolve_sources(
     log = ResolutionLog(subject=subject if subject is not None else jar_path.name)
 
     sha1 = sha1_of(jar_path)
+    suffix = _artifact_suffix(jar_path)
     coords = candidate_coords(jar_path)  # also the key of a miss verdict: a renamed jar looks again (#110)
     if verdicts is not None:
         known = verdicts.lookup_sha1(sha1, _redacted(repos), coords)
@@ -782,9 +793,9 @@ def resolve_sources(
         trail = ["no pom.properties"]
     else:
         # A shaded, patched, or renamed jar can carry the pom.properties of another jar:
-        # trust it only when a repository's .jar.sha1 matches this jar (#110).
+        # trust it only when a repository's .sha1 sidecar matches this jar (#110).
         before = log.probe_failures
-        repo, _ = verify_gav(gav, sha1, repos, client, MAX_PROBES, net, log)
+        repo, _ = verify_gav(gav, sha1, repos, client, MAX_PROBES, net, log, suffix)
         if repo is not None:
             if verdicts is not None:
                 verdicts.record_sha1(sha1, (gav.group, gav.artifact, gav.version), "pom-properties")
@@ -795,7 +806,7 @@ def resolve_sources(
             )
             return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
         errs = " (probe errored)" if log.probe_failures > before else ""
-        trail = [f"pom.properties {gav} not verified by .jar.sha1{errs}"]
+        trail = [f"pom.properties {gav} not verified by {suffix}.sha1{errs}"]
     if allow_sha1:
         before = len(log.events)
         gav = gav_from_central_sha1(sha1, client, net, log)
@@ -838,7 +849,7 @@ def resolve_sources(
             if candidate in tried:
                 continue
             tried.add(candidate)
-            repo, used = verify_gav(candidate, sha1, repos, client, budget, net, log)
+            repo, used = verify_gav(candidate, sha1, repos, client, budget, net, log, suffix)
             budget -= used
             if repo is None:
                 continue

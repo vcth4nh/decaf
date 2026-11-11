@@ -772,6 +772,87 @@ def test_gav_jar_path():
     )
 
 
+def test_gav_jar_path_takes_the_extension_of_the_binary():
+    gav = Gav("com.example", "lib", "1.2")
+    assert gav.jar_path() == "com/example/lib/1.2/lib-1.2.jar"
+    assert gav.jar_path(".aar") == "com/example/lib/1.2/lib-1.2.aar"
+
+
+def test_verify_gav_probes_the_sidecar_of_the_given_extension():
+    paths: list[str] = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        return httpx.Response(200, text=SHA)
+
+    with make_client(handler) as c:
+        repo, used = verify_gav(Gav("com.example", "lib", "1.2"), SHA, ["https://r.test/m2"], c, suffix=".aar")
+    assert (repo, used) == ("https://r.test/m2", 1)
+    assert paths == ["/m2/com/example/lib/1.2/lib-1.2.aar.sha1"]
+
+
+@pytest.mark.parametrize("name, sidecar", [
+    ("lib-1.2.aar", "lib-1.2.aar.sha1"),
+    ("lib-1.2.WAR", "lib-1.2.war.sha1"),
+    ("lib-1.2.ear", "lib-1.2.ear.sha1"),
+    ("lib-1.2.JAR", "lib-1.2.jar.sha1"),
+    ("lib-1.2.zip", "lib-1.2.jar.sha1"),
+])
+def test_pom_properties_probe_uses_the_extension_of_the_binary(make_jar, tmp_path: Path, name, sidecar):
+    """#180: the main file of an aar or a war is no .jar, so its sidecar is no .jar.sha1."""
+    jar = make_jar(name, {"META-INF/maven/com.example/lib/pom.properties": POM})
+    sha = sha1_of(jar)
+    probes: list[str] = []
+
+    def handler(request):
+        if request.url.path.endswith(".sha1"):
+            probes.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(200, text=sha)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert probes == [sidecar]
+    assert res.miss.startswith("found com.example:lib:1.2 in pom.properties")
+
+
+def test_candidate_probe_uses_the_extension_of_the_binary(make_jar, tmp_path: Path):
+    jar = make_jar("spring-jdbc-6.2.17.aar", {"org/springframework/jdbc/core/A.class": b"x"})
+    sha = sha1_of(jar)
+    probes: list[str] = []
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            if request.url.params["q"].startswith('1:"'):
+                return httpx.Response(200, json={"response": {"docs": []}})
+            docs = [{"g": "org.springframework", "a": "spring-jdbc", "v": "6.2.8"}]
+            return httpx.Response(200, json={"response": {"docs": docs}})
+        if request.url.path.endswith(".sha1"):
+            probes.append(request.url.path)
+            return httpx.Response(200, text=sha)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert probes == ["/m2/org/springframework/spring-jdbc/6.2.17/spring-jdbc-6.2.17.aar.sha1"]
+    assert res.miss.startswith("verified org.springframework:spring-jdbc:6.2.17 via https://r.test/m2")
+
+
+def test_unverified_pom_properties_names_the_probed_sidecar(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.aar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        if request.url.path.endswith(".sha1"):
+            return httpx.Response(200, text="0" * 40)
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.miss.startswith("pom.properties com.example:lib:1.2 not verified by .aar.sha1; ")
+
+
 def test_verify_gav_match_and_lenient_parse():
     def handler(request):
         assert request.url.path.endswith("/spring-jdbc-6.2.17.jar.sha1")
