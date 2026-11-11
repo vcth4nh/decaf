@@ -268,6 +268,8 @@ _TRANSPORT_KINDS = ("timeout", "connection error")  # the kinds of _exc_kind: on
 def _status_kind(code: int) -> str | None:
     if code in (408, 429):  # a request timeout or a rate limit: retry (#110)
         return f"HTTP {code}"
+    if code == 501:  # "Not Implemented" does not change on a retry: a final answer (#180)
+        return None
     if 500 <= code < 600:
         return f"HTTP {code}"
     return None

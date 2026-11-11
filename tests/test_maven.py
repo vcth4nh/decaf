@@ -1264,6 +1264,36 @@ def test_verify_gav_400_taints_the_probe():
     assert log.probe_failures == 1 and log.events == ["r.test: HTTP 400 during candidate probe"]
 
 
+def test_a_501_answer_is_final_for_a_probe():
+    """#180: "Not Implemented" does not change on a retry; a 503 keeps its three attempts."""
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(501 if request.url.host == "r.test" else 503)
+
+    log = ResolutionLog()
+    with make_client(handler) as c:
+        assert verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c, log=log) == (None, 1)
+        assert verify_gav(Gav("g", "a", "1"), SHA, ["https://s.test/m2"], c, log=log) == (None, 1)
+    assert calls == ["r.test", "s.test", "s.test", "s.test"]
+    assert log.events == ["r.test: HTTP 501 during candidate probe", "s.test: HTTP 503 during candidate probe"]
+    assert log.probe_failures == 2
+
+
+def test_a_501_answer_is_final_for_a_download(tmp_path: Path):
+    calls: list[int] = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(501)
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as failure:
+            maven._download(c, "https://r.test/m2/a-1-sources.jar", tmp_path / "a.jar", NetState(), ResolutionLog())
+    assert (failure.value.kind, failure.value.detail, len(calls)) == ("HTTP 501", "r.test: HTTP 501", 1)
+
+
 def test_negative_verdict_counts_only_for_the_same_hints(tmp_path: Path):
     """#110: a renamed jar gets other hints from its file name, so it is looked up again."""
     from decaf.verdicts import VerdictCache

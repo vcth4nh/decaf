@@ -22,6 +22,12 @@
   and the first guess can reach each repository. decaf also does not probe
   the coordinates of `pom.properties` a second time as a guess. A lookup
   with no other guess ends with `no other candidates`.
+- An `http://` entry for Maven Central made each lookup slow and each miss a
+  network miss (#180). Maven Central answers plain HTTP with 501. decaf
+  tried each such request three times, marked the miss with `network:`, and
+  kept no verdict, so each run paid again. Now decaf reads an `http://` URL
+  of Maven Central as the `https://` URL. An answer 501 of any repository is
+  final: decaf does not try it again.
 - A jar could get the sources of another build under `✓` (#180). decaf
   checked the jar against the `.jar.sha1` file of one repository and then
   took the `-sources.jar` of the coordinates from any configured repository.

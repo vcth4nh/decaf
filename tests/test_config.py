@@ -249,11 +249,30 @@ def test_central_by_its_other_name_is_one_repository(tmp_path: Path):
     assert load_config(f).repositories == ("https://nexus.example/m2", "https://repo.maven.apache.org/maven2")
 
 
-def test_an_http_central_entry_keeps_the_https_central(tmp_path: Path):
-    """Review M2: Central answers plain HTTP with 501, so an old http entry stopped all Central sources."""
+@pytest.mark.parametrize("entry, expected", [
+    ("http://repo1.maven.org/maven2", ("https://repo1.maven.org/maven2",)),
+    ("http://repo1.maven.org/maven2/", ("https://repo1.maven.org/maven2",)),
+    ("http://repo.maven.apache.org/maven2", ("https://repo.maven.apache.org/maven2",)),
+    ("http://repo1.maven.org:8080/maven2", ("http://repo1.maven.org:8080/maven2", "https://repo1.maven.org/maven2")),
+    ("http://user:pw@repo1.maven.org/maven2", ("http://user:pw@repo1.maven.org/maven2", "https://repo1.maven.org/maven2")),
+    ("http://repo1.maven.org/other", ("http://repo1.maven.org/other", "https://repo1.maven.org/maven2")),
+])
+def test_an_http_central_entry_becomes_the_https_entry(tmp_path: Path, entry, expected):
+    """#180: Central answers plain HTTP with 501, so decaf reads an http Central URL as the https URL."""
     f = tmp_path / "config.toml"
-    f.write_text('repositories = ["http://repo1.maven.org/maven2"]\n')
-    assert load_config(f).repositories == ("http://repo1.maven.org/maven2", "https://repo1.maven.org/maven2")
+    f.write_text(f'repositories = ["{entry}"]\n')
+    assert load_config(f).repositories == expected
+
+
+def test_an_http_central_entry_keeps_its_position_and_makes_no_duplicate(tmp_path: Path):
+    f = tmp_path / "config.toml"
+    f.write_text(
+        'repositories = ["http://repo1.maven.org/maven2", "https://nexus.example/m2", "https://repo1.maven.org/maven2"]\n'
+    )
+    assert load_config(f).repositories == ("https://repo1.maven.org/maven2", "https://nexus.example/m2")
+    assert load_config(f, extra_repos=["http://repo.maven.apache.org/maven2/"]).repositories == (
+        "https://repo.maven.apache.org/maven2", "https://repo1.maven.org/maven2", "https://nexus.example/m2",
+    )
 
 
 def test_update_check_defaults_to_true(tmp_path: Path):
