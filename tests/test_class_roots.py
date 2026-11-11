@@ -174,3 +174,22 @@ def test_merge_report_path_is_the_path_below_src(classes: Path, tmp_path: Path, 
     shown = runner.invoke(app, ["report", str(out), "--artifact", rel])
     assert shown.exit_code == 0, shown.output
     assert "flagged com/y/S.java (vineflower)" in shown.output
+
+
+@pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
+def test_the_sources_of_a_war_are_the_sources_of_a_plain_jar(classes: Path, tmp_path: Path, engine):
+    """The engine gets the classes of WEB-INF/classes/ as a jar, so it writes the same text as for a plain jar. From a
+    folder, CFR writes other text: other casts, and no last blank line (#173)."""
+    entries = sorted(p for d in ("p", "q", "com/x") for p in (classes / d).glob("*.class"))
+    jar, war = tmp_path / "in-jar/app.jar", tmp_path / "in-war/app.war"
+    for path, prefix in ((jar, ""), (war, "WEB-INF/classes/")):
+        path.parent.mkdir(parents=True)
+        with zipfile.ZipFile(path, "w") as zf:
+            for c in entries:
+                zf.write(c, prefix + c.relative_to(classes).as_posix())
+    _run(jar, tmp_path / "out-jar", "--engine", engine, "--no-fallback")
+    _run(war, tmp_path / "out-war", "--engine", engine, "--no-fallback")
+    from_jar, from_war = tmp_path / "out-jar/app.jar", tmp_path / "out-war/app.war/WEB-INF/classes"
+    texts = {p.relative_to(from_jar).as_posix(): p.read_bytes() for p in from_jar.rglob("*.java")}
+    assert sorted(texts) == ["com/x/A.java", "p/A.java", "q/B.java"]
+    assert {p.relative_to(from_war).as_posix(): p.read_bytes() for p in from_war.rglob("*.java")} == texts

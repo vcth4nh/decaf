@@ -2565,8 +2565,8 @@ def test_run_batches_a_jar_with_a_container_root_only_when_the_first_engine_keep
     assert report.totals["ok"] == 3
     assert batches == batches_seen
     if engine != "vineflower":
-        # the classes of BOOT-INF/classes/ at their package root, then s1.jar unchanged
-        assert sorted(p.name for p in solo) == ["classes", "s1.jar"]
+        # the classes of BOOT-INF/classes/ at their package root in a jar of their own, then s1.jar unchanged
+        assert sorted(p.name for p in solo) == ["classes.jar", "s1.jar"]
     assert (tmp_path / "out/big.jar/lib/boot.jar/BOOT-INF/classes/com/b/A.java").is_file()
 
 

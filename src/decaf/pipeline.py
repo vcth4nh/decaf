@@ -1466,16 +1466,24 @@ _ROOTED_ENGINES = ("cfr", "procyon", "jd")
 _VERSIONS_TAIL = re.compile(r"(?:^|(?<=/))META-INF/versions/[^/]+/$")
 
 
+def _container_prefix(rel: str) -> str:
+    """rel up to the end of its WEB-INF/classes/ or BOOT-INF/classes/ part (as _strip_container finds it), else ""."""
+    for marker in _CONTAINER_ROOTS:
+        idx = rel.find(marker)
+        if idx != -1:
+            return rel[: idx + len(marker)]
+    return ""
+
+
 def _root_prefix(tree: Path, rel: str) -> str:
     """The part of a class file path above its package root: up to the end of WEB-INF/classes/ or BOOT-INF/classes/,
     else the path before the class name of the file (as _tree_roots reads it), else "".
 
     A META-INF/versions/N/ folder stays below the root (#202).
     """
-    for marker in _CONTAINER_ROOTS:
-        idx = rel.find(marker)
-        if idx != -1:
-            return rel[: idx + len(marker)]
+    marked = _container_prefix(rel)
+    if marked:
+        return marked
     try:
         with open(tree / rel, "rb") as f:
             data = _bounded(f)
@@ -1500,27 +1508,56 @@ def _container_classes(archive: Path) -> list[str] | None:
     return names if any(m in n for n in names for m in _CONTAINER_ROOTS) else None
 
 
+def _root_jar(archive: Path, prefix: str, jar: Path) -> None:
+    """A jar of the class entries of the archive with this container prefix, at their path below it (#173).
+
+    An engine gets the same entries as from a plain jar, so it writes the same text. Of two entries with one name,
+    the last one goes in, and an entry that cannot be read stays out, as in safe_extract_zip. An entry whose path
+    below the prefix leaves the jar root stays out too. Each entry goes through a file, not through memory.
+    """
+    with zipfile.ZipFile(archive) as zf:
+        chosen: dict[str, zipfile.ZipInfo] = {}
+        for info in zf.infolist():
+            name = info.filename
+            if info.is_dir() or not name.endswith(".class") or _container_prefix(name) != prefix:
+                continue
+            below = name[len(prefix) :]
+            if not below.startswith("/") and ".." not in below.split("/"):
+                chosen[below] = info
+        part = jar.with_name("entry.part")
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) as out:
+            for below, info in chosen.items():
+                try:
+                    with zf.open(info) as src, open(part, "wb") as f:
+                        shutil.copyfileobj(src, f)
+                except ZIP_ERRORS as exc:
+                    if isinstance(exc, OSError) and exc.errno is not None:
+                        raise  # the disk, not the entry
+                    continue
+                out.write(part, below)
+
+
 def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, dest: Path, timeout: float,
                 **kw) -> engines.EngineResult:
     """ctx.runner, but CFR, Procyon, and JD get one package root of the target at a time (#199).
 
     The other engines, and a target whose classes are all at their package root, go to ctx.runner unchanged. The
-    target stays as it is: a root is its own folder when each class file below it has its prefix, else a copy.
-    The timeout is for the whole target, as in _run_per_class.
+    target stays as it is. An archive with WEB-INF/classes/ or BOOT-INF/classes/ gives a temporary jar for each
+    root: from a folder, CFR writes other text than from a jar. In a folder, a root is its own folder when each
+    class file below it has its prefix, else a copy. The timeout is for the whole target, as in _run_per_class.
     """
     if spec.name not in _ROOTED_ENGINES:
         return ctx.runner(spec, jar, target, dest, timeout, **kw)
     temps: list[Path] = []
     try:
-        tree = target
-        if not target.is_dir():
+        if target.is_dir():
+            prefixes = {rel: _root_prefix(target, rel)
+                        for rel in (p.relative_to(target).as_posix() for p in target.rglob("*.class"))}
+        else:
             names = _container_classes(target)
             if names is None:
                 return ctx.runner(spec, jar, target, dest, timeout, **kw)
-            tree = _tmp_dir(ctx)
-            temps.append(tree)
-            safe_extract_zip(target, tree, members=set(names))
-        prefixes = {rel: _root_prefix(tree, rel) for rel in (p.relative_to(tree).as_posix() for p in tree.rglob("*.class"))}
+            prefixes = {name: _container_prefix(name) for name in names}
         if not any(prefixes.values()):
             return ctx.runner(spec, jar, target, dest, timeout, **kw)
         deadline = time.monotonic() + timeout
@@ -1533,14 +1570,18 @@ def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, des
             if left <= 0:
                 timed_out = True
                 break
-            root = tree / prefix
-            if any(p != prefix for rel, p in prefixes.items() if rel.startswith(prefix)):
+            root = target / prefix
+            if not target.is_dir():
+                temps.append(_tmp_dir(ctx))
+                root = temps[-1] / "classes.jar"  # a .jar name: Procyon reads the suffix (build_command)
+                _root_jar(target, prefix, root)
+            elif any(p != prefix for rel, p in prefixes.items() if rel.startswith(prefix)):
                 root = _tmp_dir(ctx)
                 temps.append(root)
                 for rel, p in prefixes.items():
                     if p == prefix:
                         (root / rel[len(prefix) :]).parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(tree / rel, root / rel[len(prefix) :])
+                        shutil.copyfile(target / rel, root / rel[len(prefix) :])
             out = _tmp_dir(ctx)
             temps.append(out)
             results.append(ctx.runner(spec, jar, root, out, left, **kw))
