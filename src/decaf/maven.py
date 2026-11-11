@@ -445,6 +445,7 @@ def candidate_groups(
 
 
 MAX_PROBES = 8
+_SHA1_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def verify_gav(
@@ -505,6 +506,11 @@ def verify_gav(
         tokens = resp.text.split()
         if tokens and tokens[0].lower() == sha1.lower():
             return repo, used
+        if not any(_SHA1_RE.fullmatch(token) for token in tokens):
+            # an answer without a SHA-1 (a page of a proxy, an empty file) says nothing about the build (#180)
+            host = httpx.URL(repo).host
+            log.events.append(f"{host}: no SHA-1 in the answer during candidate probe")
+            log.probe_failures += 1
     return None, used
 
 

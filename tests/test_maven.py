@@ -1419,6 +1419,45 @@ def test_verify_gav_empty_body_and_network_error():
     assert calls == ["one.test", "two.test", "two.test", "two.test"]  # retried, then miss
 
 
+def test_verify_gav_answer_without_a_sha1_taints_the_probe():
+    """#180: a page of a proxy with status 200 says nothing about the build."""
+    for body in ("<html>Sign in</html>", ""):
+        log = ResolutionLog()
+        with make_client(lambda request: httpx.Response(200, text=body)) as c:
+            repo, used = verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c, log=log)
+        assert (repo, used) == (None, 1)
+        assert log.events == ["r.test: no SHA-1 in the answer during candidate probe"]
+        assert log.probe_failures == 1
+
+
+def test_verify_gav_another_sha1_is_a_clean_no():
+    for body in ("0" * 40, f"{'0' * 40}  a-1.jar\n", f"SHA1(a-1.jar)= {'0' * 40}\n"):
+        log = ResolutionLog()
+        with make_client(lambda request: httpx.Response(200, text=body)) as c:
+            repo, _ = verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c, log=log)
+        assert repo is None
+        assert (log.events, log.probe_failures) == ([], 0)
+
+
+def test_proxy_page_for_the_sidecar_writes_no_clean_verdict(make_jar, tmp_path: Path):
+    """#180: an index hit whose .sha1 probe gets a page of a proxy is no "no sources" answer for a week."""
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("mystery.jar", {"A.class": b"x"})
+    verdicts = VerdictCache(tmp_path / "verdicts")
+
+    def repos_handler(request):
+        return httpx.Response(200, text="<html>Sign in</html>")
+
+    with make_client(_index(KEY12, repos_handler)) as c:
+        res = resolve_sources(jar, [REPO_A], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.miss == (
+        "network: a.test: no SHA-1 in the answer during candidate probe; "
+        "sha1 matched com.example:lib:1.2 in Central index but no -sources.jar in any reachable repo"
+    )
+    assert verdicts.has_no_sources(KEY12, sha1_of(jar), [REPO_A]) is False
+
+
 def test_verify_gav_respects_budget():
     calls = []
 
