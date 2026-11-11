@@ -562,6 +562,7 @@ def gav_from_central_sha1(
 
 def fetch_sources(
     gav: Gav,
+    sha1: str,
     repos: Sequence[str],
     client: httpx.Client,
     cache_dir: Path,
@@ -570,17 +571,21 @@ def fetch_sources(
     verdicts: VerdictCache | None = None,
     on_state: Callable[[str], None] | None = None,
 ) -> tuple[Path, str, bool] | None:
+    """The key of a cached sources jar and of a "no sources" verdict is the GAV and the SHA-1 of the binary.
+
+    One GAV can name more than one build: a -SNAPSHOT changes, and a team can deploy a release again (#180).
+    """
     if net is None:
         net = NetState()
     if log is None:
         log = ResolutionLog()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar"
+    cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}_{sha1}-sources.jar"
     marker = cached.with_suffix(".repo")
     if cached.is_file() and marker.is_file():
         return cached, redact_url(marker.read_text().strip()), True
     gav_key = (gav.group, gav.artifact, gav.version)
-    if verdicts is not None and verdicts.has_no_sources(gav_key, _redacted(repos)):
+    if verdicts is not None and verdicts.has_no_sources(gav_key, sha1, _redacted(repos)):
         log.cached_no_sources = True
         return None
     verified_misses = 0
@@ -603,9 +608,11 @@ def fetch_sources(
             verified_misses += 1
             continue
         marker.write_text(redact_url(repo))
+        # drop the file of an older decaf version: its name has no SHA-1, so this version never reads it (#180)
+        drop_cached_sources(cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar")
         return cached, redact_url(repo), False
     if verdicts is not None and repos and verified_misses == len(repos):
-        verdicts.record_no_sources(gav_key, _redacted(repos))
+        verdicts.record_no_sources(gav_key, sha1, _redacted(repos))
     return None
 
 
@@ -667,7 +674,7 @@ def _download(
             try:
                 os.replace(tmp_name, cached)
             except OSError:
-                # Windows denies replace when another thread races the same GAV;
+                # Windows denies replace when another thread races the same jar (the same GAV and SHA-1);
                 # the winner's copy is identical, so drop ours and use it.
                 os.unlink(tmp_name)
                 if not cached.is_file():
@@ -779,7 +786,7 @@ def resolve_sources(
         if known is not None:
             if known.gav is not None:
                 gav = Gav(*known.gav)
-                fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
+                fetched = fetch_sources(gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state)
                 msg = _no_sources(
                     f"cached verdict {gav} ({known.resolved_by})",
                     "no -sources.jar in any repo",
@@ -800,7 +807,7 @@ def resolve_sources(
             if verdicts is not None:
                 verdicts.record_sha1(sha1, (gav.group, gav.artifact, gav.version), "pom-properties")
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(gav, ordered, client, cache_dir, net, log, verdicts, on_state)
+            fetched = fetch_sources(gav, sha1, ordered, client, cache_dir, net, log, verdicts, on_state)
             msg = _no_sources(
                 f"found {gav} in pom.properties", "no -sources.jar in any repo", log
             )
@@ -815,7 +822,7 @@ def resolve_sources(
                 verdicts.record_sha1(
                     sha1, (gav.group, gav.artifact, gav.version), "sha1-index"
                 )
-            fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
+            fetched = fetch_sources(gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state)
             msg = _no_sources(
                 f"sha1 matched {gav} in Central index", "no -sources.jar in any repo", log
             )
@@ -860,7 +867,7 @@ def resolve_sources(
                     "verified-guess",
                 )
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(candidate, ordered, client, cache_dir, net, log, verdicts, on_state)
+            fetched = fetch_sources(candidate, sha1, ordered, client, cache_dir, net, log, verdicts, on_state)
             msg = _no_sources(
                 f"verified {candidate} via {redact_url(repo)}", "no -sources.jar published", log
             )

@@ -102,7 +102,7 @@ def test_credentialed_repo_never_persisted(make_jar, tmp_path: Path):
     verdicts = VerdictCache(tmp_path / "verdicts")
     cache = tmp_path / "cache"
     with make_client(handler) as c:
-        got = fetch_sources(Gav("com.e", "lib", "1"), [creds_repo], c, cache, verdicts=verdicts)
+        got = fetch_sources(Gav("com.e", "lib", "1"), "a" * 40, [creds_repo], c, cache, verdicts=verdicts)
     assert got is not None
     _, repo, cached = got
     assert repo == "https://r.test/m2" and cached is False
@@ -110,7 +110,7 @@ def test_credentialed_repo_never_persisted(make_jar, tmp_path: Path):
     assert marker.read_text().strip() == "https://r.test/m2"
 
     with make_client(handler) as c:
-        got2 = fetch_sources(Gav("com.e", "gone", "1"), [creds_repo], c, cache, verdicts=verdicts)
+        got2 = fetch_sources(Gav("com.e", "gone", "1"), "a" * 40, [creds_repo], c, cache, verdicts=verdicts)
     assert got2 is None
     verdict_files = [f for f in (tmp_path / "verdicts").rglob("*") if f.is_file()]
     assert verdict_files
@@ -121,7 +121,7 @@ def test_credentialed_repo_never_persisted(make_jar, tmp_path: Path):
 def test_legacy_credentialed_marker_sanitized_on_read(make_jar, tmp_path: Path):
     cache = tmp_path / "cache"
     cache.mkdir(parents=True)
-    cached = cache / "com.e_lib_1-sources.jar"
+    cached = cache / f"com.e_lib_1_{'a' * 40}-sources.jar"
     cached.write_bytes(make_jar("p.jar", {"com/e/A.java": "class A {}"}).read_bytes())
     cached.with_suffix(".repo").write_text("https://deploy:s3cr3t@r.test/m2")
 
@@ -129,7 +129,7 @@ def test_legacy_credentialed_marker_sanitized_on_read(make_jar, tmp_path: Path):
         raise AssertionError("network touched on cache hit")
 
     with make_client(handler) as c:
-        got = fetch_sources(Gav("com.e", "lib", "1"), ["https://x.test/m2"], c, cache)
+        got = fetch_sources(Gav("com.e", "lib", "1"), "a" * 40, ["https://x.test/m2"], c, cache)
     assert got == (cached, "https://r.test/m2", True)
 
 
@@ -143,7 +143,7 @@ def test_sources_download_auth_failure_taints_and_skips_verdict(make_jar, tmp_pa
     log = ResolutionLog()
     with make_client(handler) as c:
         got = fetch_sources(
-            Gav("com.e", "lib", "1"), ["https://r.test/m2"], c, tmp_path / "cache",
+            Gav("com.e", "lib", "1"), "a" * 40, ["https://r.test/m2"], c, tmp_path / "cache",
             log=log, verdicts=verdicts,
         )
     assert got is None
@@ -155,7 +155,7 @@ def test_sources_download_auth_failure_taints_and_skips_verdict(make_jar, tmp_pa
 
     with make_client(handler_404) as c:
         got = fetch_sources(
-            Gav("com.e", "other", "1"), ["https://r.test/m2"], c, tmp_path / "cache",
+            Gav("com.e", "other", "1"), "a" * 40, ["https://r.test/m2"], c, tmp_path / "cache",
             verdicts=verdicts,
         )
     assert got is None
@@ -259,7 +259,7 @@ def test_download_rejects_a_sources_jar_with_a_damaged_entry(make_damaged_jar, t
                                damaged=("com/e/B.java",)).read_bytes()
     cache = tmp_path / "cache"
     with make_client(lambda r: httpx.Response(200, content=payload)) as c:
-        assert fetch_sources(Gav("com.e", "lib", "1"), ["https://r.test/m2"], c, cache) is None
+        assert fetch_sources(Gav("com.e", "lib", "1"), "a" * 40, ["https://r.test/m2"], c, cache) is None
     assert not list(cache.glob("*.jar"))
 
 
@@ -278,7 +278,7 @@ def test_a_damaged_sources_jar_is_no_clean_miss(make_jar, make_damaged_jar, tmp_
         with make_client(handler) as c:
             res = resolve_sources(jar, repos, c, tmp_path / "cache", verdicts=verdicts)
         assert res.miss == f"found com.example:lib:1.2 in pom.properties but the -sources.jar in https://r.test/m2 {why}"
-        assert not verdicts.has_no_sources(("com.example", "lib", "1.2"), maven._redacted(repos))
+        assert not verdicts.has_no_sources(("com.example", "lib", "1.2"), sha1_of(jar), maven._redacted(repos))
     two = [*repos, "https://s.test/m2"]  # both damaged: the miss names the first repository
     with make_client(_with_sidecar(jar, lambda request: httpx.Response(200, content=damaged))) as c:
         res = resolve_sources(jar, two, c, tmp_path / "cache", verdicts=VerdictCache(tmp_path / "verdicts2"))
@@ -333,7 +333,7 @@ def test_fetch_sources_tries_repos_in_order_and_caches(tmp_path: Path, make_jar)
 
     repos = ["https://first.test/m2", "https://second.test/m2"]
     with make_client(handler) as c:
-        got = fetch_sources(gav, repos, c, tmp_path / "cache")
+        got = fetch_sources(gav, "a" * 40, repos, c, tmp_path / "cache")
         assert got is not None
         path, repo, cached = got
         assert repo == "https://second.test/m2"
@@ -348,13 +348,13 @@ def test_fetch_sources_tries_repos_in_order_and_caches(tmp_path: Path, make_jar)
         raise AssertionError("cache should have been used")
 
     with make_client(explode) as c:
-        again = fetch_sources(gav, repos, c, tmp_path / "cache")
+        again = fetch_sources(gav, "a" * 40, repos, c, tmp_path / "cache")
         assert again == (path, "https://second.test/m2", True)
 
 
 def test_fetch_sources_all_miss(tmp_path: Path):
     with make_client(lambda r: httpx.Response(404)) as c:
-        assert fetch_sources(Gav("g", "a", "1"), ["https://x.test"], c, tmp_path) is None
+        assert fetch_sources(Gav("g", "a", "1"), "a" * 40, ["https://x.test"], c, tmp_path) is None
 
 
 def test_fetch_sources_survives_windows_replace_race(tmp_path: Path, make_jar, monkeypatch):
@@ -364,7 +364,7 @@ def test_fetch_sources_survives_windows_replace_race(tmp_path: Path, make_jar, m
     payload = make_jar("payload.jar", {"com/example/A.java": "class A {}"}).read_bytes()
     cache = tmp_path / "cache"
     cache.mkdir()
-    cached = cache / "com.example_lib_1.2-sources.jar"
+    cached = cache / f"com.example_lib_1.2_{'a' * 40}-sources.jar"
     cached.write_bytes(payload)  # a concurrent winner already put it in place
 
     def deny(src, dst):
@@ -372,7 +372,7 @@ def test_fetch_sources_survives_windows_replace_race(tmp_path: Path, make_jar, m
 
     monkeypatch.setattr(_os, "replace", deny)
     with make_client(lambda request: httpx.Response(200, content=payload)) as c:
-        result = fetch_sources(gav, ["https://r.test/m2"], c, cache)
+        result = fetch_sources(gav, "a" * 40, ["https://r.test/m2"], c, cache)
     assert result == (cached, "https://r.test/m2", False)
     assert not list(cache.glob("*.part"))  # loser's temp file cleaned up
 
@@ -394,7 +394,7 @@ def test_fetch_sources_concurrent_same_gav(tmp_path: Path, make_jar):
         try:
             barrier.wait()
             with make_client(handler) as c:
-                results.append(fetch_sources(gav, ["https://r.test/m2"], c, tmp_path / "cache"))
+                results.append(fetch_sources(gav, "a" * 40, ["https://r.test/m2"], c, tmp_path / "cache"))
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 
@@ -415,8 +415,104 @@ def test_fetch_sources_rejects_non_zip_payload(tmp_path: Path):
         return httpx.Response(200, content=b"<html>error page</html>")
 
     with make_client(handler) as c:
-        assert fetch_sources(Gav("g", "a", "1"), ["https://x.test"], c, tmp_path / "cache") is None
-    assert not (tmp_path / "cache" / "g_a_1-sources.jar").exists()
+        assert fetch_sources(Gav("g", "a", "1"), "a" * 40, ["https://x.test"], c, tmp_path / "cache") is None
+    assert not (tmp_path / "cache" / f"g_a_1_{'a' * 40}-sources.jar").exists()
+
+
+def test_cached_sources_belong_to_one_binary(tmp_path: Path, make_jar):
+    """#180: the cache replayed the sources of an older build of a mutable GAV."""
+    gav = Gav("com.example", "lib", "1.0-SNAPSHOT")
+    first = make_jar("first.jar", {"com/example/A.java": "class A {}"}).read_bytes()
+    second = make_jar("second.jar", {"com/example/A.java": "class A { int b; }"}).read_bytes()
+    now = {"sha1": "a" * 40, "sources": first}
+    downloads: list[str] = []
+
+    def handler(request):
+        if request.url.path.endswith(".sha1"):
+            return httpx.Response(200, text=now["sha1"])
+        downloads.append(request.url.path)
+        return httpx.Response(200, content=now["sources"])
+
+    cache = tmp_path / "cache"
+    repos = ["https://r.test/m2"]
+    with make_client(handler) as c:
+        a = fetch_sources(gav, "a" * 40, repos, c, cache)
+        now.update(sha1="b" * 40, sources=second)  # the repository now holds another build
+        b = fetch_sources(gav, "b" * 40, repos, c, cache)
+        assert len(downloads) == 2
+        again = fetch_sources(gav, "a" * 40, repos, c, cache)
+    assert len(downloads) == 2  # the file of the first binary is in the cache: no request
+    assert a is not None and b is not None
+    assert a[0].name == f"com.example_lib_1.0-SNAPSHOT_{'a' * 40}-sources.jar"
+    assert b[0].name == f"com.example_lib_1.0-SNAPSHOT_{'b' * 40}-sources.jar"
+    assert a[2] is False and b[2] is False
+    assert again == (a[0], "https://r.test/m2", True)
+    assert a[0].read_bytes() == first and b[0].read_bytes() == second
+
+
+def test_cache_file_of_an_older_version_is_not_used(tmp_path: Path, make_jar):
+    """#180: a file without the SHA-1 of the binary can be the sources of another build."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    old = cache / "com.example_lib_1.2-sources.jar"
+    old.write_bytes(make_jar("old.jar", {"com/example/Old.java": "class Old {}"}).read_bytes())
+    old.with_suffix(".repo").write_text("https://r.test/m2")
+    payload = make_jar("new.jar", {"com/example/A.java": "class A {}"}).read_bytes()
+
+    def handler(request):
+        if request.url.path.endswith(".sha1"):
+            return httpx.Response(200, text="a" * 40)
+        return httpx.Response(200, content=payload)
+
+    with make_client(handler) as c:
+        got = fetch_sources(Gav("com.example", "lib", "1.2"), "a" * 40, ["https://r.test/m2"], c, cache)
+    assert got is not None and got[2] is False and got[0].read_bytes() == payload
+    assert not old.exists() and not old.with_suffix(".repo").exists()  # one copy for each GAV stays
+
+
+def test_no_sources_verdict_belongs_to_one_binary(tmp_path: Path):
+    from decaf.verdicts import VerdictCache
+
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    gav = Gav("g", "a", "1")
+    wrapped, calls = _counting(lambda request: httpx.Response(404))
+    with make_client(wrapped) as c:
+        assert fetch_sources(gav, "a" * 40, ["https://x.test"], c, tmp_path / "cache", verdicts=verdicts) is None
+        assert fetch_sources(gav, "a" * 40, ["https://x.test"], c, tmp_path / "cache", verdicts=verdicts) is None
+        assert calls["n"] == 1  # the second call replays the verdict of this binary
+        assert fetch_sources(gav, "b" * 40, ["https://x.test"], c, tmp_path / "cache", verdicts=verdicts) is None
+    assert calls["n"] == 2  # another build of the GAV asks again
+
+
+def test_two_builds_of_one_gav_get_their_own_sources(make_jar, tmp_path: Path):
+    """#180: the second build of a mutable GAV got the cached sources of the first build."""
+    from decaf.verdicts import VerdictCache
+
+    pom = "groupId=com.example\nartifactId=lib\nversion=1.0-SNAPSHOT\n"
+    entry = "META-INF/maven/com.example/lib/pom.properties"
+    build_a = make_jar("a/lib-1.0-SNAPSHOT.jar", {entry: pom, "com/example/A.class": b"a"})
+    build_b = make_jar("b/lib-1.0-SNAPSHOT.jar", {entry: pom, "com/example/A.class": b"b"})
+    sources_a = make_jar("sa.jar", {"com/example/A.java": "class A { /* a */ }"}).read_bytes()
+    sources_b = make_jar("sb.jar", {"com/example/A.java": "class A { /* b */ }"}).read_bytes()
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    cache = tmp_path / "cache"
+    repos = ["https://r.test/m2"]
+
+    with make_client(_with_sidecar(build_a, lambda r: httpx.Response(200, content=sources_a))) as c:
+        res_a = resolve_sources(build_a, repos, c, cache, verdicts=verdicts)
+    assert res_a.cached is False and res_a.sources_jar.read_bytes() == sources_a
+
+    # the repository now holds build B
+    with make_client(_with_sidecar(build_b, lambda r: httpx.Response(200, content=sources_b))) as c:
+        res_b = resolve_sources(build_b, repos, c, cache, verdicts=verdicts)
+    assert res_b.cached is False and res_b.sources_jar.read_bytes() == sources_b
+
+    def explode(request):
+        raise AssertionError("the sources of build A are in the cache")
+
+    with make_client(explode) as c:
+        again = resolve_sources(build_a, repos, c, cache, verdicts=verdicts)
+    assert again.cached is True and again.sources_jar.read_bytes() == sources_a
 
 
 def test_extract_sources_java_and_kt(make_jar, tmp_path: Path):
@@ -1628,7 +1724,7 @@ def test_fetch_sources_retries_mid_stream_failure(make_jar, tmp_path: Path):
 
     cache = tmp_path / "cache"
     with make_client(handler) as c:
-        got = fetch_sources(Gav("g", "a", "1"), ["https://r.test/m2"], c, cache)
+        got = fetch_sources(Gav("g", "a", "1"), "a" * 40, ["https://r.test/m2"], c, cache)
     assert got is not None and got[0].read_bytes() == payload
     assert state["n"] == 2
     assert not list(cache.glob("*.part"))  # failed attempt's temp file cleaned up
@@ -1855,13 +1951,13 @@ def test_fetch_sources_on_state_fires_only_on_real_download(tmp_path: Path, make
     states: list[str] = []
     with make_client(lambda r: httpx.Response(200, content=payload)) as c:
         got = fetch_sources(
-            gav, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
+            gav, "a" * 40, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
         )
         assert got is not None
         assert states == ["downloading"]
         states.clear()
         again = fetch_sources(
-            gav, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
+            gav, "a" * 40, ["https://r.test/m2"], c, tmp_path / "cache", on_state=states.append
         )
         assert again is not None and again[2] is True
         assert states == []  # disk-cache hit: no download, no event
@@ -1871,7 +1967,7 @@ def test_fetch_sources_on_state_fires_when_all_repos_miss(tmp_path: Path):
     states: list[str] = []
     with make_client(lambda r: httpx.Response(404)) as c:
         got = fetch_sources(
-            Gav("g", "a", "1"), ["https://x.test"], c, tmp_path, on_state=states.append
+            Gav("g", "a", "1"), "a" * 40, ["https://x.test"], c, tmp_path, on_state=states.append
         )
     assert got is None
     assert states == ["downloading"]  # the GETs were real network attempts
@@ -1881,7 +1977,7 @@ def test_fetch_sources_on_state_silent_on_cached_no_sources_verdict(tmp_path: Pa
     from decaf.verdicts import VerdictCache
 
     verdicts = VerdictCache(tmp_path / "verdicts")
-    verdicts.record_no_sources(("g", "a", "1"), ["https://x.test"])
+    verdicts.record_no_sources(("g", "a", "1"), "a" * 40, ["https://x.test"])
     states: list[str] = []
 
     def explode(request):
@@ -1889,7 +1985,7 @@ def test_fetch_sources_on_state_silent_on_cached_no_sources_verdict(tmp_path: Pa
 
     with make_client(explode) as c:
         got = fetch_sources(
-            Gav("g", "a", "1"), ["https://x.test"], c, tmp_path / "cache",
+            Gav("g", "a", "1"), "a" * 40, ["https://x.test"], c, tmp_path / "cache",
             verdicts=verdicts, on_state=states.append,
         )
     assert got is None
