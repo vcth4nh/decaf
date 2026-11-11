@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- A network failure that decided nothing made the row partial (#180). decaf
+  marked a sources miss with `network:` when any step of the lookup had a
+  network failure, also when a later step gave the answer with no failure.
+  Example: the Central index did not answer, a guess from the file name
+  matched a repository, and that repository had no sources jar. The first run
+  gave a `!` row, and the second run gave a `✓` row for the same input. Now,
+  when decaf knows the coordinates, only a failure of the sources step (its
+  checksum probe or its download) marks the miss. A download that ends in a
+  redirect loop or with a body that decaf cannot decode now counts as a
+  network failure; before, the miss said that no repository had a sources
+  jar.
+- With more than 8 repositories, the last ones got no checksum probe (#180).
+  The `pom.properties` check and the first guess stopped after 8 probes. With
+  8 configured repositories, decaf never asked Maven Central, and the miss
+  said `not verified`. Now the `pom.properties` check asks each repository,
+  and the first guess can reach each repository. decaf also does not probe
+  the coordinates of `pom.properties` a second time as a guess. A lookup
+  with no other guess ends with `no other candidates`.
 - A jar could get the sources of another build under `✓` (#180). decaf
   checked the jar against the `.jar.sha1` file of one repository and then
   took the `-sources.jar` of the coordinates from any configured repository.
