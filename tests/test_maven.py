@@ -973,6 +973,15 @@ def test_a_failed_probe_of_the_sources_step_taints_the_miss_alone(make_jar, tmp_
     )
 
 
+def test_a_failed_probe_of_the_pom_check_does_not_taint_an_index_hit(make_jar, tmp_path: Path):
+    """#180: the index names the GAV, and A then tells the sources step that it holds another build."""
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+    handler = _index(KEY12, _a_fails_the_pom_check(jar, lambda request: httpx.Response(200, text=OTHER)))
+    with make_client(handler) as c:
+        res = resolve_sources(jar, [REPO_A], c, tmp_path / "cache")
+    assert res.miss == "sha1 matched com.example:lib:1.2 in Central index but no -sources.jar in any repo with this build"
+
+
 @pytest.mark.parametrize("error", [httpx.TooManyRedirects, httpx.DecodingError])
 def test_a_download_that_fails_without_a_transport_error_taints_the_miss(make_jar, tmp_path: Path, error):
     """#180: a redirect loop or a body that cannot be decoded is no "no sources" answer."""

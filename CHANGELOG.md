@@ -26,8 +26,8 @@
   network miss (#180). Maven Central answers plain HTTP with 501. decaf
   tried each such request three times, marked the miss with `network:`, and
   kept no verdict, so each run paid again. Now decaf reads an `http://` URL
-  of Maven Central as the `https://` URL. An answer 501 of any repository is
-  final: decaf does not try it again.
+  of Maven Central with no port and no user name as the `https://` URL. An
+  answer 501 of any repository is final: decaf does not try it again.
 - A cached sources jar that decaf cannot read stayed in the cache (#180).
   The miss said `contained no source files`, and each run read the same
   file again. Now the miss names the fault (`is not a zip`, or the damaged
