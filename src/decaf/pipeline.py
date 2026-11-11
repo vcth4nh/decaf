@@ -520,7 +520,7 @@ def _declared_package(path: Path) -> str | None:
             head = f.read(_PACKAGE_HEAD)
     except OSError:
         return None
-    m = _PACKAGE_LINE.search(head.decode("utf-8", "replace"))
+    m = _PACKAGE_LINE.search(head.decode("utf-8-sig", "replace"))  # -sig: a byte order mark is no text
     return m.group(1) if m else None
 
 

@@ -1247,6 +1247,14 @@ def test_sources_gap_ignores_a_package_word_in_a_comment(make_jar, tmp_path: Pat
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"com/x/A"}
 
 
+def test_sources_gap_reads_the_package_line_after_a_byte_order_mark(make_jar, tmp_path: Path):
+    jar = make_jar("lib.jar", {"com/x/A.class": b"x"})
+    tree = tmp_path / "tree"
+    (tree / "src").mkdir(parents=True)
+    (tree / "src/A.java").write_bytes(b"\xef\xbb\xbfpackage com.x;\nclass A {}")
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
 def _hit(sources: Path):
     def resolver(jar_path, repos, client, cache_dir, **kw):
         return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources, repo="https://r.test/m2",
