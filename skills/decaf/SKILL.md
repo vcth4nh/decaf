@@ -31,9 +31,9 @@ Typical flow:
 - **Sources first.** A jar with Maven coordinates gets the real `-sources.jar` from Maven
   Central instead of a decompile. decaf proves the match: the SHA-1 of the jar must equal
   the SHA-1 of the published jar. The sources come only from a repository whose `.sha1` file
-  of the artifact matches the jar. A patched, shaded, or private jar never matches and is
-  decompiled. The lookup sends the SHA-1 of each jar without `pom.properties` to Maven
-  Central; `--no-maven` makes no lookup and decompiles everything.
+  of the artifact matches the jar. A patched, shaded, or private jar that no configured
+  repository holds is decompiled. The lookup sends the SHA-1 of each jar without
+  `pom.properties` to Maven Central; `--no-maven` makes no lookup and decompiles everything.
 - **Five engines, automatic fallback.** Vineflower, then CFR, Fernflower, Procyon, JD. An
   engine that crashes, times out, misses classes, or writes a stub hands the archive or the
   class to the next one. `--engine cfr` only changes the first engine; the fallback stays on
