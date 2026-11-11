@@ -119,6 +119,45 @@
 - A stubbed file of an inner class that an engine wrote apart went out with
   its stub, and its outer class got no retry (#160). Now such a file holds
   its family, as a flagged one does, and the outer class gets a retry.
+- A class folder above its package root, such as `target/classes/`, got
+  false counts and extra files (#199). CFR and Procyon wrote `p/A.java`,
+  and decaf looked for `target/classes/p/A.java`. With
+  `--engine cfr --no-fallback`, the row said that each class was missing.
+  With the fallback, the next engine decompiled each class again, and the
+  output had two files for each class. In the default chain, a retry of a
+  flagged class added a second file at the other path, and the flagged file
+  stayed. With `--merge`, the sources of such a folder went to
+  `out/src/target/classes/p/A.java`, not by package, and the same class in a
+  jar gave a second file. Now each engine writes
+  `target/classes/p/A.java`, and `--merge` writes `out/src/p/A.java`.
+- JD gave the classes of a class folder, a WAR, or a Spring Boot jar a wrong
+  package, and it lost their inner classes (#200, #170). JD takes the path
+  below its input as the class name. Thus it wrote
+  `package target.classes.q;` or `package WEB-INF.classes.com.x;`, and an
+  anonymous class became `new Object()`. The compile check flagged the WAR
+  files, and the file of another engine often could not replace them. Now
+  JD gets the classes at their package root, so it writes the right package
+  and the inner classes. A JD retry file of a WAR class can now pass the
+  check and replace a flagged file.
+- Procyon wrote no body for an anonymous class of a WAR or a Spring Boot jar
+  (#171). The file had `return new A$1();`, and the compile check passed it.
+  Now Procyon gets the classes at their package root, and it writes the
+  body.
+- In the mirror layout, the place of the sources of a WAR depended on the
+  engine (#173). CFR and Procyon wrote `app.war/com/x/A.java`, apart from
+  `app.war/WEB-INF/web.xml`, and the other engines wrote
+  `app.war/WEB-INF/classes/com/x/A.java`. In the default chain, a class
+  retry of CFR or Procyon put its file at the other path. Now the source of
+  each class is at the path of its class file, also from CFR and Procyon.
+  With `--engine cfr`, `--engine procyon`, or `--engine jd` as the first
+  engine, a WAR or a Spring Boot jar now runs from a folder of its classes,
+  and it does not join a batch.
+- With `--merge`, the report gave a path that no output file had (#174). The
+  `path` of a flagged, noted, unchecked, or stubbed file kept the
+  `WEB-INF/classes/` part of a WAR class, and the file was at
+  `out/src/com/x/S.java`. Now, with `--merge`, the path is the path of the
+  file below `out/src/`. In the mirror layout, the path stays the path below
+  the folder of the artifact.
 
 ## [1.12.0] - 2026-10-31
 

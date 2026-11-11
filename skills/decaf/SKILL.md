@@ -212,9 +212,10 @@ the lookup failed and the jar was decompiled), `method`, `gav`, `repo`, `resolve
 `collisions`, `failure`, `attempts[]` (`engine`, `level` = `archive`, `class`, or `batch`,
 `returncode`, `timed_out`, `out_of_memory`, `stderr_tail`, `peak_rss_mb`), `check`
 (`checked`, `flagged`, `noted`, `unchecked`, `unchecked_reasons`; `null` when no check ran),
-and the lists `flagged[]` and `noted[]` (`path` under the artifact folder, `engine`,
-`first`, `messages`). `unchecked[]` lists `path`, `engine`, `reason`, `needs_java`, and
-`first`; `needs_java` and `first` can be `null`. An attempt with `level: "batch"` ran in an
+and the lists `flagged[]` and `noted[]` (`path` of the output file: under the artifact
+folder, or under `out/src/` with `--merge`; `engine`, `first`, `messages`). `unchecked[]`
+lists `path`, `engine`, `reason`, `needs_java`, and `first`; `needs_java` and `first` can be
+`null`. An attempt with `level: "batch"` ran in an
 engine JVM shared by several archives. `--format ndjson` streams one object per line with
 `event` = `scan`, `artifact`, `warning`, and one final `summary`.
 
