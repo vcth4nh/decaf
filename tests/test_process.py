@@ -1221,7 +1221,7 @@ def test_sources_gap_counts_the_uncovered_classes_of_an_archive_that_cannot_be_r
 
 
 def test_sources_gap_takes_a_file_at_its_declared_package(make_jar, tmp_path: Path):
-    """Final review C1: okio-jvm and kotlin-stdlib keep their files under jvmMain/..., not at the package path."""
+    """#180: okio-jvm and kotlin-stdlib keep their files under jvmMain/..., not at the package path."""
     jar = make_jar("lib.jar", {"okio/Buffer.class": b"x"})
     tree = _files(tmp_path / "tree", {"jvmMain/okio/Buffer.kt": "package okio\n\nclass Buffer"})
     assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
@@ -1308,7 +1308,7 @@ def test_maven_sources_that_lack_a_class_get_it_from_the_engines(make_jar, tmp_p
 
 
 def test_maven_sources_in_a_source_set_folder_are_no_gap(make_jar, class_file, tmp_path: Path):
-    """Final review C1: the row is complete, no engine runs, and the .kt file keeps its path."""
+    """#180: the row is complete, no engine runs, and the .kt file keeps its path."""
     jar = make_jar("okio-3.4.jar", {"okio/Buffer.class": b"x", "okio/BufferKt.class": class_file("okio/BufferKt", "Buffer.kt")})
     sources = make_jar("okio-3.4-sources.jar", {"jvmMain/okio/Buffer.kt": "package okio\n\nclass Buffer"})
     runner = writing_runner({"vineflower": {"okio/Buffer.java": "class Buffer {}"}})
@@ -1332,7 +1332,7 @@ def test_a_gap_class_that_no_engine_writes_stays_missing(make_jar, tmp_path: Pat
 
 
 def test_a_damaged_gap_entry_keeps_the_row(make_damaged_jar, make_jar, class_file, tmp_path: Path):
-    """Review focus 4: a class entry that cannot be read is a gap that stays missing; the row is ok and partial."""
+    """#180: a class entry that cannot be read is a gap that stays missing; the row is ok and partial."""
     jar = make_damaged_jar("lib-1.2.jar", {"com/x/A.class": class_file("com/x/A", "A.java") * 4,
                                            "com/x/D.class": class_file("com/x/D", "D.java") * 4},
                            damaged=("com/x/D.class",))
@@ -1392,7 +1392,7 @@ def test_maven_verbose_line_names_the_gap(make_jar, tmp_path: Path):
 
 
 def test_a_nested_maven_hit_with_a_gap_writes_the_engine_file_in_its_container_folder(make_jar, tmp_path: Path):
-    """Review focus 1: the gap retries of a nested jar use the writer paths of the nested rel."""
+    """#180: the gap retries of a nested jar use the writer paths of the nested rel."""
     from decaf.pipeline import MirrorWriter
 
     lib = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
@@ -1410,7 +1410,7 @@ def test_a_nested_maven_hit_with_a_gap_writes_the_engine_file_in_its_container_f
 
 
 def test_a_gap_row_after_ctrl_c_keeps_its_maven_files_and_counts_the_gap(make_jar, tmp_path: Path):
-    """Review focus 2: Ctrl-C lands while an engine runs for the gap: no file of it goes out (#112)."""
+    """#180: Ctrl-C lands while an engine runs for the gap: no file of it goes out (#112)."""
     from decaf.engines import PROCESSES
 
     jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
@@ -1434,7 +1434,7 @@ def test_a_gap_row_after_ctrl_c_keeps_its_maven_files_and_counts_the_gap(make_ja
 
 
 def test_a_gap_row_with_a_checker_checks_the_engine_files_only(make_jar, tmp_path: Path):
-    """Review focus 5: `check` and `flagged` of a Maven row come from the gap files; the checker does not read the Maven files."""
+    """#180: `check` and `flagged` of a Maven row come from the gap files; the checker does not read the Maven files."""
     jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
     sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
     calls: list = []
@@ -1448,7 +1448,7 @@ def test_a_gap_row_with_a_checker_checks_the_engine_files_only(make_jar, tmp_pat
 
 
 def test_a_gap_run_of_the_primary_engine_gets_the_engine_args(make_jar, tmp_path: Path):
-    """Review focus 7: the tokens after `--` go to the primary engine, also for the gap classes."""
+    """#180: the tokens after `--` go to the primary engine, also for the gap classes."""
     jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x", "com/x/B.class": b"x"})
     sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})
     seen: list = []

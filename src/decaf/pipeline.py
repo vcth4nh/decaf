@@ -535,7 +535,7 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
     written = {normalize_java_rel(p.relative_to(tree).as_posix()) for p in tree.rglob("*") if p.is_file()}
     rest = {s for s in expected if not any(s + suffix in written for suffix in maven.MAVEN_SOURCE_SUFFIXES)}
     if rest:
-        # A file in a source-set folder (jvmMain/..., src/main/java/...) counts by its package line (final review C1).
+        # A file in a source-set folder (jvmMain/..., src/main/java/...) counts by its package line (#180).
         for p in tree.rglob("*"):
             if not p.is_file() or p.suffix not in maven.MAVEN_SOURCE_SUFFIXES:
                 continue
