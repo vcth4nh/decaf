@@ -920,6 +920,25 @@ def test_verified_guess_downloads_without_a_second_probe(make_jar, tmp_path: Pat
     assert probes.count(hit) == 1
 
 
+def test_verified_guess_gets_no_sources_of_another_build(make_jar, tmp_path: Path, sources_bytes):
+    """#180: B has a sources jar, but of another build, so the miss text names the build."""
+    jar = make_jar("lib-1.2.jar", {"com/example/A.class": b"x"})
+    seen: list[str] = []
+    repos = _hosts({"a.test": (sha1_of(jar), None), "b.test": (OTHER, sources_bytes)}, seen)
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        return repos(request)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, [REPO_A, REPO_B], c, tmp_path / "cache")
+    assert res.miss == (
+        "verified com.example:lib:1.2 via https://a.test/m2 but no -sources.jar in any repo with this build"
+    )
+    assert seen == ["a.test probe", "a.test sources", "b.test probe"]
+
+
 @pytest.mark.parametrize("resolved_by", ["sha1-index", "pom-properties", "verified-guess"])
 def test_the_probe_before_a_download_uses_the_extension_of_the_binary(make_jar, tmp_path: Path, sources_bytes, resolved_by):
     """#180: a war has no .jar.sha1, so the probe before a download asks its .war.sha1 on each path."""
@@ -1604,7 +1623,7 @@ def test_resolve_sources_verified_but_no_sources(make_jar, tmp_path: Path):
     assert str(res.gav) == "org.springframework:spring-jdbc:6.2.17"
     assert res.miss == (
         "verified org.springframework:spring-jdbc:6.2.17 via https://r.test/m2 "
-        "but no -sources.jar published"
+        "but no -sources.jar in any repo with this build"
     )
 
 
@@ -1623,7 +1642,7 @@ def test_resolve_sources_verified_but_no_sources_hides_the_credentials(make_jar,
         res = resolve_sources(jar, ["https://deploy:s3cr3t@r.test/m2"], c, tmp_path / "cache")
     assert res.miss == (
         "verified org.springframework:spring-jdbc:6.2.17 via https://r.test/m2 "
-        "but no -sources.jar published"
+        "but no -sources.jar in any repo with this build"
     )
 
 

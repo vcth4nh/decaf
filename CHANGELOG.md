@@ -14,12 +14,14 @@
   sources jar only from a repository whose `.sha1` file of the artifact
   matches the jar, and it reads that file before each download. The check
   uses the file type of the input, so a `.war` can now match by its
-  `.war.sha1` file. When decaf knows the coordinates of a jar but no
-  repository with the same build has a sources jar, decaf decompiles the
-  jar. The miss text `no -sources.jar in any repo` is now
+  `.war.sha1` file. A `.sha1` file in the form `SHA1(file)= hash` matches
+  too. When decaf knows the coordinates of a jar but no repository with the
+  same build has a sources jar, decaf decompiles the jar. The miss then says
   `no -sources.jar in any repo with this build`. An answer for the `.sha1`
   file that holds no SHA-1 (a page of a proxy) counts as a network failure,
-  not as "no sources".
+  not as "no sources". A repository whose sources downloads time out for 3
+  artifacts in a row gets no more requests in that run, also when its
+  `.sha1` files answer.
 - The sources cache gave the sources of an older build (#180). The cache
   kept one sources jar for each set of coordinates. A second build of the
   same coordinates (a `-SNAPSHOT`, a release that was deployed again) got
@@ -27,6 +29,8 @@
   cached "no sources" answer belong to one jar: their cache key has the
   SHA-1 of the jar. decaf does not read the sources jars that an older
   version cached. The first run after the update downloads them again.
+  That run needs the network. Without the network, decaf decompiles these
+  jars and counts them as network fallbacks.
 - A Maven sources jar that lacks classes of the binary gave a complete row
   (#180). A published sources jar can lack generated classes, shaded or
   bundled libraries, the classes that exist only under `META-INF/versions`,

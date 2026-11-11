@@ -769,11 +769,13 @@ def _fetched(gav: Gav, fetched: tuple[Path, str, bool] | None, resolved_by: str,
     )
 
 
-def _no_sources(prefix: str, absent: str, log: ResolutionLog) -> str:
+def _no_sources(prefix: str, log: ResolutionLog) -> str:
     if log.damaged:
         return f"{prefix} but {log.damaged}"
     if log.download_failures:
         return f"{prefix} but no -sources.jar in any reachable repo"
+    # another repository can hold a sources jar of another build of the same GAV (#180)
+    absent = "no -sources.jar in any repo with this build"
     if log.cached_no_sources:
         return f"{prefix} but {absent} (cached verdict)"
     return f"{prefix} but {absent}"
@@ -816,11 +818,7 @@ def resolve_sources(
                 fetched = fetch_sources(
                     gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
                 )
-                msg = _no_sources(
-                    f"cached verdict {gav} ({known.resolved_by})",
-                    "no -sources.jar in any repo with this build",
-                    log,
-                )
+                msg = _no_sources(f"cached verdict {gav} ({known.resolved_by})", log)
                 return _finish(_fetched(gav, fetched, known.resolved_by, msg), log, net)
             return _finish(Resolution(miss=f"cached verdict: {known.miss}"), log, net)
 
@@ -840,9 +838,7 @@ def resolve_sources(
                 gav, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
                 verified=(repo,), suffix=suffix,
             )
-            msg = _no_sources(
-                f"found {gav} in pom.properties", "no -sources.jar in any repo with this build", log
-            )
+            msg = _no_sources(f"found {gav} in pom.properties", log)
             return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
         errs = " (probe errored)" if log.probe_failures > before else ""
         trail = [f"pom.properties {gav} not verified by {suffix}.sha1{errs}"]
@@ -857,9 +853,7 @@ def resolve_sources(
             fetched = fetch_sources(
                 gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
             )
-            msg = _no_sources(
-                f"sha1 matched {gav} in Central index", "no -sources.jar in any repo with this build", log
-            )
+            msg = _no_sources(f"sha1 matched {gav} in Central index", log)
             return _finish(_fetched(gav, fetched, "sha1-index", msg), log, net)
         trail.append(
             "sha1 lookup errored (network)"
@@ -905,9 +899,7 @@ def resolve_sources(
                 candidate, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
                 verified=(repo,), suffix=suffix,
             )
-            msg = _no_sources(
-                f"verified {candidate} via {redact_url(repo)}", "no -sources.jar published", log
-            )
+            msg = _no_sources(f"verified {candidate} via {redact_url(repo)}", log)
             return _finish(_fetched(candidate, fetched, "verified-guess", msg), log, net)
     if tried:
         errs = f" ({log.probe_failures} probe(s) errored)" if log.probe_failures else ""
