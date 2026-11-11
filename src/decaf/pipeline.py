@@ -1496,7 +1496,7 @@ def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, des
                 return ctx.runner(spec, jar, target, dest, timeout, **kw)
             tree = _tmp_dir(ctx)
             temps.append(tree)
-            safe_extract_zip(target, tree, members=names)
+            safe_extract_zip(target, tree, members=set(names))
         prefixes = {rel: _root_prefix(tree, rel) for rel in (p.relative_to(tree).as_posix() for p in tree.rglob("*.class"))}
         if not any(prefixes.values()):
             return ctx.runner(spec, jar, target, dest, timeout, **kw)
