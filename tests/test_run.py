@@ -2512,6 +2512,64 @@ def test_run_batches_with_new_primary_engines(fake_env, make_jar, tmp_path, engi
         assert rels[f"big.jar!/lib/s{i}.jar"].method == engine
 
 
+@pytest.mark.parametrize("engine, batches_seen", [
+    ("vineflower", [["boot.jar", "s1.jar"]]),
+    ("cfr", []),  # boot.jar runs alone, and a batch of one runs as a solo job
+    ("jd", []),
+])
+def test_run_batches_a_jar_with_a_container_root_only_when_the_first_engine_keeps_the_entry_paths(
+    fake_env, make_jar, tmp_path, engine, batches_seen
+):
+    """A batch gives CFR, Procyon, and JD the archive itself, so a jar with BOOT-INF/classes/ runs alone (#170, #173).
+    test_run_batches_with_new_primary_engines shows that CFR still batches the other jars."""
+    boot = make_jar("boot.jar", {"BOOT-INF/classes/com/b/A.class": b"x"})
+    s1 = make_jar("s1.jar", {"com/s1/A.class": b"x"})
+    input_dir = tmp_path / "in"
+    make_jar(
+        "big.jar",
+        {
+            **{f"com/big/C{i}.class": b"x" for i in range(900)},
+            "lib/boot.jar": boot.read_bytes(),
+            "lib/s1.jar": s1.read_bytes(),
+        },
+        base=input_dir,
+    )
+    batches: list[list[str]] = []
+    solo: list[Path] = []
+    all_queued = threading.Event()
+    queued_count = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued_count[0] += 1
+            if queued_count[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        else:
+            solo.append(Path(target))
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    report = run(
+        Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1, cpus=1, engine=engine),
+        runner=gated_solo,
+        batch_runner=recording_batch,
+        on_event=on_event,
+    )
+    assert report.totals["ok"] == 3
+    assert batches == batches_seen
+    if engine != "vineflower":
+        # the classes of BOOT-INF/classes/ at their package root, then s1.jar unchanged
+        assert sorted(p.name for p in solo) == ["classes", "s1.jar"]
+    assert (tmp_path / "out/big.jar/lib/boot.jar/BOOT-INF/classes/com/b/A.java").is_file()
+
+
 def test_run_batch_eligibility_boundary_at_whale_threshold(fake_env, make_jar, tmp_path):
     """2,999 classes batches; 3,000 is a whale and never enters a batch (#74).
 
@@ -3166,7 +3224,8 @@ def test_run_without_stubs_reports_none(fake_env, make_jar, tmp_path):
 
 
 def test_run_stub_under_a_container_root_is_released_by_a_package_path_retry(fake_env, make_jar, tmp_path):
-    """Vineflower keeps WEB-INF/classes/; real CFR writes the package path. One stem, no leftover stub."""
+    """Vineflower keeps WEB-INF/classes/; real CFR writes the package path below the root that it gets, and decaf
+    puts the file back under WEB-INF/classes/ (#173). One stem, no leftover stub."""
     input_dir = tmp_path / "in"
     make_jar(
         "app.war",
@@ -3186,8 +3245,8 @@ def test_run_stub_under_a_container_root_is_released_by_a_package_path_retry(fak
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=engine)
     r = report.artifacts[0]
     out = tmp_path / "out/app.war"
-    assert (out / "com/w/W.java").read_text() == "// cfr\nclass W {}\n"
-    assert not (out / "WEB-INF/classes/com/w/W.java").exists()
+    assert (out / "WEB-INF/classes/com/w/W.java").read_text() == "// cfr\nclass W {}\n"
+    assert not (out / "com/w/W.java").exists()
     assert (out / "WEB-INF/classes/com/w/V.java").is_file()
     assert r.stubs == [] and r.missing_classes == 0
 
@@ -3315,14 +3374,17 @@ def test_run_held_copies_in_two_container_roots_are_no_missing_class(fake_env, m
     entries = {"WEB-INF/classes/com/w/W.class": b"w", "BOOT-INF/classes/com/w/W.class": b"b"}
     make_jar("app.war", entries, base=input_dir)
     both = {"WEB-INF/classes/com/w/W", "BOOT-INF/classes/com/w/W"}
-    every = {name: both for name in ("vineflower", "cfr", "fernflower", "procyon", "jd")}
+    every = {name: both for name in ("vineflower", "fernflower")}
+    every |= {name: {"com/w/W"} for name in ("cfr", "procyon", "jd")}  # they get each copy at its package root (#173)
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=stub_engine(every))
     r = report.artifacts[0]
     assert r.missing_classes == 0 and len(r.stubs) == 2
 
 
-def test_run_package_path_retry_file_of_a_copied_class_is_the_root_copy(fake_env, make_jar, tmp_path):
-    """CFR writes the package path for both copies: that file cannot replace the WEB-INF copy (#107)."""
+def test_run_package_path_retry_file_of_a_copied_class_goes_to_its_own_copy(fake_env, make_jar, tmp_path):
+    """CFR writes the package path, but it gets each copy at its package root, so its file of the WEB-INF copy
+    replaces the stub of that copy, and the root copy keeps its clean file (#107, #173). Before, CFR wrote one
+    file for both copies, and that file could not replace the WEB-INF copy."""
     input_dir = tmp_path / "in"
     make_jar("app.war", {"com/w/W.class": b"r", "WEB-INF/classes/com/w/W.class": b"c"}, base=input_dir)
     base = stub_engine({"vineflower": {"WEB-INF/classes/com/w/W"}})
@@ -3339,8 +3401,8 @@ def test_run_package_path_retry_file_of_a_copied_class_is_the_root_copy(fake_env
     r = report.artifacts[0]
     out = tmp_path / "out/app.war"
     assert (out / "com/w/W.java").read_text() == "// vineflower\nclass X {}\n"
-    assert (out / "WEB-INF/classes/com/w/W.java").read_text() == STUB_TEXT["vineflower"]
-    assert [s["path"] for s in r.stubs] == ["WEB-INF/classes/com/w/W.java"]
+    assert (out / "WEB-INF/classes/com/w/W.java").read_text() == "// cfr\nclass W {}\n"
+    assert r.stubs == [] and r.missing_classes == 0
 
 
 def _damage_entry(archive: Path, name: str) -> None:

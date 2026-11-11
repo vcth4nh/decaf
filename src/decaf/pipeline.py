@@ -1436,6 +1436,108 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
     return out if count else None
 
 
+# CFR and Procyon write a class at the path of its name, and JD takes the path below its input as the name (#199,
+# #200, #170, #171, #173). Thus they get one package root at a time, and their files go back below its prefix.
+_ROOTED_ENGINES = ("cfr", "procyon", "jd")
+
+_VERSIONS_TAIL = re.compile(r"(?:^|(?<=/))META-INF/versions/[^/]+/$")
+
+
+def _root_prefix(tree: Path, rel: str) -> str:
+    """The part of a class file path above its package root: up to the end of WEB-INF/classes/ or BOOT-INF/classes/,
+    else the path before the class name of the file (as _tree_roots reads it), else "".
+
+    A META-INF/versions/N/ folder stays below the root (#202).
+    """
+    for marker in _CONTAINER_ROOTS:
+        idx = rel.find(marker)
+        if idx != -1:
+            return rel[: idx + len(marker)]
+    try:
+        with open(tree / rel, "rb") as f:
+            data = _bounded(f)
+    except OSError:
+        return ""
+    name = check.class_name(data) if data is not None else None
+    stem = rel[: -len(".class")]
+    if not name or not (stem == name or stem.endswith("/" + name)):
+        return ""
+    prefix = stem[: len(stem) - len(name)]
+    tail = _VERSIONS_TAIL.search(prefix)
+    return prefix[: tail.start()] if tail else prefix
+
+
+def _container_classes(archive: Path) -> list[str] | None:
+    """The class entries of an archive when one of them is below WEB-INF/classes/ or BOOT-INF/classes/, else None."""
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            names = [n for n in zf.namelist() if n.endswith(".class")]
+    except ZIP_ERRORS:
+        return None
+    return names if any(m in n for n in names for m in _CONTAINER_ROOTS) else None
+
+
+def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, dest: Path, timeout: float,
+                **kw) -> engines.EngineResult:
+    """ctx.runner, but CFR, Procyon, and JD get one package root of the target at a time (#199).
+
+    The other engines, and a target whose classes are all at their package root, go to ctx.runner unchanged. The
+    target stays as it is: a root is its own folder when each class file below it has its prefix, else a copy.
+    The timeout is for the whole target, as in _run_per_class.
+    """
+    if spec.name not in _ROOTED_ENGINES:
+        return ctx.runner(spec, jar, target, dest, timeout, **kw)
+    temps: list[Path] = []
+    try:
+        tree = target
+        if not target.is_dir():
+            names = _container_classes(target)
+            if names is None:
+                return ctx.runner(spec, jar, target, dest, timeout, **kw)
+            tree = _tmp_dir(ctx)
+            temps.append(tree)
+            safe_extract_zip(target, tree, members=names)
+        prefixes = {rel: _root_prefix(tree, rel) for rel in (p.relative_to(tree).as_posix() for p in tree.rglob("*.class"))}
+        if not any(prefixes.values()):
+            return ctx.runner(spec, jar, target, dest, timeout, **kw)
+        deadline = time.monotonic() + timeout
+        results: list[engines.EngineResult] = []
+        timed_out = False
+        for prefix in sorted(set(prefixes.values())):
+            if results and engines.PROCESSES.closed:
+                break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                timed_out = True
+                break
+            root = tree / prefix
+            if any(p != prefix for rel, p in prefixes.items() if rel.startswith(prefix)):
+                root = _tmp_dir(ctx)
+                temps.append(root)
+                for rel, p in prefixes.items():
+                    if p == prefix:
+                        (root / rel[len(prefix) :]).parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(tree / rel, root / rel[len(prefix) :])
+            out = _tmp_dir(ctx)
+            temps.append(out)
+            results.append(ctx.runner(spec, jar, root, out, left, **kw))
+            for f in [p for p in out.rglob("*") if p.is_file()]:
+                moved = dest / prefix / f.relative_to(out)
+                moved.parent.mkdir(parents=True, exist_ok=True)
+                f.replace(moved)
+    finally:
+        for folder in temps:
+            _drop(folder)
+    tails = [r.stderr_tail for r in results if r.stderr_tail]
+    peaks = [r.peak_rss_mb for r in results if r.peak_rss_mb is not None]
+    return engines.EngineResult(
+        spec.name, next((r.returncode for r in results if r.returncode), 0),
+        timed_out or any(r.timed_out for r in results),
+        sum(1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES),
+        "\n".join(tails)[-2000:], max(peaks, default=None), any(r.out_of_memory for r in results),
+    )
+
+
 def _stream_kw_for(ctx: Ctx, name: str, rel: str) -> dict:
     # Only pass the kwarg when streaming, so custom runners without it keep working.
     if ctx.on_stderr is None:
@@ -1471,8 +1573,8 @@ def _retry_missing_classes(
             try:
                 if ctx.on_event is not None:
                     ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
-                res = ctx.runner(
-                    ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
+                res = _run_engine(
+                    ctx, ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
                     ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
                     **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
                     # the primary engine runs here only for a Maven gap (#180)
@@ -1519,8 +1621,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         try:
             if ctx.on_event is not None:
                 ctx.on_event("decompile", artifact.rel, f"{name} · {len(expected):,} classes")
-            res = ctx.runner(
-                ctx.specs[name], ctx.engine_jars[name], target, dest,
+            res = _run_engine(
+                ctx, ctx.specs[name], ctx.engine_jars[name], target, dest,
                 ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
                 **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
                 **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
@@ -2383,6 +2485,8 @@ def run(
                                         and a.classes < _SMALL_CLASSES
                                         and chain[0] in engines.BATCH_ENGINES
                                         and report.method != "maven"  # a Maven row with a gap: its class retries run alone (#180)
+                                        # CFR, Procyon, and JD get the classes of WEB-INF/classes/ apart (#170, #173)
+                                        and not (chain[0] in _ROOTED_ENGINES and _container_classes(target) is not None)
                                     ):
                                         ready_small.append(
                                             (a, target, report, *_stems_and_claims(target))
