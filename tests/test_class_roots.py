@@ -21,6 +21,12 @@ SOURCES = {
         "package q;\n\npublic class B {\n    public static class Nested {\n"
         "        public int two() {\n            return 2;\n        }\n    }\n}\n"
     ),
+    # Vineflower writes a file that the check flags: the method throws an undeclared checked exception (#174)
+    "com/y/S.java": (
+        "package com.y;\n\npublic class S {\n    @SuppressWarnings(\"unchecked\")\n"
+        "    public static <T extends Throwable> void sneaky(Throwable t) throws T {\n        throw (T) t;\n    }\n\n"
+        "    public static void use() {\n        S.<RuntimeException>sneaky(new Exception(\"x\"));\n    }\n}\n"
+    ),
     # in a static method: in an instance method, JD 1.2.0 fails on the MethodParameters attribute (#170)
     "com/x/A.java": (
         "package com.x;\n\npublic class A {\n    public static Object make() {\n        return new Object() {\n"
@@ -57,7 +63,7 @@ def _archive(classes: Path, path: Path, prefix: str, extra: dict[str, str] | Non
     with zipfile.ZipFile(path, "w") as zf:
         for name, text in (extra or {}).items():
             zf.writestr(name, text)
-        for c in sorted((classes / "com").rglob("*.class")):
+        for c in sorted((classes / "com/x").rglob("*.class")):
             zf.write(c, prefix + c.relative_to(classes).as_posix())
     return path
 
@@ -136,3 +142,35 @@ def test_each_engine_writes_the_source_of_a_war_class_at_its_entry_path(war: Pat
     out = tmp_path / "out"
     _run(war, out, "--engine", engine, "--no-fallback")
     assert _files(out) == ["app.war/WEB-INF/classes/com/x/A.java", "app.war/WEB-INF/web.xml"]
+
+
+@pytest.mark.parametrize("engine", ["vineflower", "cfr"])
+def test_merge_writes_a_class_folder_above_its_package_root_by_package(class_folder: Path, tmp_path: Path, engine):
+    """Before, --merge wrote src/target/classes/p/A.java (#199)."""
+    out = tmp_path / "out"
+    row = _run(class_folder, out, "--merge", "--engine", engine, "--no-fallback")
+    assert row["missing_classes"] == 0
+    assert _files(out) == ["src/p/A.java", "src/q/B.java"]
+
+
+@pytest.mark.parametrize("kind", ["war", "folder"])
+def test_merge_report_path_is_the_path_below_src(classes: Path, tmp_path: Path, kind):
+    """Before, the report gave WEB-INF/classes/com/y/S.java for the file src/com/y/S.java (#174)."""
+    if kind == "war":
+        source = tmp_path / "in/sneaky.war"
+        source.parent.mkdir(parents=True)
+        with zipfile.ZipFile(source, "w") as zf:
+            zf.write(classes / "com/y/S.class", "WEB-INF/classes/com/y/S.class")
+        rel = "sneaky.war"
+    else:
+        source = tmp_path / "in"
+        (source / "target/classes/com/y").mkdir(parents=True)
+        shutil.copyfile(classes / "com/y/S.class", source / "target/classes/com/y/S.class")
+        rel = "_classes"
+    out = tmp_path / "out"
+    row = _run(source, out, "--merge", "--engine", "vineflower", "--no-fallback")
+    assert [f["path"] for f in row["flagged"]] == ["com/y/S.java"]
+    assert _files(out) == ["src/com/y/S.java"]
+    shown = runner.invoke(app, ["report", str(out), "--artifact", rel])
+    assert shown.exit_code == 0, shown.output
+    assert "flagged com/y/S.java (vineflower)" in shown.output

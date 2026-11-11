@@ -194,28 +194,46 @@ class MergeWriter:
     regardless of the order in which worker threads deliver results. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
+    The root prefixes of a class folder (target/classes/) are cut before all else (#199).
     """
 
-    def __init__(self, src_root: Path, *, case_insensitive: bool = False) -> None:
+    def __init__(
+        self, src_root: Path, *, case_insensitive: bool = False, roots: dict[str, list[str]] | None = None
+    ) -> None:
         self.root = src_root
         self._lock = threading.Lock()
         self._case_insensitive = case_insensitive
         self._index: dict[str, tuple[tuple[str, bool], str, str]] = {}  # key -> (rank, sha256, rel)
+        # artifact rel -> the root prefixes of its class files, the longest first
+        self._roots = {rel: sorted(prefixes, key=len, reverse=True) for rel, prefixes in (roots or {}).items()}
+
+    def _cut(self, sort_key: str, raw: str) -> str:
+        for prefix in self._roots.get(sort_key, ()):
+            if raw.startswith(prefix):
+                return raw[len(prefix) :]
+        return raw
+
+    def _twin(self, sort_key: str, raw: str) -> bool:
+        return _strip_container(self._cut(sort_key, raw)).startswith("META-INF/versions/")
+
+    def out_path(self, sort_key: str, raw: str) -> str:
+        """The path below src/ of an engine file of the artifact sort_key, the report path too (#174)."""
+        return normalize_java_rel(self._cut(sort_key, raw))
 
     def add_tree(self, tree: Path, sort_key: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         java = 0
         collisions: list[dict] = []
         files = sorted(tree.rglob("*"))
         # A META-INF/versions twin has the path of its base class here: the base class wins (#107).
-        files.sort(key=lambda p: _strip_container(p.relative_to(tree).as_posix()).startswith("META-INF/versions/"))
+        files.sort(key=lambda p: self._twin(sort_key, p.relative_to(tree).as_posix()))
         for p in files:
             if not p.is_file() or p.suffix.lower() not in suffixes:
                 continue
             java += 1
             raw = p.relative_to(tree).as_posix()
             # A held or retried base class can come in a later tree than its twin: of one sort key, the base wins.
-            rank = (sort_key, _strip_container(raw).startswith("META-INF/versions/"))
-            rel = normalize_java_rel(raw)
+            rank = (sort_key, self._twin(sort_key, raw))
+            rel = self.out_path(sort_key, raw)
             key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
@@ -272,6 +290,10 @@ class MirrorWriter:
 
     def dest_for(self, rel: str) -> Path:
         return self.root / self._folders.get(rel, rel)
+
+    def out_path(self, rel: str, raw: str) -> str:
+        """The path below the artifact folder of an engine file: the engine path (#174)."""
+        return raw
 
     def add_tree(self, tree: Path, rel: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         dest = self.dest_for(rel)
@@ -1321,6 +1343,7 @@ def _hold_output(
 
 def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
     """End of the chain: write the held files (the first engine's file) and list them (#96, #99)."""
+    path = partial(ctx.writer.out_path, rel)  # a list gives the path of the written file (#174)
     for keys in held.nests.values():  # the spares: a chosen file nests their classes (#159)
         for k in keys:
             f = held.files.pop(k, None)
@@ -1332,7 +1355,7 @@ def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> Non
         report.collisions += collisions
         ordered = sorted(held.files.values(), key=lambda f: f.path)
         report.stubs = [
-            {"path": f.path, "engine": f.engine, "methods": f.stub.methods, "errors": list(f.stub.errors)}
+            {"path": path(f.path), "engine": f.engine, "methods": f.stub.methods, "errors": list(f.stub.errors)}
             for f in ordered if f.stub is not None
         ]
         for key, f in held.files.items():
@@ -1341,20 +1364,20 @@ def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> Non
     _drop(held.root)
     if ctx.checker is not None:
         done = sorted(held.checks.values(), key=lambda f: f.path)
-        report.flagged = [_check_entry(f) for f in done if f.result.status == "flagged"]
-        report.noted = [_check_entry(f) for f in done if f.result.status == "noted"]
+        report.flagged = [_check_entry(f, path(f.path)) for f in done if f.result.status == "flagged"]
+        report.noted = [_check_entry(f, path(f.path)) for f in done if f.result.status == "noted"]
         report.unchecked = [
-            {"path": f.path, "engine": f.engine, "reason": f.result.reason,
+            {"path": path(f.path), "engine": f.engine, "reason": f.result.reason,
              "needs_java": f.result.needs_java, "first": f.result.first}
             for f in done if f.result.status == "unchecked"
         ]
         report.check = check.summary([f.result for f in done])
 
 
-def _check_entry(f: _HeldFile) -> dict:
-    """A flagged or noted file in the report, with its errors in line order (#99)."""
+def _check_entry(f: _HeldFile, path: str) -> dict:
+    """A flagged or noted file in the report at its output path (#174), with its errors in line order (#99)."""
     r = f.result
-    return {"path": f.path, "engine": f.engine, "kinds": list(r.kinds), "errors": r.errors,
+    return {"path": path, "engine": f.engine, "kinds": list(r.kinds), "errors": r.errors,
             "first": r.first, "messages": list(r.messages)}
 
 
@@ -2358,7 +2381,12 @@ def run(
             if settings.mirror:
                 writer = MirrorWriter(settings.output, resources=settings.resources)
             else:
-                writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None)
+                roots = {  # a class folder merges by package, not at target/classes/ (#199)
+                    a.rel: [r for r in {_root_prefix(a.path, p.relative_to(a.path).as_posix())
+                                        for p in a.path.rglob("*.class")} if r]
+                    for a in artifacts if a.kind is ArtifactKind.CLASS_TREE
+                }
+                writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None, roots=roots)
             ctx = Ctx(
                 settings=settings,
                 writer=writer,

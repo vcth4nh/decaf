@@ -3747,3 +3747,42 @@ def test_the_temp_folders_of_the_roots_go_when_the_engine_raises(tmp_path: Path,
         _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), _two_roots(tmp_path, class_file), tmp_path / "d", 100,
                     java="java")
     assert list(ctx.tmp_root.iterdir()) == []
+
+
+# --- the report path of a held file is the path of the written file (#174) ---
+
+
+@pytest.mark.parametrize("mirror", [False, True], ids=["merge", "mirror"])
+def test_report_paths_of_a_war_are_the_paths_of_the_written_files(make_jar, tmp_path: Path, mirror):
+    """Before, --merge wrote src/com/x/A.java, and the report gave WEB-INF/classes/com/x/A.java (#174)."""
+    war = make_jar("app.war", {f"WEB-INF/classes/com/x/{n}.class": b"x" for n in "ABCD"})
+    web = "WEB-INF/classes/com/x/"
+    runner = writing_runner({"vineflower": {
+        web + "A.java": "// FLAG", web + "B.java": "// NOTE", web + "C.java": "// ENV", web + "D.java": _VF_STUB,
+    }})
+    writer = MirrorWriter(tmp_path / "out") if mirror else MergeWriter(tmp_path / "out/src")
+    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker(), writer=writer)
+    report, _ = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    paths = [[e["path"] for e in entries] for entries in (report.flagged, report.noted, report.unchecked, report.stubs)]
+    prefix = "WEB-INF/classes/com/x/" if mirror else "com/x/"
+    assert paths == [[prefix + "A.java"], [prefix + "B.java"], [prefix + "C.java"], [prefix + "D.java"]]
+    base = tmp_path / ("out/app.war" if mirror else "out/src")
+    assert all((base / p).is_file() for entries in paths for p in entries)
+
+
+def test_report_paths_of_a_class_folder_with_merge_are_below_src(tmp_path: Path, class_file):
+    root = _tree(tmp_path / "in", {
+        "target/classes/com/x/A.class": class_file("com/x/A"), "target/classes/com/x/B.class": class_file("com/x/B"),
+    })
+    runner = writing_runner({"vineflower": {
+        "target/classes/com/x/A.java": "// FLAG", "target/classes/com/x/B.java": _VF_STUB + "// ENV\n",
+    }})
+    writer = MergeWriter(tmp_path / "out/src", roots={"_classes": ["target/classes/"]})
+    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker(), writer=writer)
+    report, _ = process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert [f["path"] for f in report.flagged] == ["com/x/A.java"]
+    assert [f["path"] for f in report.unchecked] == ["com/x/B.java"]
+    assert [s["path"] for s in report.stubs] == ["com/x/B.java"]
+    assert sorted(p.relative_to(tmp_path / "out/src").as_posix() for p in (tmp_path / "out/src").rglob("*.java")) == [
+        "com/x/A.java", "com/x/B.java",
+    ]

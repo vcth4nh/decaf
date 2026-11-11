@@ -4296,3 +4296,20 @@ def test_run_finds_no_container_for_a_jar_in_a_folder_whose_name_ends_with_a_ban
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False), runner=perfect_engine)
     assert [(r.rel, r.outcome) for r in report.artifacts] == [("lib!/x.jar", "ok")]
     assert left == [[]]
+
+
+@pytest.mark.parametrize("mirror, written", [
+    (False, ["src/p/A.java", "src/q/B.java"]),
+    (True, ["_classes/target/classes/p/A.java", "_classes/target/classes/q/B.java"]),
+])
+def test_run_merges_a_class_folder_above_its_package_root_by_package(fake_env, tmp_path, class_file, mirror, written):
+    """Before, --merge wrote src/target/classes/p/A.java (#199). The mirror layout keeps the folder path."""
+    input_dir = tmp_path / "in"
+    for name in ("p/A", "q/B"):
+        p = input_dir / "target/classes" / f"{name}.class"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(class_file(name))
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False, mirror=mirror), runner=perfect_engine)
+    assert report.artifacts[0].missing_classes == 0
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*.java")) == written
