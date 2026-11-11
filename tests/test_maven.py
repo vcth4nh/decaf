@@ -846,8 +846,9 @@ def test_a_probe_that_fails_gives_the_reachable_text(make_jar, tmp_path: Path):
     assert verdicts.has_no_sources(KEY12, sha1_of(jar), [REPO_A, REPO_B]) is False
 
 
-def test_download_timeouts_strike_the_host_after_a_probe_that_answers(make_jar, tmp_path: Path):
-    """#180: the probe before each download must not hide download timeouts from the breaker."""
+@pytest.mark.parametrize("error, kind", [(httpx.ReadTimeout, "timeout"), (httpx.ConnectError, "connection error")])
+def test_download_timeouts_strike_the_host_after_a_probe_that_answers(make_jar, tmp_path: Path, error, kind):
+    """#180: the probe before each download must not hide the transport failures of the download from the breaker."""
     warnings: list[str] = []
     net = NetState(warn=warnings.append)
     jars = [make_jar(f"mystery{i}.jar", {"A.class": bytes(str(i), "ascii")}) for i in range(4)]
@@ -860,14 +861,14 @@ def test_download_timeouts_strike_the_host_after_a_probe_that_answers(make_jar, 
         if request.url.path.endswith(".sha1"):
             return httpx.Response(200, text=now["sha1"])
         downloads.append(request.url.path)
-        raise httpx.ReadTimeout("stalled", request=request)
+        raise error("no answer", request=request)
 
     with make_client(handler) as c:
         for jar in jars[:3]:
             now["sha1"] = sha1_of(jar)
             res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", net=net)
             assert res.miss == (
-                "network: r.test: timeout during sources download; "
+                f"network: r.test: {kind} during sources download; "
                 "sha1 matched g:a:1 in Central index but no -sources.jar in any reachable repo"
             )
         assert len(downloads) == 9  # 3 artifacts x 3 attempts
@@ -1459,6 +1460,16 @@ def test_verify_gav_another_sha1_is_a_clean_no():
         assert (log.events, log.probe_failures) == ([], 0)
 
 
+def test_verify_gav_matches_the_sha1_in_a_later_token():
+    """#180: a sidecar in the form "SHA1(file)= hash" holds the hash in its second token."""
+    for body in (f"SHA1(a-1.jar)= {SHA}\n", f"a-1.jar {SHA.upper()}\n"):
+        log = ResolutionLog()
+        with make_client(lambda request: httpx.Response(200, text=body)) as c:
+            repo, used = verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c, log=log)
+        assert (repo, used) == ("https://r.test/m2", 1)
+        assert (log.events, log.probe_failures) == ([], 0)
+
+
 def test_proxy_page_for_the_sidecar_writes_no_clean_verdict(make_jar, tmp_path: Path):
     """#180: an index hit whose .sha1 probe gets a page of a proxy is no "no sources" answer for a week."""
     from decaf.verdicts import VerdictCache
@@ -1476,6 +1487,25 @@ def test_proxy_page_for_the_sidecar_writes_no_clean_verdict(make_jar, tmp_path: 
         "sha1 matched com.example:lib:1.2 in Central index but no -sources.jar in any reachable repo"
     )
     assert verdicts.has_no_sources(KEY12, sha1_of(jar), [REPO_A]) is False
+
+
+def test_proxy_page_for_a_candidate_probe_writes_no_miss_verdict(make_jar, tmp_path: Path):
+    """#180: a page of a proxy for the .sha1 file of a candidate is no answer, so no miss verdict."""
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    verdicts = VerdictCache(tmp_path / "verdicts")
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        return httpx.Response(200, text="<html>Sign in</html>")
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.miss.startswith("network: r.test: no SHA-1 in the answer during candidate probe; no pom.properties; ")
+    assert res.miss.endswith("candidates, none verified (2 probe(s) errored)")
+    assert not (tmp_path / "verdicts" / "sha1").exists()
 
 
 def test_verify_gav_respects_budget():

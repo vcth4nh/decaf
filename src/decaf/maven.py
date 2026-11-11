@@ -262,6 +262,9 @@ def _exc_kind(exc: httpx.TransportError) -> str:
     return "timeout" if isinstance(exc, httpx.TimeoutException) else "connection error"
 
 
+_TRANSPORT_KINDS = ("timeout", "connection error")  # the kinds of _exc_kind: only these strike the breaker
+
+
 def _status_kind(code: int) -> str | None:
     if code in (408, 429):  # a request timeout or a rate limit: retry (#110)
         return f"HTTP {code}"
@@ -306,7 +309,7 @@ def _check_alive(net: NetState, host: str) -> None:
 def _exhausted(
     net: NetState, log: ResolutionLog, host: str, kind: str, step: str
 ) -> NetworkFailure:
-    if kind in ("timeout", "connection error"):
+    if kind in _TRANSPORT_KINDS:
         log.failed_hosts.add(host)  # only transport-class failures strike the breaker
     where = f" (while resolving {log.subject})" if log.subject else ""
     net.warn_once(
@@ -504,7 +507,8 @@ def verify_gav(
         if resp.status_code != 200:
             continue
         tokens = resp.text.split()
-        if tokens and tokens[0].lower() == sha1.lower():
+        # a sidecar can hold the hash after a file name ("SHA1(file)= hash"), so each token can match (#180)
+        if any(token.lower() == sha1.lower() for token in tokens):
             return repo, used
         if not any(_SHA1_RE.fullmatch(token) for token in tokens):
             # an answer without a SHA-1 (a page of a proxy, an empty file) says nothing about the build (#180)
@@ -618,8 +622,8 @@ def fetch_sources(
         except NetworkFailure as nf:
             log.events.append(f"{nf.detail} during sources download")
             log.download_failures += 1
-            if nf.kind in ("timeout", "connection error") and nf.host in log.failed_hosts:
-                # the probe that answered must not hide the download timeouts from the breaker (#180)
+            if nf.kind in _TRANSPORT_KINDS and nf.host in log.failed_hosts:
+                # the probe that answered must not hide the transport failures of the download from the breaker (#180)
                 log.ok_hosts.discard(nf.host)
             continue
         except httpx.HTTPError:
