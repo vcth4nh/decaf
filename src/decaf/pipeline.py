@@ -509,19 +509,25 @@ def produced_stems(dest: Path) -> set[str]:
     }
 
 
-_PACKAGE_LINE = re.compile(r"^[ \t]*package\s+([\w.]+)", re.MULTILINE)
+_PACKAGE_LINE = re.compile(r"^[ \t]*package\s+([\w.$]+)", re.MULTILINE)
 _PACKAGE_HEAD = 16384  # bytes: room for a license header before the package line
 
 
 def _declared_package(path: Path) -> str | None:
-    """The package of a source file from its package line ("okio", "com.x"); None without one or unreadable."""
+    """The package of a source file from its package line ("okio", "com.x"); "" for the default package.
+
+    None when the package is not sure: the file cannot be read, its head has more than one package line
+    (chained Scala clauses, a line of a comment or a text block), or a cut head has none.
+    """
     try:
         with path.open("rb") as f:
             head = f.read(_PACKAGE_HEAD)
     except OSError:
         return None
-    m = _PACKAGE_LINE.search(head.decode("utf-8-sig", "replace"))  # -sig: a byte order mark is no text
-    return m.group(1) if m else None
+    found = _PACKAGE_LINE.findall(head.decode("utf-8-sig", "replace"))  # -sig: a byte order mark is no text
+    if len(found) == 1:
+        return found[0]
+    return "" if not found and len(head) < _PACKAGE_HEAD else None
 
 
 def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
@@ -536,6 +542,8 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
             rel = normalize_java_rel(p.relative_to(tree).as_posix())
             name = rel.rsplit("/", 1)[-1]
             pkg = _declared_package(p)
+            if pkg is None:
+                continue  # not sure: the file counts only at its path, so its class can stay a gap
             alias = (pkg.replace(".", "/") + "/" + name) if pkg else name
             if alias != rel:
                 written.add(alias)

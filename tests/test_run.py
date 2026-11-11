@@ -3858,6 +3858,8 @@ def test_run_gives_no_share_warning_for_a_maven_row_with_a_gap(fake_env, make_ja
         on_warn=warnings.append,
     )
     assert not any("may need about" in w for w in warnings)
+    row = json.loads((tmp_path / "out/decaf-report.json").read_text())["artifacts"][0]
+    assert (row["method"], row["sources_gap"]) == ("maven", 1)  # the row that the warning rule is about
 
 
 def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_path, monkeypatch):
