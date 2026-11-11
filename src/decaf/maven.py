@@ -618,7 +618,7 @@ def fetch_sources(
         except NetworkFailure as nf:
             log.events.append(f"{nf.detail} during sources download")
             log.download_failures += 1
-            if nf.host in log.failed_hosts:
+            if nf.kind in ("timeout", "connection error") and nf.host in log.failed_hosts:
                 # the probe that answered must not hide the download timeouts from the breaker (#180)
                 log.ok_hosts.discard(nf.host)
             continue

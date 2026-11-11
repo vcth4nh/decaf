@@ -356,8 +356,9 @@ def test_fetch_sources_tries_repos_in_order_and_caches(tmp_path: Path, make_jar)
 
 
 def test_fetch_sources_all_miss(tmp_path: Path):
+    repos = ["https://x.test"]
     with make_client(lambda r: httpx.Response(404)) as c:
-        assert fetch_sources(Gav("g", "a", "1"), "a" * 40, ["https://x.test"], c, tmp_path) is None
+        assert fetch_sources(Gav("g", "a", "1"), "a" * 40, repos, c, tmp_path, verified=repos) is None
 
 
 def test_fetch_sources_survives_windows_replace_race(tmp_path: Path, make_jar, monkeypatch):
@@ -691,7 +692,8 @@ def test_fetch_counts_a_dead_host_as_a_repo_that_it_could_not_ask(tmp_path: Path
 
     verdicts = VerdictCache(tmp_path / "verdicts")
     net = NetState()
-    net._dead.add("a.test")  # the breaker gave up on this host
+    for _ in range(maven.BREAKER_STRIKES):  # the breaker gives up on this host
+        net.record_artifact({"a.test"}, set())
 
     def explode(request):
         raise AssertionError("no request to a dead host")
@@ -879,6 +881,24 @@ def test_download_timeouts_strike_the_host_after_a_probe_that_answers(make_jar, 
     assert [w for w in warnings if w.startswith("maven: giving up")] == [
         "maven: giving up on r.test for the rest of the run (3 artifacts hit network failures in a row)"
     ]
+
+
+def test_a_refused_download_is_no_strike_after_an_earlier_transport_failure(tmp_path: Path):
+    """#180: only a download that gives up with a transport failure takes its host out of ok_hosts."""
+    first, second = "https://h.test/one", "https://h.test/two"
+
+    def handler(request):
+        if request.url.path.startswith("/one/"):
+            raise httpx.ConnectError("down", request=request)
+        if request.url.path.endswith(".sha1"):
+            return httpx.Response(200, text=BUILD)
+        return httpx.Response(401)
+
+    log = ResolutionLog()
+    with make_client(handler) as c:
+        assert fetch_sources(GAV12, BUILD, [first, second], c, tmp_path / "cache", log=log) is None
+    assert log.failed_hosts == {"h.test"}
+    assert log.ok_hosts == {"h.test"}  # the answers of the host reset the strike, as before
 
 
 def test_verified_guess_downloads_without_a_second_probe(make_jar, tmp_path: Path):
