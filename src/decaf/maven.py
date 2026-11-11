@@ -570,10 +570,15 @@ def fetch_sources(
     log: ResolutionLog | None = None,
     verdicts: VerdictCache | None = None,
     on_state: Callable[[str], None] | None = None,
+    verified: Sequence[str] = (),
+    suffix: str = ".jar",
 ) -> tuple[Path, str, bool] | None:
     """The key of a cached sources jar and of a "no sources" verdict is the GAV and the SHA-1 of the binary.
 
     One GAV can name more than one build: a -SNAPSHOT changes, and a team can deploy a release again (#180).
+    A download needs a proof that the repository holds the build (#180): the .sha1 sidecar of its main
+    artifact file (suffix is the file type) matches sha1. verified names the repositories that the caller
+    already proved; they get no second probe.
     """
     if net is None:
         net = NetState()
@@ -588,16 +593,28 @@ def fetch_sources(
     if verdicts is not None and verdicts.has_no_sources(gav_key, sha1, _redacted(repos)):
         log.cached_no_sources = True
         return None
-    verified_misses = 0
+    clean_answers = 0  # a repo without this build or without a sources jar
     if on_state is not None and repos:
         on_state("downloading")
     for repo in repos:
+        if repo not in verified:
+            before = log.probe_failures
+            proven, _ = verify_gav(gav, sha1, [repo], client, 1, net, log, suffix)
+            if proven is None:
+                if log.probe_failures > before:  # the probe failed: a repo that decaf could not ask
+                    log.download_failures += 1
+                else:
+                    clean_answers += 1
+                continue
         url = f"{repo}/{gav.sources_path()}"
         try:
             got = _download(client, url, cached, net, log)
         except NetworkFailure as nf:
             log.events.append(f"{nf.detail} during sources download")
             log.download_failures += 1
+            if nf.host in log.failed_hosts:
+                # the probe that answered must not hide the download timeouts from the breaker (#180)
+                log.ok_hosts.discard(nf.host)
             continue
         except httpx.HTTPError:
             continue
@@ -605,13 +622,13 @@ def fetch_sources(
             log.damaged = log.damaged or f"the -sources.jar in {redact_url(repo)} {exc}"
             continue
         if got is None:
-            verified_misses += 1
+            clean_answers += 1
             continue
         marker.write_text(redact_url(repo))
         # drop the file of an older decaf version: its name has no SHA-1, so this version never reads it (#180)
         drop_cached_sources(cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar")
         return cached, redact_url(repo), False
-    if verdicts is not None and repos and verified_misses == len(repos):
+    if verdicts is not None and repos and clean_answers == len(repos):
         verdicts.record_no_sources(gav_key, sha1, _redacted(repos))
     return None
 
@@ -786,10 +803,12 @@ def resolve_sources(
         if known is not None:
             if known.gav is not None:
                 gav = Gav(*known.gav)
-                fetched = fetch_sources(gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state)
+                fetched = fetch_sources(
+                    gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
+                )
                 msg = _no_sources(
                     f"cached verdict {gav} ({known.resolved_by})",
-                    "no -sources.jar in any repo",
+                    "no -sources.jar in any repo with this build",
                     log,
                 )
                 return _finish(_fetched(gav, fetched, known.resolved_by, msg), log, net)
@@ -807,9 +826,12 @@ def resolve_sources(
             if verdicts is not None:
                 verdicts.record_sha1(sha1, (gav.group, gav.artifact, gav.version), "pom-properties")
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(gav, sha1, ordered, client, cache_dir, net, log, verdicts, on_state)
+            fetched = fetch_sources(
+                gav, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
+                verified=(repo,), suffix=suffix,
+            )
             msg = _no_sources(
-                f"found {gav} in pom.properties", "no -sources.jar in any repo", log
+                f"found {gav} in pom.properties", "no -sources.jar in any repo with this build", log
             )
             return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
         errs = " (probe errored)" if log.probe_failures > before else ""
@@ -822,9 +844,11 @@ def resolve_sources(
                 verdicts.record_sha1(
                     sha1, (gav.group, gav.artifact, gav.version), "sha1-index"
                 )
-            fetched = fetch_sources(gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state)
+            fetched = fetch_sources(
+                gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
+            )
             msg = _no_sources(
-                f"sha1 matched {gav} in Central index", "no -sources.jar in any repo", log
+                f"sha1 matched {gav} in Central index", "no -sources.jar in any repo with this build", log
             )
             return _finish(_fetched(gav, fetched, "sha1-index", msg), log, net)
         trail.append(
@@ -867,7 +891,10 @@ def resolve_sources(
                     "verified-guess",
                 )
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(candidate, sha1, ordered, client, cache_dir, net, log, verdicts, on_state)
+            fetched = fetch_sources(
+                candidate, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
+                verified=(repo,), suffix=suffix,
+            )
             msg = _no_sources(
                 f"verified {candidate} via {redact_url(repo)}", "no -sources.jar published", log
             )
