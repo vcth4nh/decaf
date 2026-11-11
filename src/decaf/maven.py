@@ -268,6 +268,8 @@ _TRANSPORT_KINDS = ("timeout", "connection error")  # the kinds of _exc_kind: on
 def _status_kind(code: int) -> str | None:
     if code in (408, 429):  # a request timeout or a rate limit: retry (#110)
         return f"HTTP {code}"
+    if code == 501:  # "Not Implemented" does not change on a retry: a final answer (#180)
+        return None
     if 500 <= code < 600:
         return f"HTTP {code}"
     return None
@@ -626,7 +628,9 @@ def fetch_sources(
                 # the probe that answered must not hide the transport failures of the download from the breaker (#180)
                 log.ok_hosts.discard(nf.host)
             continue
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:  # a redirect loop or a body that decaf cannot decode is no answer (#180)
+            log.events.append(f"{type(exc).__name__} during sources download")
+            log.download_failures += 1
             continue
         except DamagedDownload as exc:  # no verdict: the next run downloads it again
             log.damaged = log.damaged or f"the -sources.jar in {redact_url(repo)} {exc}"
@@ -694,7 +698,7 @@ def _download(
                 os.unlink(tmp_name)
         if ok:
             log.ok_hosts.add(host)
-            damage = _zip_damage(tmp_name)
+            damage = zip_damage(tmp_name)
             if damage is not None:
                 os.unlink(tmp_name)
                 raise DamagedDownload(damage)
@@ -712,7 +716,7 @@ def _download(
     raise _exhausted(net, log, host, kind, "sources download")
 
 
-def _zip_damage(path: Path) -> str | None:
+def zip_damage(path: Path) -> str | None:
     """Why the zip cannot be read, or None when each entry can; is_zipfile reads only the end record (#111)."""
     try:
         zf = zipfile.ZipFile(path)
@@ -808,6 +812,14 @@ def resolve_sources(
     sha1 = sha1_of(jar_path)
     suffix = _artifact_suffix(jar_path)
     coords = candidate_coords(jar_path)  # also the key of a miss verdict: a renamed jar looks again (#110)
+
+    def fetch(gav: Gav, order: Sequence[str], verified: Sequence[str] = ()) -> tuple[Path, str, bool] | None:
+        # the sources step asks each repository again, so the lookups before it did not decide its result (#180)
+        log.events.clear()
+        return fetch_sources(
+            gav, sha1, order, client, cache_dir, net, log, verdicts, on_state, verified=verified, suffix=suffix
+        )
+
     if verdicts is not None:
         known = verdicts.lookup_sha1(sha1, _redacted(repos), coords)
         if known is not None and known.gav is not None and not _coordinates_ok(*known.gav):
@@ -815,33 +827,29 @@ def resolve_sources(
         if known is not None:
             if known.gav is not None:
                 gav = Gav(*known.gav)
-                fetched = fetch_sources(
-                    gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
-                )
+                fetched = fetch(gav, repos)
                 msg = _no_sources(f"cached verdict {gav} ({known.resolved_by})", log)
                 return _finish(_fetched(gav, fetched, known.resolved_by, msg), log, net)
             return _finish(Resolution(miss=f"cached verdict: {known.miss}"), log, net)
 
-    gav = gav_from_pom_properties(jar_path)
-    if gav is None:
+    pom_gav = gav_from_pom_properties(jar_path)
+    if pom_gav is None:
         trail = ["no pom.properties"]
     else:
         # A shaded, patched, or renamed jar can carry the pom.properties of another jar:
         # trust it only when a repository's .sha1 sidecar matches this jar (#110).
+        # Each repository gets a probe: the 9th repository can be Maven Central (#180).
         before = log.probe_failures
-        repo, _ = verify_gav(gav, sha1, repos, client, MAX_PROBES, net, log, suffix)
+        repo, _ = verify_gav(pom_gav, sha1, repos, client, len(repos), net, log, suffix)
         if repo is not None:
             if verdicts is not None:
-                verdicts.record_sha1(sha1, (gav.group, gav.artifact, gav.version), "pom-properties")
+                verdicts.record_sha1(sha1, (pom_gav.group, pom_gav.artifact, pom_gav.version), "pom-properties")
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(
-                gav, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
-                verified=(repo,), suffix=suffix,
-            )
-            msg = _no_sources(f"found {gav} in pom.properties", log)
-            return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
+            fetched = fetch(pom_gav, ordered, verified=(repo,))
+            msg = _no_sources(f"found {pom_gav} in pom.properties", log)
+            return _finish(_fetched(pom_gav, fetched, "pom-properties", msg), log, net)
         errs = " (probe errored)" if log.probe_failures > before else ""
-        trail = [f"pom.properties {gav} not verified by {suffix}.sha1{errs}"]
+        trail = [f"pom.properties {pom_gav} not verified by {suffix}.sha1{errs}"]
     if allow_sha1:
         before = len(log.events)
         gav = gav_from_central_sha1(sha1, client, net, log)
@@ -850,9 +858,7 @@ def resolve_sources(
                 verdicts.record_sha1(
                     sha1, (gav.group, gav.artifact, gav.version), "sha1-index"
                 )
-            fetched = fetch_sources(
-                gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
-            )
+            fetched = fetch(gav, repos)
             msg = _no_sources(f"sha1 matched {gav} in Central index", log)
             return _finish(_fetched(gav, fetched, "sha1-index", msg), log, net)
         trail.append(
@@ -870,8 +876,10 @@ def resolve_sources(
             verdicts.record_sha1_miss(sha1, miss, _redacted(repos), coords)
         return _finish(Resolution(miss=miss), log, net)
 
-    budget = MAX_PROBES
+    budget = max(MAX_PROBES, len(repos))  # the first candidate can reach each repository (#180)
     tried: set[Gav] = set()
+    skipped_pom_gav = False
+    failures_before_loop = log.probe_failures
     for artifact, version in coords:
         if budget <= 0:
             break
@@ -881,6 +889,9 @@ def resolve_sources(
             if not _coordinates_ok(group, artifact, version):
                 continue
             candidate = Gav(group, artifact, version)
+            if candidate == pom_gav:  # the pom.properties check asked each repository about it (#180)
+                skipped_pom_gav = True
+                continue
             if candidate in tried:
                 continue
             tried.add(candidate)
@@ -895,19 +906,19 @@ def resolve_sources(
                     "verified-guess",
                 )
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(
-                candidate, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
-                verified=(repo,), suffix=suffix,
-            )
+            fetched = fetch(candidate, ordered, verified=(repo,))
             msg = _no_sources(f"verified {candidate} via {redact_url(repo)}", log)
             return _finish(_fetched(candidate, fetched, "verified-guess", msg), log, net)
     if tried:
-        errs = f" ({log.probe_failures} probe(s) errored)" if log.probe_failures else ""
+        # the failed probes of the pom.properties check are in the first part of the trail (#180)
+        loop_failures = log.probe_failures - failures_before_loop
+        errs = f" ({loop_failures} probe(s) errored)" if loop_failures else ""
         trail.append(f"{len(tried)} candidates, none verified{errs}")
-    elif any(e.endswith("during index lookup") for e in log.events):
-        trail.append("no candidate groups found (index unavailable)")
     else:
-        trail.append("no candidate groups found")
+        last = "no other candidates" if skipped_pom_gav else "no candidate groups found"
+        if any(e.endswith("during index lookup") for e in log.events):
+            last += " (index unavailable)"
+        trail.append(last)
     miss = "; ".join(trail)
     if verdicts is not None and not log.events:
         verdicts.record_sha1_miss(sha1, miss, _redacted(repos), coords)

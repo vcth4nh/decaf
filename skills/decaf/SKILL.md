@@ -110,7 +110,9 @@ Typical flow:
   sources jar lacked, and `, 2 missing` counts the ones that no engine wrote. The artifact
   still counts as Maven in the `Sources` line. `cached` appears only on a Maven line and
   means the sources jar came from the cache, not the network; a cached "no sources" verdict
-  shows only in the report, as `sources_miss=cached verdict: …`. Then
+  shows only in the report, as `sources_miss=cached verdict: …`. A decompiled line can end
+  with `, network fallback`: a network failure stopped the Maven lookup, so the engines wrote
+  the code. Then
   `Artifacts N processed · N complete`, plus `· N partial` and `· N failed` when they are
   not zero, `Sources N Maven · N decompiled · N extracted` (extracted: an input archive that
   already held source files), the failures grouped by cause, and the paths of OUT and the

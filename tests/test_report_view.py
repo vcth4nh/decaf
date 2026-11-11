@@ -517,6 +517,28 @@ def test_status_line_shows_the_stubbed_count():
     assert _status_line(r) == "[yellow]![/] b.jar (vineflower, 3 classes, [yellow]1 stubbed[/])"
 
 
+def test_status_line_names_a_network_fallback():
+    """#180: the row says why it is partial."""
+    miss = "network: r.test: timeout during sources download; sha1 matched g:a:1 in Central index but ..."
+    r = ArtifactReport(rel="lib-1.0.jar", kind="archive", outcome="ok", method="vineflower",
+                       classes=12, java_files=12, sources_miss=miss)
+    assert _status_line(r) == "[yellow]![/] lib-1.0.jar (vineflower, 12 classes, [yellow]network fallback[/])"
+    both = dataclasses.replace(r, stubs=[_OOM_STUB])
+    assert _status_line(both) == (
+        "[yellow]![/] lib-1.0.jar (vineflower, 12 classes, [yellow]1 stubbed[/], [yellow]network fallback[/])"
+    )
+    clean = dataclasses.replace(r, sources_miss="no pom.properties; sha1 not in Central index")
+    assert "network fallback" not in _status_line(clean)
+
+
+def test_render_problems_names_a_network_fallback():
+    artifacts = [ArtifactReport(rel="n.jar", kind="archive", outcome="ok", method="cfr", classes=3, java_files=3,
+                                sources_miss="network: r.test: HTTP 503 during sources download; x")]
+    console = _console()
+    render_problems(console, report(artifacts=artifacts, totals=compute_totals(artifacts)))
+    assert "n.jar (cfr, 3 classes, network fallback)" in console.file.getvalue()
+
+
 def test_ending_warns_about_stubbed_classes():
     arts = [ArtifactReport(rel="s.jar", kind="archive", outcome="ok", method="vineflower",
                            classes=2, java_files=2, stubs=[_OOM_STUB])]

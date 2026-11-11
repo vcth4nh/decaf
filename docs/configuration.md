@@ -30,7 +30,9 @@ update_check = false  # disable the notice about newer releases
 
 - Repositories are tried in order. Maven Central is appended unless already
   listed as `https://repo1.maven.org/maven2` or
-  `https://repo.maven.apache.org/maven2`.
+  `https://repo.maven.apache.org/maven2`. An `http://` URL of Maven Central
+  with no port and no user name is read as the `https://` URL, because Maven
+  Central answers plain HTTP with 501.
 - `--repo URL` prepends a repository for one run and can be repeated.
 - Basic authentication uses the URL's username and password.
 - Percent-encode `/`, `?`, `#`, and `@` in credentials as `%2F`, `%3F`,

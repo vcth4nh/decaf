@@ -93,6 +93,27 @@ def _is_central(url: str) -> bool:
     return parts.scheme == "https" and parts.hostname in _CENTRAL_HOSTS and parts.path.rstrip("/") == "/maven2"
 
 
+def _https_central(url: str) -> str:
+    """The https URL for an http URL of Maven Central, else the URL unchanged (#180).
+
+    An entry with a port or a user part is no plain Central URL, so it stays as it is.
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return url
+    if (
+        parts.scheme == "http"
+        and parts.hostname in _CENTRAL_HOSTS
+        and port is None
+        and parts.username is None  # no @ in the host part: no user name and no password
+        and parts.path.rstrip("/") == "/maven2"
+    ):
+        return parts._replace(scheme="https").geturl()
+    return url
+
+
 def _check_repo(where: str, r: str) -> None:
     """Refuse a repository URL that httpx cannot read, that has no host, or with an unclear user part (#115).
 
@@ -140,7 +161,7 @@ def load_config(path: Path | None = None, extra_repos: Sequence[str] = ()) -> Co
 
     ordered: list[str] = []
     for repo in [*extra_repos, *file_repos]:
-        repo = repo.rstrip("/")
+        repo = _https_central(repo.rstrip("/"))
         if repo not in ordered:
             ordered.append(repo)
     if not any(_is_central(r) for r in ordered):

@@ -523,6 +523,7 @@ def test_two_builds_of_one_gav_get_their_own_sources(make_jar, tmp_path: Path):
 
 REPO_A = "https://a.test/m2"
 REPO_B = "https://b.test/m2"
+NINE = [f"https://r{i}.test/m2" for i in range(1, 10)]  # one more repository than MAX_PROBES
 GAV12 = Gav("com.example", "lib", "1.2")
 KEY12 = ("com.example", "lib", "1.2")
 BUILD = "a" * 40  # the SHA-1 of the binary
@@ -902,6 +903,218 @@ def test_a_refused_download_is_no_strike_after_an_earlier_transport_failure(tmp_
     assert log.ok_hosts == {"h.test"}  # the answers of the host reset the strike, as before
 
 
+def test_a_failed_index_does_not_taint_the_miss_of_a_verified_candidate(make_jar, tmp_path: Path):
+    """#180: the candidate verified and its repository has no sources jar; the index did not decide that."""
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("lib-1.0.jar", {"com/acme/lib/A.class": b"x"})
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    sidecar = "/m2/com/acme/lib/lib/1.0/lib-1.0.jar.sha1"
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            raise httpx.ConnectError("down", request=request)
+        if request.url.path == sidecar:
+            return httpx.Response(200, text=sha1_of(jar))
+        return httpx.Response(404)
+
+    with make_client(handler) as c:
+        first = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+        second = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache", verdicts=verdicts)
+    assert first.miss == (
+        "verified com.acme.lib:lib:1.0 via https://r.test/m2 but no -sources.jar in any repo with this build"
+    )
+    assert second.miss == (
+        "cached verdict com.acme.lib:lib:1.0 (verified-guess) "
+        "but no -sources.jar in any repo with this build (cached verdict)"
+    )
+
+
+def _a_fails_the_pom_check(jar: Path, later):
+    """A answers 503 to the 3 attempts of the pom.properties check, then later(request); B holds the build, no sources."""
+    a_requests: list[int] = []
+
+    def handler(request):
+        if request.url.host == "a.test":
+            a_requests.append(1)
+            return httpx.Response(503) if len(a_requests) <= 3 else later(request)
+        if request.url.path.endswith(".sha1"):
+            return httpx.Response(200, text=sha1_of(jar))
+        return httpx.Response(404)
+
+    return handler
+
+
+def test_a_failed_probe_of_the_pom_check_does_not_taint_a_clean_sources_step(make_jar, tmp_path: Path):
+    """#180: A fails in the pom.properties check, then tells the sources step that it holds another build."""
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    handler = _a_fails_the_pom_check(jar, lambda request: httpx.Response(200, text=OTHER))
+    with make_client(handler) as c:
+        res = resolve_sources(jar, [REPO_A, REPO_B], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.miss == "found com.example:lib:1.2 in pom.properties but no -sources.jar in any repo with this build"
+    assert verdicts.has_no_sources(KEY12, sha1_of(jar), [REPO_A, REPO_B]) is True
+
+
+def test_a_failed_probe_of_the_sources_step_taints_the_miss_alone(make_jar, tmp_path: Path):
+    """#180: the text names only the failure of the step that decided the miss."""
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+
+    def down(request):
+        raise httpx.ConnectError("down", request=request)
+
+    with make_client(_a_fails_the_pom_check(jar, down)) as c:
+        res = resolve_sources(jar, [REPO_A, REPO_B], c, tmp_path / "cache")
+    assert res.miss == (
+        "network: a.test: connection error during candidate probe; "
+        "found com.example:lib:1.2 in pom.properties but no -sources.jar in any reachable repo"
+    )
+
+
+def test_a_failed_probe_of_the_pom_check_does_not_taint_an_index_hit(make_jar, tmp_path: Path):
+    """#180: the index names the GAV, and A then tells the sources step that it holds another build."""
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+    handler = _index(KEY12, _a_fails_the_pom_check(jar, lambda request: httpx.Response(200, text=OTHER)))
+    with make_client(handler) as c:
+        res = resolve_sources(jar, [REPO_A], c, tmp_path / "cache")
+    assert res.miss == "sha1 matched com.example:lib:1.2 in Central index but no -sources.jar in any repo with this build"
+
+
+@pytest.mark.parametrize("error", [httpx.TooManyRedirects, httpx.DecodingError])
+def test_a_download_that_fails_without_a_transport_error_taints_the_miss(make_jar, tmp_path: Path, error):
+    """#180: a redirect loop or a body that cannot be decoded is no "no sources" answer."""
+    from decaf.verdicts import VerdictCache
+
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+    verdicts = VerdictCache(tmp_path / "verdicts")
+
+    def handler(request):
+        if request.url.path.endswith(".sha1"):
+            return httpx.Response(200, text=sha1_of(jar))
+        raise error("bad answer", request=request)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, [REPO_A], c, tmp_path / "cache", verdicts=verdicts)
+    assert res.miss == (
+        f"network: {error.__name__} during sources download; "
+        "found com.example:lib:1.2 in pom.properties but no -sources.jar in any reachable repo"
+    )
+    assert verdicts.has_no_sources(KEY12, sha1_of(jar), [REPO_A]) is False
+
+
+def _only_r9(jar: Path, sources: bytes):
+    """Only r9.test holds the build and its sources; the index knows nothing."""
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        if request.url.host != "r9.test":
+            return httpx.Response(404)
+        if request.url.path.endswith(".sha1"):
+            return httpx.Response(200, text=sha1_of(jar))
+        return httpx.Response(200, content=sources)
+
+    return handler
+
+
+def test_the_pom_check_asks_each_repository(make_jar, tmp_path: Path, sources_bytes):
+    """#180: with 9 repositories, the last one (Maven Central in a real config) got no probe."""
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM})
+    with make_client(_only_r9(jar, sources_bytes)) as c:
+        res = resolve_sources(jar, NINE, c, tmp_path / "cache")
+    assert (res.resolved_by, res.repo) == ("pom-properties", "https://r9.test/m2")
+
+
+def test_the_first_candidate_reaches_each_repository(make_jar, tmp_path: Path, sources_bytes):
+    """#180: the probe budget of the candidate loop is no smaller than the repository list."""
+    jar = make_jar("lib-1.0.jar", {"com/acme/A.class": b"x"})
+    with make_client(_only_r9(jar, sources_bytes)) as c:
+        res = resolve_sources(jar, NINE, c, tmp_path / "cache")
+    assert (res.resolved_by, res.repo, str(res.gav)) == ("verified-guess", "https://r9.test/m2", "com.acme:lib:1.0")
+
+
+POM_AND_CLASS = {"META-INF/maven/com.example/lib/pom.properties": POM, "com/example/A.class": b"x"}
+
+
+def test_the_loop_does_not_probe_the_pom_gav_again(make_jar, tmp_path: Path):
+    """#180: the pom.properties check already asked each repository about this GAV."""
+    jar = make_jar("lib-1.2.jar", POM_AND_CLASS)
+    probes: list[str] = []
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        probes.append(str(request.url))
+        return httpx.Response(200, text=OTHER)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, [REPO_A, REPO_B], c, tmp_path / "cache")
+    assert res.miss == (
+        "pom.properties com.example:lib:1.2 not verified by .jar.sha1; sha1 not in Central index; no other candidates"
+    )
+    assert probes == [
+        "https://a.test/m2/com/example/lib/1.2/lib-1.2.jar.sha1",
+        "https://b.test/m2/com/example/lib/1.2/lib-1.2.jar.sha1",
+    ]
+
+
+def _index_down(request):
+    if request.url.host == "search.maven.org":
+        raise httpx.ConnectError("down", request=request)
+    return httpx.Response(200, text=OTHER)
+
+
+def test_no_other_candidates_names_an_index_that_is_down(make_jar, tmp_path: Path):
+    jar = make_jar("lib-1.2.jar", POM_AND_CLASS)
+    with make_client(_index_down) as c:
+        res = resolve_sources(jar, [REPO_A], c, tmp_path / "cache")
+    assert res.miss == (
+        "network: search.maven.org: connection error during sha1 lookup; "
+        "search.maven.org: connection error during index lookup; "
+        "pom.properties com.example:lib:1.2 not verified by .jar.sha1; sha1 lookup errored (network); "
+        "no other candidates (index unavailable)"
+    )
+
+
+def test_no_candidate_groups_names_an_index_that_is_down(make_jar, tmp_path: Path):
+    """The text of a lookup that skipped no GAV does not change."""
+    jar = make_jar("mystery-1.0.jar", {"A.class": b"x"})
+    with make_client(_index_down) as c:
+        res = resolve_sources(jar, [REPO_A], c, tmp_path / "cache")
+    assert res.miss == (
+        "network: search.maven.org: connection error during sha1 lookup; "
+        "search.maven.org: connection error during index lookup; "
+        "no pom.properties; sha1 lookup errored (network); no candidate groups found (index unavailable)"
+    )
+
+
+def test_the_candidate_count_names_only_the_probes_of_the_loop(make_jar, tmp_path: Path):
+    """#180: the failed probe of the pom.properties check is in the first part of the text only."""
+    jar = make_jar(
+        "lib-1.2.jar",
+        {"META-INF/maven/com.example/lib/pom.properties": POM, "com/example/lib/A.class": b"x"},
+    )
+    pom_sidecar = "/m2/com/example/lib/1.2/lib-1.2.jar.sha1"
+    probes: list[str] = []
+
+    def handler(request):
+        if request.url.host == "search.maven.org":
+            return httpx.Response(200, json={"response": {"docs": []}})
+        probes.append(request.url.path)
+        return httpx.Response(503) if request.url.path == pom_sidecar else httpx.Response(404)
+
+    with make_client(handler) as c:
+        res = resolve_sources(jar, ["https://r.test/m2"], c, tmp_path / "cache")
+    assert res.miss == (
+        "network: r.test: HTTP 503 during candidate probe; "
+        "pom.properties com.example:lib:1.2 not verified by .jar.sha1 (probe errored); "
+        "sha1 not in Central index; 1 candidates, none verified"
+    )
+    assert probes == [pom_sidecar] * 3 + ["/m2/com/example/lib/lib/1.2/lib-1.2.jar.sha1"]
+
+
 def test_verified_guess_downloads_without_a_second_probe(make_jar, tmp_path: Path):
     jar = make_jar("spring-jdbc-6.2.17.jar", {"org/springframework/jdbc/core/A.class": b"x"})
     sources = make_jar("p.jar", {"org/springframework/jdbc/core/A.java": "class A {}"}).read_bytes()
@@ -1058,6 +1271,36 @@ def test_verify_gav_400_taints_the_probe():
     with make_client(lambda r: httpx.Response(400)) as c:
         assert verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c, log=log) == (None, 1)
     assert log.probe_failures == 1 and log.events == ["r.test: HTTP 400 during candidate probe"]
+
+
+def test_a_501_answer_is_final_for_a_probe():
+    """#180: "Not Implemented" does not change on a retry; a 503 keeps its three attempts."""
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(request.url.host)
+        return httpx.Response(501 if request.url.host == "r.test" else 503)
+
+    log = ResolutionLog()
+    with make_client(handler) as c:
+        assert verify_gav(Gav("g", "a", "1"), SHA, ["https://r.test/m2"], c, log=log) == (None, 1)
+        assert verify_gav(Gav("g", "a", "1"), SHA, ["https://s.test/m2"], c, log=log) == (None, 1)
+    assert calls == ["r.test", "s.test", "s.test", "s.test"]
+    assert log.events == ["r.test: HTTP 501 during candidate probe", "s.test: HTTP 503 during candidate probe"]
+    assert log.probe_failures == 2
+
+
+def test_a_501_answer_is_final_for_a_download(tmp_path: Path):
+    calls: list[int] = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(501)
+
+    with make_client(handler) as c:
+        with pytest.raises(NetworkFailure) as failure:
+            maven._download(c, "https://r.test/m2/a-1-sources.jar", tmp_path / "a.jar", NetState(), ResolutionLog())
+    assert (failure.value.kind, failure.value.detail, len(calls)) == ("HTTP 501", "r.test: HTTP 501", 1)
 
 
 def test_negative_verdict_counts_only_for_the_same_hints(tmp_path: Path):
