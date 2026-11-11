@@ -124,9 +124,9 @@
   and decaf looked for `target/classes/p/A.java`. With
   `--engine cfr --no-fallback`, the row said that each class was missing.
   With the fallback, the next engine decompiled each class again, and the
-  output had two files for each class. In the default chain, a retry of a
-  flagged class added a second file at the other path, and the flagged file
-  stayed. With `--merge`, the sources of such a folder went to
+  output had two files for each class. In the default chain, a CFR or
+  Procyon retry of a flagged class added a second file at the other path.
+  With `--merge`, the sources of such a folder went to
   `out/src/target/classes/p/A.java`, not by package, and the same class in a
   jar gave a second file. Now each engine writes
   `target/classes/p/A.java`, and `--merge` writes `out/src/p/A.java`.
@@ -149,9 +149,10 @@
   `app.war/WEB-INF/classes/com/x/A.java`. In the default chain, a class
   retry of CFR or Procyon put its file at the other path. Now the source of
   each class is at the path of its class file, also from CFR and Procyon.
-  With `--engine cfr`, `--engine procyon`, or `--engine jd` as the first
-  engine, a WAR or a Spring Boot jar now runs from a folder of its classes,
-  and it does not join a batch.
+  With `--engine cfr`, `--engine procyon`, or `--engine jd`, the engine gets
+  the classes of `WEB-INF/classes/` or `BOOT-INF/classes/` as a temporary
+  jar of their own, so it writes the same text as for a plain jar. Such an
+  archive does not join a batch.
 - With `--merge`, the report gave a path that no output file had (#174). The
   `path` of a flagged, noted, unchecked, or stubbed file kept the
   `WEB-INF/classes/` part of a WAR class, and the file was at
