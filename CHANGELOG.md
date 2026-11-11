@@ -16,9 +16,10 @@
   uses the file type of the input, so a `.war` can now match by its
   `.war.sha1` file. When decaf knows the coordinates of a jar but no
   repository with the same build has a sources jar, decaf decompiles the
-  jar. The miss then says `no -sources.jar in any repo with this build`.
-  An answer for the `.sha1` file that holds no SHA-1 (a page of a proxy)
-  counts as a network failure, not as "no sources".
+  jar. The miss text `no -sources.jar in any repo` is now
+  `no -sources.jar in any repo with this build`. An answer for the `.sha1`
+  file that holds no SHA-1 (a page of a proxy) counts as a network failure,
+  not as "no sources".
 - The sources cache gave the sources of an older build (#180). The cache
   kept one sources jar for each set of coordinates. A second build of the
   same coordinates (a `-SNAPSHOT`, a release that was deployed again) got
