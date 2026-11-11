@@ -4,6 +4,33 @@
 
 ### Fixed
 
+- A jar could get the sources of another build under `✓` (#180). decaf
+  checked the jar against the `.jar.sha1` file of one repository and then
+  took the `-sources.jar` of the coordinates from any configured repository.
+  A patched build in a private repository got the upstream sources of Maven
+  Central when the private repository had no sources jar. A jar that the
+  Central SHA-1 lookup resolved got its sources with no check: a
+  `-tests.jar` got the sources of the main jar. Now decaf downloads a
+  sources jar only from a repository whose `.sha1` file of the artifact
+  matches the jar, and it reads that file before each download. The check
+  uses the file type of the input, so a `.war` can now match by its
+  `.war.sha1` file. A `.sha1` file in the form `SHA1(file)= hash` matches
+  too. When decaf knows the coordinates of a jar but no repository with the
+  same build has a sources jar, decaf decompiles the jar. The miss then says
+  `no -sources.jar in any repo with this build`. An answer for the `.sha1`
+  file that holds no SHA-1 (a page of a proxy) counts as a network failure,
+  not as "no sources". A repository whose sources downloads time out for 3
+  artifacts in a row gets no more requests in that run, also when its
+  `.sha1` files answer.
+- The sources cache gave the sources of an older build (#180). The cache
+  kept one sources jar for each set of coordinates. A second build of the
+  same coordinates (a `-SNAPSHOT`, a release that was deployed again) got
+  the cached sources of the first build. Now a cached sources jar and a
+  cached "no sources" answer belong to one jar: their cache key has the
+  SHA-1 of the jar. decaf does not read the sources jars that an older
+  version cached. The first run after the update downloads them again.
+  That run needs the network. Without the network, decaf decompiles these
+  jars and counts them as network fallbacks.
 - A Maven sources jar that lacks classes of the binary gave a complete row
   (#180). A published sources jar can lack generated classes, shaded or
   bundled libraries, the classes that exist only under `META-INF/versions`,

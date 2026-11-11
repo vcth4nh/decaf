@@ -8,12 +8,20 @@ decaf prefers published `-sources.jar` files when it can match your binary
 to Maven coordinates: group, artifact, and version.
 
 - Coordinates from `pom.properties`, filenames, or manifests must match
-  the repository's `.jar.sha1` checksum.
+  the repository's `.sha1` checksum file of the artifact: `.jar.sha1` for a
+  jar, `.war.sha1` for a war.
 - A SHA-1 lookup on Maven Central can also resolve coordinates.
 - `pom.properties` works with any configured repository that publishes
-  `.jar.sha1` files; SHA-1 search itself is Central-only.
+  these `.sha1` files; SHA-1 search itself is Central-only.
 - Patched, shaded, or re-signed jars whose SHA-1 differs from the published
   binary are decompiled instead of receiving upstream sources.
+- decaf downloads a sources jar only from a repository whose `.sha1` file
+  of the artifact matches your binary. It reads that file before each
+  download, also for coordinates from the Central lookup or from an earlier
+  run.
+- This check proves the binary of a repository, not its sources jar. One
+  URL that joins several repositories (a group or a virtual repository) can
+  answer the checksum of one member and the sources jar of another member.
 - A published sources jar can lack classes: generated, shaded, or bundled
   ones. decaf compares the sources with the binary, decompiles the classes
   without a source, and counts them in `sources_gap`. A file in a source-set
@@ -31,7 +39,9 @@ See [configuration](configuration.md) to add private or public repositories.
   `sources_miss: "network: …"` and `totals.network_misses`.
 - `decaf report out --network-fallbacks` lists those artifacts.
 - Verified SHA-1 matches are cached indefinitely; verified misses are cached
-  for a week. Later runs can reuse cached sources without a lookup.
+  for a week. Later runs can reuse cached sources without a lookup. A cached
+  sources jar belongs to one binary: its key has the SHA-1 of the binary, so
+  each build of a changing version keeps its own copy.
 - `--fresh-maven` rechecks cached verdicts.
 - `decaf cache clean` removes cached sources and verdicts.
 

@@ -30,7 +30,8 @@ Typical flow:
 
 - **Sources first.** A jar with Maven coordinates gets the real `-sources.jar` from Maven
   Central instead of a decompile. decaf proves the match: the SHA-1 of the jar must equal
-  the SHA-1 of the published jar. A patched, shaded, or private jar never matches and is
+  the SHA-1 of the published jar. The sources come only from a repository whose `.sha1` file
+  of the artifact matches the jar. A patched, shaded, or private jar never matches and is
   decompiled. The lookup sends the SHA-1 of each jar without `pom.properties` to Maven
   Central; `--no-maven` makes no lookup and decompiles everything.
 - **Five engines, automatic fallback.** Vineflower, then CFR, Fernflower, Procyon, JD. An
@@ -92,11 +93,12 @@ Typical flow:
   `$XDG_CACHE_HOME/decaf` on Linux, `~/Library/Caches/decaf` on macOS,
   `%LOCALAPPDATA%\decaf\decaf\Cache` on Windows; `decaf engines list` prints its `engines`
   subfolder) holds the engines, the downloaded sources jars, and the lookup verdicts: a
-  SHA-1 match is kept forever, a "no sources" answer for a week. Archives are unpacked in a
-  `decaf-*` folder under the system temp dir (`TMPDIR`) and removed at the end; the JVMs
-  write `hsperfdata_<user>` in that temp dir. No flag turns these writes off; `--no-maven`
-  only adds no verdicts and no sources jars. `decaf cache clean` wipes the Maven part of
-  the cache; `--fresh-maven` ignores the verdicts once.
+  SHA-1 match is kept forever, a "no sources" answer for a week. A sources jar is kept for
+  the jar that it was downloaded for. Archives are unpacked in a `decaf-*` folder under the
+  system temp dir (`TMPDIR`) and removed at the end; the JVMs write `hsperfdata_<user>` in
+  that temp dir. No flag turns these writes off; `--no-maven` only adds no verdicts and no
+  sources jars. `decaf cache clean` wipes the Maven part of the cache; `--fresh-maven`
+  ignores the verdicts once.
 - **CPU and memory.** By default decaf uses all cores but one and gives the engine JVMs 80%
   of the total RAM (or of a cgroup limit) as one heap budget; `--memory 8g` sets that
   budget. The line `engine memory: up to 25 GB (4 jobs, 5.8 GB heap each; a whale gets 7.8

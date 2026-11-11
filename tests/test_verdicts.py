@@ -56,26 +56,43 @@ def test_corrupt_and_wrong_shape_read_as_absent(tmp_path: Path):
 def test_fresh_mode_skips_lookups_but_writes(tmp_path: Path):
     cache = VerdictCache(tmp_path)
     cache.record_sha1("a" * 40, GAV, "sha1-index")
-    cache.record_no_sources(GAV, REPOS)
+    cache.record_no_sources(GAV, "a" * 40, REPOS)
     fresh = VerdictCache(tmp_path, fresh=True)
     assert fresh.lookup_sha1("a" * 40, REPOS) is None
-    assert fresh.has_no_sources(GAV, REPOS) is False
+    assert fresh.has_no_sources(GAV, "a" * 40, REPOS) is False
     fresh.record_sha1("g" * 40, GAV, "sha1-index")
     assert cache.lookup_sha1("g" * 40, REPOS) is not None  # fresh writes are visible
 
 
 def test_no_sources_roundtrip(tmp_path: Path):
     cache = VerdictCache(tmp_path)
-    assert cache.has_no_sources(GAV, REPOS) is False
-    cache.record_no_sources(GAV, REPOS)
-    assert cache.has_no_sources(GAV, REPOS) is True
-    assert cache.has_no_sources(GAV, ["https://other.test/m2"]) is False  # repo-set gate
-    path = tmp_path / "gav" / "org.springframework_spring-jdbc_6.2.17.json"
+    assert cache.has_no_sources(GAV, "a" * 40, REPOS) is False
+    cache.record_no_sources(GAV, "a" * 40, REPOS)
+    assert cache.has_no_sources(GAV, "a" * 40, REPOS) is True
+    assert cache.has_no_sources(GAV, "a" * 40, ["https://other.test/m2"]) is False  # repo-set gate
+    path = tmp_path / "gav" / f"org.springframework_spring-jdbc_6.2.17_{'a' * 40}.json"
     data = json.loads(path.read_text())
     data["ts"] = time.time() - NEGATIVE_TTL - 1
     path.write_text(json.dumps(data))
-    assert cache.has_no_sources(GAV, REPOS) is False
+    assert cache.has_no_sources(GAV, "a" * 40, REPOS) is False
     assert not path.exists()
+
+
+def test_no_sources_belongs_to_one_binary(tmp_path: Path):
+    """#180: a mutable GAV has more than one build."""
+    cache = VerdictCache(tmp_path)
+    cache.record_no_sources(GAV, "a" * 40, REPOS)
+    assert cache.has_no_sources(GAV, "a" * 40, REPOS) is True
+    assert cache.has_no_sources(GAV, "b" * 40, REPOS) is False
+    assert (tmp_path / "gav" / f"org.springframework_spring-jdbc_6.2.17_{'a' * 40}.json").is_file()
+
+
+def test_no_sources_verdict_of_an_older_version_is_not_read(tmp_path: Path):
+    old = tmp_path / "gav" / "org.springframework_spring-jdbc_6.2.17.json"
+    old.parent.mkdir(parents=True)
+    old.write_text(json.dumps({"repos": REPOS, "ts": time.time()}))
+    assert VerdictCache(tmp_path).has_no_sources(GAV, "a" * 40, REPOS) is False
+    assert old.is_file()  # no cleanup code: `decaf cache clean` removes it
 
 
 def test_record_overwrites(tmp_path: Path):

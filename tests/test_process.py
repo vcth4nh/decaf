@@ -225,7 +225,7 @@ def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
     def resolver(jar_path, repos, client, cache_dir, **kw):
         return Resolution(
             gav=Gav("com.example", "lib", "1.2"),
-            miss="verified com.example:lib:1.2 via https://r.test/m2 but no -sources.jar published",
+            miss="verified com.example:lib:1.2 via https://r.test/m2 but no -sources.jar in any repo with this build",
         )
 
     runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
@@ -235,7 +235,7 @@ def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
     assert report.gav == "com.example:lib:1.2"
     assert report.resolved_by is None
     assert report.sources_miss == (
-        "verified com.example:lib:1.2 via https://r.test/m2 but no -sources.jar published"
+        "verified com.example:lib:1.2 via https://r.test/m2 but no -sources.jar in any repo with this build"
     )
 
 

@@ -37,6 +37,7 @@ class VerdictCache:
 
     A sha1 hit is sha1/{sha1}.json; a sha1 miss counts only for its hints, so each
     hint set has its own sha1/{sha1}-{key}.json: one jar under two names keeps two misses.
+    A "no sources" answer is gav/{group}_{artifact}_{version}_{sha1}.json and belongs to one binary (#180).
     fresh=True disables lookups (records still write): re-derive and overwrite.
     """
 
@@ -51,8 +52,8 @@ class VerdictCache:
         key = hashlib.sha1(json.dumps([list(h) for h in hints]).encode()).hexdigest()
         return self.root / "sha1" / f"{sha1}-{key}.json"
 
-    def _gav_path(self, gav: tuple[str, str, str]) -> Path:
-        return self.root / "gav" / ("_".join(gav) + ".json")
+    def _gav_path(self, gav: tuple[str, str, str], sha1: str) -> Path:
+        return self.root / "gav" / ("_".join((*gav, sha1)) + ".json")
 
     @staticmethod
     def _read(path: Path) -> dict | None:
@@ -141,12 +142,12 @@ class VerdictCache:
         except OSError:
             pass
 
-    def has_no_sources(self, gav: tuple[str, str, str], repos: Sequence[str]) -> bool:
+    def has_no_sources(self, gav: tuple[str, str, str], sha1: str, repos: Sequence[str]) -> bool:
         if self.fresh:
             return False
-        path = self._gav_path(gav)
+        path = self._gav_path(gav, sha1)
         data = self._read(path)
         return data is not None and self._fresh_negative(path, data, repos)
 
-    def record_no_sources(self, gav: tuple[str, str, str], repos: Sequence[str]) -> None:
-        self._write(self._gav_path(gav), {"repos": list(repos), "ts": time.time()})
+    def record_no_sources(self, gav: tuple[str, str, str], sha1: str, repos: Sequence[str]) -> None:
+        self._write(self._gav_path(gav, sha1), {"repos": list(repos), "ts": time.time()})

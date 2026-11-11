@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from .scanner import SOURCE_SUFFIXES, ZIP_ERRORS, safe_extract_zip
+from .scanner import ARCHIVE_EXTS, SOURCE_SUFFIXES, ZIP_ERRORS, safe_extract_zip
 from .verdicts import VerdictCache
 
 SEARCH_URL = "https://search.maven.org/solrsearch/select"
@@ -71,10 +71,10 @@ class Gav:
             f"{self.artifact}-{self.version}-sources.jar"
         )
 
-    def jar_path(self) -> str:
+    def jar_path(self, suffix: str = ".jar") -> str:
         return (
             f"{self.group.replace('.', '/')}/{self.artifact}/{self.version}/"
-            f"{self.artifact}-{self.version}.jar"
+            f"{self.artifact}-{self.version}{suffix}"
         )
 
 
@@ -262,6 +262,9 @@ def _exc_kind(exc: httpx.TransportError) -> str:
     return "timeout" if isinstance(exc, httpx.TimeoutException) else "connection error"
 
 
+_TRANSPORT_KINDS = ("timeout", "connection error")  # the kinds of _exc_kind: only these strike the breaker
+
+
 def _status_kind(code: int) -> str | None:
     if code in (408, 429):  # a request timeout or a rate limit: retry (#110)
         return f"HTTP {code}"
@@ -306,7 +309,7 @@ def _check_alive(net: NetState, host: str) -> None:
 def _exhausted(
     net: NetState, log: ResolutionLog, host: str, kind: str, step: str
 ) -> NetworkFailure:
-    if kind in ("timeout", "connection error"):
+    if kind in _TRANSPORT_KINDS:
         log.failed_hosts.add(host)  # only transport-class failures strike the breaker
     where = f" (while resolving {log.subject})" if log.subject else ""
     net.warn_once(
@@ -445,6 +448,7 @@ def candidate_groups(
 
 
 MAX_PROBES = 8
+_SHA1_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 
 def verify_gav(
@@ -455,8 +459,12 @@ def verify_gav(
     budget: int = MAX_PROBES,
     net: NetState | None = None,
     log: ResolutionLog | None = None,
+    suffix: str = ".jar",
 ) -> tuple[str | None, int]:
-    """Probe each repo's .jar.sha1 sidecar for gav. Returns (verifying repo, probes spent)."""
+    """Probe the .sha1 sidecar of the main artifact file of gav in each repo.
+
+    suffix is the file type of that file: .jar, .war, .ear, or .aar. Returns (verifying repo, probes spent).
+    """
     if net is None:
         net = NetState()
     if log is None:
@@ -469,7 +477,7 @@ def verify_gav(
         try:
             resp = _get_retry(
                 client,
-                f"{repo}/{gav.jar_path()}.sha1",
+                f"{repo}/{gav.jar_path(suffix)}.sha1",
                 net=net,
                 log=log,
                 step="candidate probe",
@@ -499,8 +507,14 @@ def verify_gav(
         if resp.status_code != 200:
             continue
         tokens = resp.text.split()
-        if tokens and tokens[0].lower() == sha1.lower():
+        # a sidecar can hold the hash after a file name ("SHA1(file)= hash"), so each token can match (#180)
+        if any(token.lower() == sha1.lower() for token in tokens):
             return repo, used
+        if not any(_SHA1_RE.fullmatch(token) for token in tokens):
+            # an answer without a SHA-1 (a page of a proxy, an empty file) says nothing about the build (#180)
+            host = httpx.URL(repo).host
+            log.events.append(f"{host}: no SHA-1 in the answer during candidate probe")
+            log.probe_failures += 1
     return None, used
 
 
@@ -510,6 +524,12 @@ def sha1_of(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _artifact_suffix(jar_path: Path) -> str:
+    """The file type of the input for its .sha1 sidecar: an aar or a war has no .jar.sha1 (#180)."""
+    suffix = jar_path.suffix.lower()
+    return suffix if suffix in ARCHIVE_EXTS else ".jar"
 
 
 def gav_from_central_sha1(
@@ -552,6 +572,7 @@ def gav_from_central_sha1(
 
 def fetch_sources(
     gav: Gav,
+    sha1: str,
     repos: Sequence[str],
     client: httpx.Client,
     cache_dir: Path,
@@ -559,30 +580,51 @@ def fetch_sources(
     log: ResolutionLog | None = None,
     verdicts: VerdictCache | None = None,
     on_state: Callable[[str], None] | None = None,
+    verified: Sequence[str] = (),
+    suffix: str = ".jar",
 ) -> tuple[Path, str, bool] | None:
+    """The key of a cached sources jar and of a "no sources" verdict is the GAV and the SHA-1 of the binary.
+
+    One GAV can name more than one build: a -SNAPSHOT changes, and a team can deploy a release again (#180).
+    A download needs a proof that the repository holds the build (#180): the .sha1 sidecar of its main
+    artifact file (suffix is the file type) matches sha1. verified names the repositories that the caller
+    already proved; they get no second probe.
+    """
     if net is None:
         net = NetState()
     if log is None:
         log = ResolutionLog()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar"
+    cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}_{sha1}-sources.jar"
     marker = cached.with_suffix(".repo")
     if cached.is_file() and marker.is_file():
         return cached, redact_url(marker.read_text().strip()), True
     gav_key = (gav.group, gav.artifact, gav.version)
-    if verdicts is not None and verdicts.has_no_sources(gav_key, _redacted(repos)):
+    if verdicts is not None and verdicts.has_no_sources(gav_key, sha1, _redacted(repos)):
         log.cached_no_sources = True
         return None
-    verified_misses = 0
+    clean_answers = 0  # a repo without this build or without a sources jar
     if on_state is not None and repos:
         on_state("downloading")
     for repo in repos:
+        if repo not in verified:
+            before = log.probe_failures
+            proven, _ = verify_gav(gav, sha1, [repo], client, 1, net, log, suffix)
+            if proven is None:
+                if log.probe_failures > before:  # the probe failed: a repo that decaf could not ask
+                    log.download_failures += 1
+                else:
+                    clean_answers += 1
+                continue
         url = f"{repo}/{gav.sources_path()}"
         try:
             got = _download(client, url, cached, net, log)
         except NetworkFailure as nf:
             log.events.append(f"{nf.detail} during sources download")
             log.download_failures += 1
+            if nf.kind in _TRANSPORT_KINDS and nf.host in log.failed_hosts:
+                # the probe that answered must not hide the transport failures of the download from the breaker (#180)
+                log.ok_hosts.discard(nf.host)
             continue
         except httpx.HTTPError:
             continue
@@ -590,12 +632,14 @@ def fetch_sources(
             log.damaged = log.damaged or f"the -sources.jar in {redact_url(repo)} {exc}"
             continue
         if got is None:
-            verified_misses += 1
+            clean_answers += 1
             continue
         marker.write_text(redact_url(repo))
+        # drop the file of an older decaf version: its name has no SHA-1, so this version never reads it (#180)
+        drop_cached_sources(cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar")
         return cached, redact_url(repo), False
-    if verdicts is not None and repos and verified_misses == len(repos):
-        verdicts.record_no_sources(gav_key, _redacted(repos))
+    if verdicts is not None and repos and clean_answers == len(repos):
+        verdicts.record_no_sources(gav_key, sha1, _redacted(repos))
     return None
 
 
@@ -657,7 +701,7 @@ def _download(
             try:
                 os.replace(tmp_name, cached)
             except OSError:
-                # Windows denies replace when another thread races the same GAV;
+                # Windows denies replace when another thread races the same jar (the same GAV and SHA-1);
                 # the winner's copy is identical, so drop ours and use it.
                 os.unlink(tmp_name)
                 if not cached.is_file():
@@ -725,11 +769,13 @@ def _fetched(gav: Gav, fetched: tuple[Path, str, bool] | None, resolved_by: str,
     )
 
 
-def _no_sources(prefix: str, absent: str, log: ResolutionLog) -> str:
+def _no_sources(prefix: str, log: ResolutionLog) -> str:
     if log.damaged:
         return f"{prefix} but {log.damaged}"
     if log.download_failures:
         return f"{prefix} but no -sources.jar in any reachable repo"
+    # another repository can hold a sources jar of another build of the same GAV (#180)
+    absent = "no -sources.jar in any repo with this build"
     if log.cached_no_sources:
         return f"{prefix} but {absent} (cached verdict)"
     return f"{prefix} but {absent}"
@@ -760,6 +806,7 @@ def resolve_sources(
     log = ResolutionLog(subject=subject if subject is not None else jar_path.name)
 
     sha1 = sha1_of(jar_path)
+    suffix = _artifact_suffix(jar_path)
     coords = candidate_coords(jar_path)  # also the key of a miss verdict: a renamed jar looks again (#110)
     if verdicts is not None:
         known = verdicts.lookup_sha1(sha1, _redacted(repos), coords)
@@ -768,12 +815,10 @@ def resolve_sources(
         if known is not None:
             if known.gav is not None:
                 gav = Gav(*known.gav)
-                fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
-                msg = _no_sources(
-                    f"cached verdict {gav} ({known.resolved_by})",
-                    "no -sources.jar in any repo",
-                    log,
+                fetched = fetch_sources(
+                    gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
                 )
+                msg = _no_sources(f"cached verdict {gav} ({known.resolved_by})", log)
                 return _finish(_fetched(gav, fetched, known.resolved_by, msg), log, net)
             return _finish(Resolution(miss=f"cached verdict: {known.miss}"), log, net)
 
@@ -782,20 +827,21 @@ def resolve_sources(
         trail = ["no pom.properties"]
     else:
         # A shaded, patched, or renamed jar can carry the pom.properties of another jar:
-        # trust it only when a repository's .jar.sha1 matches this jar (#110).
+        # trust it only when a repository's .sha1 sidecar matches this jar (#110).
         before = log.probe_failures
-        repo, _ = verify_gav(gav, sha1, repos, client, MAX_PROBES, net, log)
+        repo, _ = verify_gav(gav, sha1, repos, client, MAX_PROBES, net, log, suffix)
         if repo is not None:
             if verdicts is not None:
                 verdicts.record_sha1(sha1, (gav.group, gav.artifact, gav.version), "pom-properties")
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(gav, ordered, client, cache_dir, net, log, verdicts, on_state)
-            msg = _no_sources(
-                f"found {gav} in pom.properties", "no -sources.jar in any repo", log
+            fetched = fetch_sources(
+                gav, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
+                verified=(repo,), suffix=suffix,
             )
+            msg = _no_sources(f"found {gav} in pom.properties", log)
             return _finish(_fetched(gav, fetched, "pom-properties", msg), log, net)
         errs = " (probe errored)" if log.probe_failures > before else ""
-        trail = [f"pom.properties {gav} not verified by .jar.sha1{errs}"]
+        trail = [f"pom.properties {gav} not verified by {suffix}.sha1{errs}"]
     if allow_sha1:
         before = len(log.events)
         gav = gav_from_central_sha1(sha1, client, net, log)
@@ -804,10 +850,10 @@ def resolve_sources(
                 verdicts.record_sha1(
                     sha1, (gav.group, gav.artifact, gav.version), "sha1-index"
                 )
-            fetched = fetch_sources(gav, repos, client, cache_dir, net, log, verdicts, on_state)
-            msg = _no_sources(
-                f"sha1 matched {gav} in Central index", "no -sources.jar in any repo", log
+            fetched = fetch_sources(
+                gav, sha1, repos, client, cache_dir, net, log, verdicts, on_state, suffix=suffix
             )
+            msg = _no_sources(f"sha1 matched {gav} in Central index", log)
             return _finish(_fetched(gav, fetched, "sha1-index", msg), log, net)
         trail.append(
             "sha1 lookup errored (network)"
@@ -838,7 +884,7 @@ def resolve_sources(
             if candidate in tried:
                 continue
             tried.add(candidate)
-            repo, used = verify_gav(candidate, sha1, repos, client, budget, net, log)
+            repo, used = verify_gav(candidate, sha1, repos, client, budget, net, log, suffix)
             budget -= used
             if repo is None:
                 continue
@@ -849,10 +895,11 @@ def resolve_sources(
                     "verified-guess",
                 )
             ordered = [repo, *[r for r in repos if r != repo]]
-            fetched = fetch_sources(candidate, ordered, client, cache_dir, net, log, verdicts, on_state)
-            msg = _no_sources(
-                f"verified {candidate} via {redact_url(repo)}", "no -sources.jar published", log
+            fetched = fetch_sources(
+                candidate, sha1, ordered, client, cache_dir, net, log, verdicts, on_state,
+                verified=(repo,), suffix=suffix,
             )
+            msg = _no_sources(f"verified {candidate} via {redact_url(repo)}", log)
             return _finish(_fetched(candidate, fetched, "verified-guess", msg), log, net)
     if tried:
         errs = f" ({log.probe_failures} probe(s) errored)" if log.probe_failures else ""
