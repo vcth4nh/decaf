@@ -698,7 +698,7 @@ def _download(
                 os.unlink(tmp_name)
         if ok:
             log.ok_hosts.add(host)
-            damage = _zip_damage(tmp_name)
+            damage = zip_damage(tmp_name)
             if damage is not None:
                 os.unlink(tmp_name)
                 raise DamagedDownload(damage)
@@ -716,7 +716,7 @@ def _download(
     raise _exhausted(net, log, host, kind, "sources download")
 
 
-def _zip_damage(path: Path) -> str | None:
+def zip_damage(path: Path) -> str | None:
     """Why the zip cannot be read, or None when each entry can; is_zipfile reads only the end record (#111)."""
     try:
         zf = zipfile.ZipFile(path)

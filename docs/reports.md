@@ -25,7 +25,8 @@ decaf report out --memory            # ten JVMs with the largest memory peaks
   flagged source files, or a network failure that forced decompilation.
 - **Partial:** the artifact produced output but still has missing classes,
   stubbed methods, flagged files, or a network failure that forced decompilation.
-  It gets a yellow `!` in terminal output.
+  It gets a yellow `!` in terminal output. The row of a network failure ends
+  with `network fallback`.
 - **Failed:** the artifact could not be processed. The report groups failures
   by cause, such as an unreadable archive or an engine timeout.
 - A Maven artifact follows the same rules. The classes that its sources jar

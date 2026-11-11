@@ -217,6 +217,7 @@ def test_empty_sources_jar_falls_back_to_engines(make_jar, tmp_path: Path):
     report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert report.method == "vineflower"
     assert report.sources_miss == "sources jar for com.example:lib:1.2 contained no source files"
+    assert empty_sources.exists()  # a readable zip with no source file stays in the cache (#180)
 
 
 def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
@@ -1036,6 +1037,27 @@ def test_damaged_cached_sources_jar_is_dropped(make_jar, make_damaged_jar, tmp_p
     ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}), resolver=resolver, maven=True)
     report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
     assert (report.outcome, report.method) == ("ok", "vineflower")
+    assert not sources.exists() and not marker.exists()
+
+
+def test_cached_sources_jar_that_is_no_zip_is_named_and_dropped(make_jar, tmp_path: Path):
+    """#180: the miss says why, and the next run downloads the sources jar again."""
+    jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
+    cache = tmp_path / "cache"
+    cache.mkdir(exist_ok=True)
+    sources = cache / "com.example_lib_1.2-sources.jar"
+    sources.write_bytes(b"this is no zip")
+    marker = sources.with_suffix(".repo")
+    marker.write_text("https://r.test/m2")
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        return Resolution(gav=Gav("com.example", "lib", "1.2"), sources_jar=sources,
+                          repo="https://r.test/m2", resolved_by="pom-properties", cached=True)
+
+    ctx = make_ctx(tmp_path, writing_runner({"vineflower": {"com/x/A.java": "class A {}"}}), resolver=resolver, maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.method) == ("ok", "vineflower")
+    assert report.sources_miss == "sources jar for com.example:lib:1.2 is not a zip"
     assert not sources.exists() and not marker.exists()
 
 

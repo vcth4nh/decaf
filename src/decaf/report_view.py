@@ -173,6 +173,8 @@ def _status_line(r: ArtifactReport, mark: tuple[str, str] = _MARKS) -> str:
             problems += f", [yellow]{len(r.stubs)} stubbed[/]"
         if r.flagged:
             problems += f", [yellow]{len(r.flagged)} flagged[/]"
+        if (r.sources_miss or "").startswith("network:"):  # the words of --network-fallbacks (#180)
+            problems += ", [yellow]network fallback[/]"
         if r.method == "maven":
             detail = f"maven sources, {safe(r.gav)}"
             if r.sources_cached:

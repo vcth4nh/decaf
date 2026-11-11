@@ -1762,7 +1762,13 @@ def _fetch_stage(
                     maven.drop_cached_sources(resolution.sources_jar)  # the next run downloads it again (#111)
                     resolution.miss = f"sources jar for {resolution.gav} has a damaged entry: {damaged[0]}"
                 else:
-                    resolution.miss = f"sources jar for {resolution.gav} contained no source files"
+                    # a fault after the download check can damage a cache file (#180)
+                    damage = maven.zip_damage(resolution.sources_jar)
+                    if damage is not None:
+                        maven.drop_cached_sources(resolution.sources_jar)  # the next run downloads it again
+                        resolution.miss = f"sources jar for {resolution.gav} {damage}"
+                    else:
+                        resolution.miss = f"sources jar for {resolution.gav} contained no source files"
                 _drop(tmp)
             if resolution is not None:
                 if resolution.gav is not None:

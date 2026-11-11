@@ -107,10 +107,11 @@ Typical flow:
 - **The ending block.** One line per artifact: `✓` complete, `!` partial, `✗` failed, with
   the source of its code: `(maven sources, org.jsoup:jsoup:1.17.2, cached)` or `(vineflower,
   4 classes)`. A Maven line can add `, 32 decompiled`: the engines wrote 32 classes that the
-  sources jar lacked, and `, 2 missing` counts the ones that no engine wrote. The artifact
-  still counts as Maven in the `Sources` line. `cached` appears only on a Maven line and
-  means the sources jar came from the cache, not the network; a cached "no sources" verdict
-  shows only in the report, as `sources_miss=cached verdict: …`. Then
+  sources jar lacked, and `, 2 missing` counts the ones that no engine wrote. A decompiled line
+  can end with `, network fallback`: a network failure stopped the Maven lookup, so the engines
+  wrote the code. The artifact still counts as Maven in the `Sources` line. `cached` appears
+  only on a Maven line and means the sources jar came from the cache, not the network; a cached
+  "no sources" verdict shows only in the report, as `sources_miss=cached verdict: …`. Then
   `Artifacts N processed · N complete`, plus `· N partial` and `· N failed` when they are
   not zero, `Sources N Maven · N decompiled · N extracted` (extracted: an input archive that
   already held source files), the failures grouped by cause, and the paths of OUT and the

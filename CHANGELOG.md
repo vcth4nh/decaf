@@ -28,6 +28,15 @@
   kept no verdict, so each run paid again. Now decaf reads an `http://` URL
   of Maven Central as the `https://` URL. An answer 501 of any repository is
   final: decaf does not try it again.
+- A cached sources jar that decaf cannot read stayed in the cache (#180).
+  The miss said `contained no source files`, and each run read the same
+  file again. Now the miss names the fault (`is not a zip`, or the damaged
+  entry), decaf deletes the file, and the next run downloads the sources
+  again.
+- The row of a network fallback did not name it (#180). An artifact that
+  decaf decompiled after a network failure of the Maven lookup got
+  `! lib-1.0.jar (vineflower, 12 classes)`. The row now ends with
+  `, network fallback`.
 - A jar could get the sources of another build under `✓` (#180). decaf
   checked the jar against the `.jar.sha1` file of one repository and then
   took the `-sources.jar` of the coordinates from any configured repository.
