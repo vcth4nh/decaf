@@ -547,6 +547,46 @@ def test_a_batch_whose_copy_fails_sends_each_member_back_and_drops_its_copy_fold
     assert list(ctx.tmp_root.iterdir()) == []
 
 
+def test_after_ctrl_c_a_batch_makes_no_more_copies_and_sends_each_member_back(make_jar, tmp_path, monkeypatch):
+    import decaf.pipeline as pipeline
+    from decaf.engines import PROCESSES
+
+    real, copied = pipeline._engine_copy, []
+
+    def copy_then_ctrl_c(archive, folder):
+        copied.append(Path(archive).name)
+        PROCESSES.kill_all()  # Ctrl-C lands after the first copy
+        return real(archive, folder)
+
+    monkeypatch.setattr(pipeline, "_engine_copy", copy_then_ctrl_c)
+    targets: list[Path] = []
+    members = [_member(make_jar, f"{n}.jar", {f"com/{n}/A.class": b"x"}) for n in "abc"]
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    try:
+        done, requeue = pipeline._decompile_batch(members, ctx)
+    finally:
+        PROCESSES.reset()
+    assert (done, [t for _, t, _ in requeue], targets, copied) == ([], [m[1] for m in members], [], ["a.jar"])
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_after_ctrl_c_an_archive_row_makes_no_copy_and_ends_as_interrupted(make_jar, tmp_path, monkeypatch):
+    import decaf.pipeline as pipeline
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import ArtifactReport
+
+    monkeypatch.setattr(pipeline, "_engine_copy", lambda *a: pytest.fail("a copy after Ctrl-C"))
+    jar = make_jar("a.jar", {"com/a/A.class": b"x", "com/a/B.class": b"y"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    PROCESSES.kill_all()
+    try:
+        pipeline._decompile(Artifact(jar, "a.jar", ArtifactKind.ARCHIVE), jar, ctx, report)
+    finally:
+        PROCESSES.reset()
+    assert (report.outcome, report.failure, report.classes, report.attempts) == ("failed", "interrupted", 2, [])
+
+
 def test_decompile_batch_failure_requeues_members(make_jar, tmp_path):
     from decaf.engines import EngineResult
     from decaf.pipeline import _decompile_batch

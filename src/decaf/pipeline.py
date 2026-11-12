@@ -2121,6 +2121,10 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         _decompile_source(artifact, target, expected_class_stems(target) if expected is None else expected, ctx,
                           report)
         return
+    if engines.PROCESSES.closed:  # Ctrl-C: no copy, and the row ends as the engine loop ends it
+        report.classes = len(expected_class_stems(target))
+        report.outcome, report.failure = "failed", "interrupted"
+        return
     # An engine never reads the input archive: it reads a copy that decaf wrote from the entries that it tested.
     folder = _tmp_dir(ctx)
     try:
@@ -2531,16 +2535,16 @@ def _decompile_batch(
 
     A batch takes the expected classes from its targets, so a member whose copy has refused entries goes back for a
     solo run with its input, which counts and prints them one time. A requeued member gets its input back. The copy
-    folders go when the batch ends, also after an error.
+    folders go when the batch ends, also after an error. After Ctrl-C, no copy is made and each member goes back.
     """
-    if engines.PROCESSES.closed:
-        return [], [(a, t, r) for a, t, r, _, _ in members]
     folders: list[Path] = []
     try:
         inputs: dict[Path, Path] = {}  # copy -> input
         kept, requeue = [], []
         try:
             for a, t, r, stems, claims in members:
+                if engines.PROCESSES.closed:
+                    return [], [(a, t, r) for a, t, r, _, _ in members]
                 folders.append(_tmp_dir(ctx))
                 copy, refused = _engine_copy(t, folders[-1])
                 if refused:
