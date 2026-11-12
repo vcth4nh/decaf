@@ -1482,6 +1482,48 @@ def test_sources_gap_takes_no_package_from_a_cut_head(make_jar, tmp_path: Path):
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"Buffer", "okio/Buffer"}
 
 
+@pytest.mark.parametrize("sources, lambda_file, gap", [
+    ({"com/x/K.kt": "class K"}, None, set()),  # the file of the outer class K holds the lambda
+    ({}, None, {"com/x/K", "com/x/K$$Lambda$0"}),  # the outer class is a gap: the lambda too
+    ({"com/x/K.kt": "class K"}, "Other.kt", {"com/x/K$$Lambda$0"}),  # its attribute names an absent file: a gap
+    ({"com/x/K.kt": "class K", "com/x/Other.kt": "fun o() {}"}, "Other.kt", set()),
+])
+def test_sources_gap_covers_a_class_without_a_source_file_attribute_by_its_outer_class(
+    make_jar, class_file, tmp_path: Path, sources, lambda_file, gap,
+):
+    """The class K$$Lambda$0 is top-level for the JVM, so it is expected (#206). Its class file names no source file,
+    so the file of its outer class by name covers it, when the sources have that file. A class with a SourceFile
+    attribute keeps the rules of #180."""
+    jar = make_jar("lib.jar", {
+        "com/x/K.class": class_file("com/x/K", "K.kt"),
+        "com/x/K$$Lambda$0.class": class_file("com/x/K$$Lambda$0", lambda_file),
+    })
+    tree = _files(tmp_path / "tree", sources)
+    expected = expected_class_stems(jar)
+    assert expected == {"com/x/K", "com/x/K$$Lambda$0"}
+    assert _sources_gap(jar, expected, tree) == gap
+
+
+def test_sources_gap_covers_a_scala_module_class_by_its_source_file(make_jar, class_file, tmp_path: Path):
+    """The module class Foo$ of a Scala object names Foo.scala, as Foo does (#206, the rule of #180)."""
+    jar = make_jar("lib.jar", {
+        "s/Foo.class": class_file("s/Foo", "Foo.scala"), "s/Foo$.class": class_file("s/Foo$", "Foo.scala"),
+    })
+    tree = _files(tmp_path / "tree", {"s/Foo.scala": "object Foo"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_keeps_a_class_without_an_outer_file_rule_when_its_entry_cannot_be_read(
+    make_damaged_jar, class_file, tmp_path: Path,
+):
+    """The entry of K$$Lambda$0 is damaged, so decaf does not know that it names no source file: a gap (#206)."""
+    jar = make_damaged_jar("lib.jar", {"com/x/K.class": class_file("com/x/K", "K.kt") * 4,
+                                       "com/x/K$$Lambda$0.class": class_file("com/x/K$$Lambda$0") * 4},
+                           damaged=("com/x/K$$Lambda$0.class",))
+    tree = _files(tmp_path / "tree", {"com/x/K.kt": "class K"})
+    assert _sources_gap(jar, {"com/x/K", "com/x/K$$Lambda$0"}, tree) == {"com/x/K$$Lambda$0"}
+
+
 def test_declared_package_reads_one_package_line(tmp_path: Path):
     p = tmp_path / "A.java"
     p.write_text("package com.x$y;\nclass A {}")

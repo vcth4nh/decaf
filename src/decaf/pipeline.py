@@ -587,6 +587,7 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
                 written.add(pkg.replace(".", "/") + "/" + p.name)
         rest = {s for s in rest if not any(s + suffix in written for suffix in maven.MAVEN_SOURCE_SUFFIXES)}
     covered: set[str] = set()
+    unnamed: set[str] = set()  # classes with an outer class by name whose class file names no source file (#206)
     try:
         with zipfile.ZipFile(binary) as zf:
             entry: dict[str, str] = {}  # stem -> the entry to read: the base entry, else a META-INF/versions/N entry
@@ -608,9 +609,14 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
                 # A set lookup only: the attribute of a crafted class can hold a path (../A.java).
                 if source is not None and (package + "/" + source if package else source) in written:
                     covered.add(stem)
+                elif source is None and data is not None and outer_stem(stem, expected) is not None:
+                    unnamed.add(stem)
     except ZIP_ERRORS:
         return rest
-    return rest - covered
+    gap = rest - covered
+    # A class that is top-level for the JVM, such as a Kotlin X$$Lambda$N, often names no source file. Its source is
+    # then in the file of its outer class by name, so it is a gap only when that class is one (#206).
+    return {s for s in gap if s not in unnamed or outer_stem(s, expected) in gap}
 
 
 def _strip_container(rel: str) -> str:
