@@ -924,9 +924,10 @@ def test_class_parents_of_a_class_file_that_cannot_be_read_follow_the_name(make_
 
 
 def test_class_parents_of_a_class_that_does_not_list_itself(make_jar):
-    """Rule 2: top-level (#206), also when a class of the family lists it (S8). Vineflower, Fernflower, and JD nest
-    such a class in the file of the class that lists it, but CFR and Procyon write it only from its own class file:
-    from a class folder, the file of its outer class did not hold it, and the row had no missing class."""
+    """Rule 2: top-level (#206), also when a class of the family lists it (S8). Fernflower and JD nest such a class
+    in the file of the class that lists it, and Vineflower nests a member class of this kind (it writes the S8
+    anonymous class apart), but CFR and Procyon write it only from its own class file: from a class folder, the
+    file of its outer class did not hold it, and the row had no missing class."""
     assert _parents(make_jar, {"X": _lister("X"), "X$": _lister("X$")}) == {"X$": None}
     s8 = {"X": _lister("X", lists=(("X$$anon$1", None),)), "X$": _lister("X$"), "X$$anon$1": _lister("X$$anon$1")}
     assert _parents(make_jar, s8)["X$$anon$1"] is None
@@ -1084,13 +1085,27 @@ def test_read_parents_keeps_the_container_root_of_a_copy(make_jar):
     }
 
 
-def test_class_parents_read_only_the_families_asked_for(make_jar, tmp_path):
+def test_class_parents_read_only_the_families_asked_for(make_jar, monkeypatch):
+    from decaf import pipeline
+
+    classes = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A"), "q/C": _lister("q/C"), "q/C$": _lister("q/C$")}
+    jar = make_jar("t.jar", {f"{n}.class": d for n, d in classes.items()})
+    read: list[str] = []
+    read_classes = pipeline._read_classes
+    def counted(source, names):
+        read.extend(names)
+        return read_classes(source, names)
+
+    monkeypatch.setattr(pipeline, "_read_classes", counted)
+    assert pipeline._class_parents(jar, {"q/C"}) == {"q/C$": None}
+    assert sorted(read) == ["q/C$.class", "q/C.class"]
+
+
+def test_class_parents_of_a_class_folder_above_its_package_root(tmp_path):
     """A class folder above its package root (#199): the stems keep the folder, the class files name the classes."""
     from decaf.pipeline import _class_parents
 
     classes = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A"), "q/C": _lister("q/C"), "q/C$": _lister("q/C$")}
-    jar = make_jar("t.jar", {f"{n}.class": d for n, d in classes.items()})
-    assert _class_parents(jar, {"q/C"}) == {"q/C$": None}
     root = tmp_path / "in"
     for n, d in classes.items():
         (root / "target/classes" / f"{n}.class").parent.mkdir(parents=True, exist_ok=True)
@@ -4160,7 +4175,10 @@ def test_a_scala_anonymous_class_has_one_file_from_the_class_that_nests_it(
     written = {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
     held = [c for text in written.values() for c in ("X$$anon$1",) if c in text]
     assert held == ["X$$anon$1"]  # no class is lost, and no class goes out two times
-    assert set(written) == {_X, _XM}  # the file of the class that nests it replaced the flagged file
+    assert set(written) == {_X, _XM}  # no file of X$$anon$1 goes out: a file of the class that nests it holds it
+    # Nested first with X: the flagged X of Vineflower nests X$$anon$1, and the files of CFR hold a flagged file of
+    # it: a flagged file replaces nothing (#99), so the flagged X stays, and the report lists it.
+    assert [f["path"] for f in report.flagged] == ([_X] if (enclosing, apart_first) == ("X", False) else [])
     assert report.missing_classes == 0
 
 

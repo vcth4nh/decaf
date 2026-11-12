@@ -699,7 +699,9 @@ def _run_per_class(
 
     files = {f.relative_to(root).as_posix()[: -len(".class")]: f for f in sorted(root.rglob("*.class"))}
     # A class that is top-level for the JVM, for example the module class Foo$ of a Scala object (#206) or a stale
-    # class (#207): no outer class nests it, so it needs its own argument. The same set as the expected classes.
+    # class (#207): no outer class nests it, so it needs its own argument. The rule of the expected classes, on the
+    # classes of this tree: a retry tree holds only the families of its classes, so a class that only a class of
+    # another family names can look stale here, and then it gets an argument of its own.
     parents = pipeline._class_parents(root) if any(outer_stem(stem, files) for stem in files) else {}
     tops = [(stem, f) for stem, f in files.items()
             if outer_stem(stem, files) is None or parents.get(pipeline._class_stem(stem + ".class"), "") is None]

@@ -187,16 +187,18 @@
   names.
 - A stale inner class was lost without a sign (#207). A class folder can keep
   the class file of an inner class after its outer class was compiled again
-  without it, for example `A$B.class` next to a new `A.class`. CFR, JD, and
-  Procyon write no file of such a class, and the row showed `✓` with no
-  missing class. decaf also took the file of the outer class to hold it, so
-  the `A.java` of Fernflower replaced the Vineflower stub of `A$B`, and the
-  report did not list the stub. Now decaf takes the parent of a class from the
-  class files of its family: the InnerClasses attribute of the class, the
-  classes that list it or name it, and its EnclosingMethod attribute. A class
-  is stale only when no other class of its package names it. A stale class is
-  a class of its own: it counts, the row shows it as missing when no engine
-  writes it, and the next engine gets a retry of it.
+  without it, for example `A$B.class` next to a new `A.class`. CFR and JD
+  write no file of such a class. Procyon writes none from a class folder, and
+  from a jar it nests a stale member class in the file of its outer class. The
+  row showed `✓` with no missing class. decaf also took the file of the outer
+  class to hold it, so the `A.java` of Fernflower replaced the Vineflower stub
+  of `A$B`, and the report did not list the stub. Now decaf takes the parent
+  of a class from the class files of its family: the InnerClasses attribute of
+  the class, the classes that list it or name it, and its EnclosingMethod
+  attribute. A class is stale only when no other class of its package names
+  it. A stale class is a class of its own: it counts, the row shows it as
+  missing when no engine writes a file of its own for it, and the next engine
+  gets a retry of it.
 - A Scala anonymous class could be lost (#208). decaf took the longest
   `$`-prefix of a class name as the class whose file holds it, so `X$$anon$1`
   was below the module class `X$`. An engine that nests it puts it in the file
