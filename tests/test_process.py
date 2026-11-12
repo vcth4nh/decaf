@@ -3772,6 +3772,18 @@ def test_report_paths_of_a_war_are_the_paths_of_the_written_files(make_jar, tmp_
     assert all((base / p).is_file() for entries in paths for p in entries)
 
 
+@pytest.mark.parametrize("mirror", [False, True], ids=["merge", "mirror"])
+def test_the_report_path_of_a_flagged_versions_twin_is_not_the_path_of_its_base_class(make_jar, tmp_path: Path, mirror):
+    """Before, --merge gave flagged com/y/S.java, and src/com/y/S.java was the clean base class."""
+    jar = make_jar("mr.jar", {"com/y/S.class": b"x", "META-INF/versions/11/com/y/S.class": b"y"})
+    runner = writing_runner({"cfr": {"com/y/S.java": "class S {}", "META-INF/versions/11/com/y/S.java": "// FLAG"}})
+    writer = MirrorWriter(tmp_path / "out") if mirror else MergeWriter(tmp_path / "out/src")
+    ctx = make_ctx(tmp_path, runner, engine="cfr", fallback=False, checker=marker_checker(), writer=writer)
+    report, _ = process_artifact(Artifact(jar, "mr.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [f["path"] for f in report.flagged] == ["META-INF/versions/11/com/y/S.java"]
+    assert (tmp_path / ("out/mr.jar/com/y/S.java" if mirror else "out/src/com/y/S.java")).read_text() == "class S {}"
+
+
 def test_report_paths_of_a_class_folder_with_merge_are_below_src(tmp_path: Path, class_file):
     root = _tree(tmp_path / "in", {
         "target/classes/com/x/A.class": class_file("com/x/A"), "target/classes/com/x/B.class": class_file("com/x/B"),

@@ -216,9 +216,20 @@ class MergeWriter:
     def _twin(self, sort_key: str, raw: str) -> bool:
         return _strip_container(self._cut(sort_key, raw)).startswith("META-INF/versions/")
 
-    def out_path(self, sort_key: str, raw: str) -> str:
-        """The path below src/ of an engine file of the artifact sort_key, the report path too (#174)."""
+    def _target(self, sort_key: str, raw: str) -> str:
+        """The path below src/ of an engine file of the artifact sort_key."""
         return normalize_java_rel(self._cut(sort_key, raw))
+
+    def out_path(self, sort_key: str, raw: str) -> str:
+        """The report path of an engine file: its path below src/ (#174), but a versions twin keeps its versions
+        folder when the file at that path is the base class of the same artifact."""
+        rel = self._target(sort_key, raw)
+        if self._twin(sort_key, raw):
+            with self._lock:
+                existing = self._index.get(casefs.fold(rel) if self._case_insensitive else rel)
+            if existing is not None and existing[0][0] == sort_key and not existing[0][1]:
+                return _strip_container(self._cut(sort_key, raw))
+        return rel
 
     def add_tree(self, tree: Path, sort_key: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         java = 0
@@ -234,7 +245,7 @@ class MergeWriter:
             # A held or retried base class can come in a later tree than its twin: of one sort key, the base wins.
             # Of two files of one sort key, the first engine path wins, in any order of the trees.
             rank = (sort_key, self._twin(sort_key, raw), raw)
-            rel = self.out_path(sort_key, raw)
+            rel = self._target(sort_key, raw)
             key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
@@ -1348,7 +1359,7 @@ def _hold_output(
 
 def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
     """End of the chain: write the held files (the first engine's file) and list them (#96, #99)."""
-    path = partial(ctx.writer.out_path, rel)  # a list gives the path of the written file (#174)
+    path = partial(ctx.writer.out_path, rel)  # a list gives the path of the written file (#174), see out_path
     for keys in held.nests.values():  # the spares: a chosen file nests their classes (#159)
         for k in keys:
             f = held.files.pop(k, None)

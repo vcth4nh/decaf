@@ -403,3 +403,36 @@ def test_out_path_is_the_path_of_the_written_file(tmp_path: Path):
     mirror = MirrorWriter(tmp_path / "out")
     assert mirror.out_path("app.war", "WEB-INF/classes/com/x/A.java") == "WEB-INF/classes/com/x/A.java"
     assert mirror.out_path("_classes", "target/classes/p/A.java") == "target/classes/p/A.java"
+
+
+# --- the report path of a versions twin with --merge ---
+
+
+def test_out_path_of_a_versions_twin_with_a_base_class_keeps_the_versions_folder(tmp_path: Path):
+    """Before, the report gave com/y/S.java for the twin, and src/com/y/S.java was the base class."""
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"mr/p/A": "mr/", "mr/META-INF/versions/11/p/A": "mr/"}})
+    w.add_tree(tree(tmp_path / "t1", {"com/y/S.java": "// base", "META-INF/versions/11/com/y/S.java": "// v11"}), "mr.jar")
+    w.add_tree(tree(tmp_path / "t2", {
+        "WEB-INF/classes/q/B.java": "// base", "WEB-INF/classes/META-INF/versions/9/q/B.java": "// v9",
+    }), "app.war")
+    w.add_tree(tree(tmp_path / "t3", {"mr/p/A.java": "// base", "mr/META-INF/versions/11/p/A.java": "// v11"}), "_classes")
+    assert w.out_path("mr.jar", "META-INF/versions/11/com/y/S.java") == "META-INF/versions/11/com/y/S.java"
+    assert w.out_path("mr.jar", "com/y/S.java") == "com/y/S.java"
+    assert w.out_path("app.war", "WEB-INF/classes/META-INF/versions/9/q/B.java") == "META-INF/versions/9/q/B.java"
+    assert w.out_path("_classes", "mr/META-INF/versions/11/p/A.java") == "META-INF/versions/11/p/A.java"
+    assert (tmp_path / "src/com/y/S.java").read_text() == "// base"
+
+
+def test_out_path_of_a_versions_twin_without_a_base_class_is_the_output_path(tmp_path: Path):
+    w = MergeWriter(tmp_path / "src")
+    w.add_tree(tree(tmp_path / "t1", {"META-INF/versions/11/com/y/S.java": "// v11"}), "mr.jar")
+    w.add_tree(tree(tmp_path / "t2", {"com/y/S.java": "// base of z"}), "z.jar")  # another artifact: the twin stays
+    assert w.out_path("mr.jar", "META-INF/versions/11/com/y/S.java") == "com/y/S.java"
+    assert (tmp_path / "src/com/y/S.java").read_text() == "// v11"
+
+
+def test_out_path_of_a_versions_twin_in_mirror_mode_is_the_engine_path(tmp_path: Path):
+    mirror = MirrorWriter(tmp_path / "out")
+    mirror.add_tree(tree(tmp_path / "t", {"com/y/S.java": "// base", "META-INF/versions/11/com/y/S.java": "// v11"}), "mr.jar")
+    assert mirror.out_path("mr.jar", "META-INF/versions/11/com/y/S.java") == "META-INF/versions/11/com/y/S.java"
+    assert mirror.out_path("mr.jar", "com/y/S.java") == "com/y/S.java"
