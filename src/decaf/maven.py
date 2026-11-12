@@ -700,22 +700,33 @@ def fetch_sources(
         if got is None:
             clean_answers += 1
             continue
-        if central is not None and not _is_central(repo):
-            keep = _central_check(gav, sha1, cached, central, client, net, log, suffix)
-            if not keep:
-                drop_cached_sources(cached)
-                if keep is None:  # a repo that decaf could not ask
-                    log.download_failures += 1
-                else:  # no sources jar of this build
-                    clean_answers += 1
-                    log.other_build = log.other_build or (
-                        f"the -sources.jar in {redact_url(repo)} is the sources jar of another build on Maven Central"
-                    )
-                continue
+        # the download keeps its temporary file until the check passes: another thread of the same jar
+        # can use the cache name (#189)
+        keep: bool | None = True
+        placed = None
+        try:
+            if central is not None and not _is_central(repo):
+                keep = _central_check(gav, sha1, got, central, client, net, log, suffix)
+            if keep:
+                placed = _place(got, cached)
+        finally:
+            got.unlink(missing_ok=True)
+        if not keep:
+            if keep is None:  # a repo that decaf could not ask
+                log.download_failures += 1
+            else:  # no sources jar of this build
+                clean_answers += 1
+                log.other_build = log.other_build or (
+                    f"the -sources.jar in {redact_url(repo)} is the sources jar of another build on Maven Central"
+                )
+            continue
+        if placed is None:
+            clean_answers += 1
+            continue
         marker.write_text(redact_url(repo))
         # drop the file of an older decaf version: its name has no SHA-1, so this version never reads it (#180)
         drop_cached_sources(cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar")
-        return cached, redact_url(repo), False
+        return placed, redact_url(repo), False
     if verdicts is not None and repos and clean_answers == len(repos):
         verdicts.record_no_sources(gav_key, sha1, _redacted(repos))
     return None
@@ -726,7 +737,8 @@ def _download(
 ) -> Path | None:
     """One repo's sources download with transient retries.
 
-    Returns the cached path on success, None for a verified miss (non-200);
+    Returns the temporary file of the download beside cached on success (the caller moves it with _place),
+    None for a verified miss (non-200);
     raises DamagedDownload for a body that is no readable zip, and
     NetworkFailure after exhausted or aborted retries.
     """
@@ -776,18 +788,23 @@ def _download(
             if damage is not None:
                 os.unlink(tmp_name)
                 raise DamagedDownload(damage)
-            try:
-                os.replace(tmp_name, cached)
-            except OSError:
-                # Windows denies replace when another thread races the same jar (the same GAV and SHA-1);
-                # the winner's copy is identical, so drop ours and use it.
-                os.unlink(tmp_name)
-                if not cached.is_file():
-                    return None
-            return cached
+            return tmp_name
         if attempt < RETRY_ATTEMPTS and _wait_before_retry(net, attempt, retry_after):
             raise NetworkFailure(host, kind, f"{host}: {kind}")  # aborted: quiet give-up
     raise _exhausted(net, log, host, kind, "sources download")
+
+
+def _place(tmp: Path, cached: Path) -> Path | None:
+    """Move a checked download to its cache name; None when the move fails and no cache file exists."""
+    try:
+        os.replace(tmp, cached)
+    except OSError:
+        # Windows denies replace when another thread races the same jar (the same GAV and SHA-1);
+        # the winner's copy is identical, so drop ours and use it.
+        os.unlink(tmp)
+        if not cached.is_file():
+            return None
+    return cached
 
 
 def zip_damage(path: Path) -> str | None:

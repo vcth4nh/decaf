@@ -925,6 +925,56 @@ def test_group_sources_without_a_central_answer_are_a_network_fallback(
         assert seen.count("repo1.maven.org probe") == 2 * maven.RETRY_ATTEMPTS  # the check, then the next repository
 
 
+CACHED12 = f"com.example_lib_1.2_{BUILD}-sources.jar"
+
+
+def test_the_cache_name_waits_for_the_central_check(tmp_path: Path, sources_bytes):
+    """#189 review F1: another fetch thread of the same jar uses the cache name, so the check reads the temporary file."""
+    cache = tmp_path / "cache"
+    during: list[bool] = []
+    seen: list[str] = []
+    inner = _by_file({("group.test", "sources"): sources_bytes}, seen)  # Central has no such build
+
+    def handler(request):
+        if request.url.host == CENTRAL_HOST:
+            during.append((cache / CACHED12).exists())
+        return inner(request)
+
+    with make_client(handler) as c:
+        got = fetch_sources(GAV12, BUILD, [GROUP, MAVEN_CENTRAL], c, cache, verified=(GROUP,))
+    assert during == [False]
+    assert got == (cache / CACHED12, "https://group.test/m2", False)
+    assert got[0].read_bytes() == sources_bytes and not list(cache.glob("*.part"))
+
+
+@pytest.mark.parametrize(
+    "central",
+    [{"probe": OTHER, "sources_sha1": "SOURCES"}, {"probe": 503}],
+    ids=["drop", "no-decision"],
+)
+def test_a_dropped_download_keeps_the_cache_file_of_another_thread(tmp_path: Path, sources_bytes, central):
+    """#189 review F1: a drop deletes only its temporary file, not the hit that another thread wrote."""
+    if central.get("sources_sha1") == "SOURCES":
+        central["sources_sha1"] = hashlib.sha1(sources_bytes).hexdigest()
+    cache = tmp_path / "cache"
+    seen: list[str] = []
+    answers: dict[tuple[str, str], object] = {("group.test", "sources"): sources_bytes}
+    answers.update({(CENTRAL_HOST, kind.replace("_", " ")): a for kind, a in central.items()})
+    inner = _by_file(answers, seen)
+
+    def handler(request):
+        if _file_kind(request.url.path) == "sources":  # another thread ends its fetch now
+            (cache / CACHED12).write_bytes(b"the hit of another thread")
+            (cache / CACHED12).with_suffix(".repo").write_text(MAVEN_CENTRAL)
+        return inner(request)
+
+    with make_client(handler) as c:
+        assert fetch_sources(GAV12, BUILD, [GROUP, MAVEN_CENTRAL], c, cache, verified=(GROUP,)) is None
+    assert (cache / CACHED12).read_bytes() == b"the hit of another thread"
+    assert (cache / CACHED12).with_suffix(".repo").read_text() == MAVEN_CENTRAL
+    assert not list(cache.glob("*.part"))
+
+
 def test_sources_of_central_itself_get_no_check(make_jar, tmp_path: Path, sources_bytes):
     jar = _patched_jar(make_jar)
     seen: list[str] = []
