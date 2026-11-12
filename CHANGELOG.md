@@ -157,8 +157,10 @@
   `path` of a flagged, noted, unchecked, or stubbed file kept the
   `WEB-INF/classes/` part of a WAR class, and the file was at
   `out/src/com/x/S.java`. Now, with `--merge`, the path is the path of the
-  file below `out/src/`. In the mirror layout, the path stays the path below
-  the folder of the artifact.
+  file below `out/src/`. A `META-INF/versions/N/` copy of a class that the
+  merge did not write, because the base class has that path, keeps its
+  versions folder in the path. In the mirror layout, the path stays the path
+  below the folder of the artifact.
 
 ## [1.12.0] - 2026-10-31
 
