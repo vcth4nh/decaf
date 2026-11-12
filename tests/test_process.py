@@ -4972,7 +4972,7 @@ def test_the_engine_copy_refuses_the_entries_whose_name_leaves_the_archive(tmp_p
         ("p\\..\\..\\B.class", class_file("B")),
     ])
     copy, refused = _engine_copy(jar, tmp_path)
-    assert refused == ["../up.txt", "C:/dir/", "p\\..\\..\\B.class"]
+    assert refused == ["../up.txt", "p\\..\\..\\B.class"]  # a folder entry has no count
     assert _entries(copy) == [("p/A.class", class_file("p/A"))]
 
 
@@ -5909,3 +5909,32 @@ def test_a_row_with_only_a_module_info_and_a_refused_item_still_runs_the_engine(
     report, _ = process_artifact(Artifact(target, "a", kind), ctx)
     assert [c["classes"] for c in runner.calls][:1] == [["module-info.class"]]
     assert (report.outcome, report.refused, report.java_files, report.partial) == ("ok", 1, 1, True)
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_refuses_an_entry_with_the_zipfile_name_of_an_entry_that_fails_the_rule(tmp_path: Path,
+                                                                                                class_file):
+    """zipfile cuts the first name at the NUL: both entries have one zipfile name. decaf's own extraction skips the
+    name, so the copy refuses it too, and the row counts it."""
+    jar = _raw_zip(tmp_path / "app.jar", [(b"p/A.class", class_file("p/A")), (b"r.txt\0x", b"bad"),
+                                          (b"r.txt", b"good"), (b"s.txt", b"s")])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [names for _, names in runner.calls] == [["p/A.class", "s.txt"]]
+    written = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*") if p.is_file())
+    assert written == ["app.jar/p/A.java", "app.jar/s.txt"]
+    assert (report.refused, len(warns), report.partial) == (1, 1, True)
+
+
+def test_a_folder_entry_with_a_name_that_fails_the_rule_stays_out_with_no_count(tmp_path: Path):
+    """decaf never makes a file from a folder entry: only the file entry counts."""
+    from decaf.pipeline import _outside_names
+
+    jar = _zip(tmp_path / "a.jar", [("/abs/", b""), ("/abs/js/", b""), ("C:/dir/", b""), ("/abs/js/x.js", b"x"),
+                                    ("r.txt", b"r")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["/abs/js/x.js"] and _outside_names(jar) == ["/abs/js/x.js"]
+    assert _entries(copy) == [("r.txt", b"r")]

@@ -745,12 +745,17 @@ def _copy_name(info: zipfile.ZipInfo) -> str:
     return zipfile.ZipInfo(name).filename
 
 
+def _is_folder(info: zipfile.ZipInfo) -> bool:
+    """Is an entry a folder entry, by its raw name or by its zipfile name? decaf never makes a file from it."""
+    return info.orig_filename.endswith("/") or info.filename.endswith("/")
+
+
 def _outside_names(archive: Path) -> list[str]:
     """The raw names of the entries of an archive whose names do not stay inside (names_stay). No class is read: for
-    a row whose archive no engine reads."""
+    a row whose archive no engine reads. A folder entry has no count."""
     try:
         with zipfile.ZipFile(archive) as zf:
-            return [info.orig_filename for info in zf.infolist() if not names_stay(info)]
+            return [info.orig_filename for info in zf.infolist() if not (names_stay(info) or _is_folder(info))]
     except (zipfile.BadZipFile, OSError):
         return []
 
@@ -811,9 +816,10 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
     The copy has one entry for each name as zipfile writes it (_copy_name), and the last entry of a name decides, as
     in Java: an earlier entry is not read. The entries keep the order of the first entry of each name.
     An entry is refused when its raw name, its zipfile name, or its name in the copy does not stay inside, when its
-    name in the copy is too long for zipfile (_NAME_MAX), or when it is a class entry by one of its names and decaf
-    cannot read it or its data fails _safe_class. A folder entry (by its raw name or its name in the copy) goes in as
-    a folder, with no data. Another entry that decaf cannot read stays out with no count, and a large one goes through
+    zipfile name is the zipfile name of an entry whose names do not stay inside (as safe_extract_zip and
+    _discover_nested skip it), when its name in the copy is too long for zipfile (_NAME_MAX), or when it is a class
+    entry by one of its names and decaf cannot read it or its data fails _safe_class. A folder entry (by one of its
+    names) goes in as a folder, with no data; with a name that is refused, it stays out with no count. Another entry that decaf cannot read stays out with no count, and a large one goes through
     a part file, so a read error leaves no part of it in the copy. The copy is stored, with no extra field: each of its
     entries has one name. A nested archive inside the copy goes in as it is, with no test of its entries: decaf
     decompiles each nested archive in its own row, with the same tests.
@@ -826,17 +832,21 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
         zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) if jar is not None else contextlib.nullcontext()
     ) as out:
         last: dict[str, zipfile.ZipInfo] = {}
-        for info in zf.infolist():
+        infos = zf.infolist()
+        outside = {info.filename for info in infos if not names_stay(info)}
+        for info in infos:
             last[_copy_name(info)] = info  # a dict keeps the place of the first entry of a name
         try:
             for name, info in last.items():
                 raw = info.orig_filename
-                if not (names_stay(info) and stays_inside(name)) or _too_long(name):
-                    refused.append(raw)
+                is_folder = _is_folder(info) or name.endswith("/")
+                if info.filename in outside or not stays_inside(name) or _too_long(name):
+                    if not is_folder:  # decaf never makes a file from a folder entry: no count
+                        refused.append(raw)
                     continue
                 entry = zipfile.ZipInfo(name, info.date_time)
                 entry.external_attr, entry.create_system = info.external_attr, info.create_system
-                if raw.endswith("/") or name.endswith("/"):  # a folder in the input or in the copy: no data
+                if is_folder:  # a folder in the input or in the copy: no data
                     if out is not None:
                         _put(out, entry, b"")
                     continue
