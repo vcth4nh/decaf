@@ -169,6 +169,8 @@ def _status_line(r: ArtifactReport, mark: tuple[str, str] = _MARKS) -> str:
         problems = ""
         if r.missing_classes:
             problems += f", [yellow]{r.missing_classes} missing[/]"
+        refused = f", [yellow]{r.refused} refused[/]" if r.refused else ""
+        problems += refused
         if r.stubs:
             problems += f", [yellow]{len(r.stubs)} stubbed[/]"
         if r.flagged:
@@ -184,9 +186,9 @@ def _status_line(r: ArtifactReport, mark: tuple[str, str] = _MARKS) -> str:
                 detail += f", {decompiled} decompiled"
             detail += problems
         elif r.method == "extracted":
-            detail = "extracted sources jar"
+            detail = f"extracted sources jar{refused}"
         elif r.method is None and r.kind == "resource_only":
-            detail = f"resources only, {r.resources_copied} files"
+            detail = f"resources only, {r.resources_copied} files{refused}"
         else:
             detail = f"{safe(r.method)}, {r.classes} classes{problems}"
         glyph = "[yellow]![/]" if r.partial else f"[green]{mark[0]}[/]"
@@ -363,7 +365,7 @@ def render_artifact(console: Console, report: RunReport, patterns: Sequence[str]
             f"  classes={r.classes} java_files={r.java_files} "
             f"resources_copied={r.resources_copied} resources_skipped={r.resources_skipped} "
             f"missing_classes={r.missing_classes} sources_gap={r.sources_gap} "
-            f"stubbed={len(r.stubs)} collisions={len(r.collisions)}"
+            f"stubbed={len(r.stubs)} collisions={len(r.collisions)} refused={r.refused}"
         )
         if r.check:
             reasons = ", ".join(f"{k} {v}" for k, v in (r.check.get("unchecked_reasons") or {}).items() if v)

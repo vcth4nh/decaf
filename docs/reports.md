@@ -24,7 +24,9 @@ decaf report out --memory            # ten JVMs with the largest memory peaks
 - **Complete:** the artifact finished without missing classes, stubs,
   flagged source files, or a network failure that forced decompilation.
 - **Partial:** the artifact produced output but still has missing classes,
-  stubbed methods, flagged files, or a network failure that forced decompilation.
+  refused entries (`refused`: entries that decaf did not use because a name or
+  a class name can leave the output folder), stubbed methods, flagged files, or
+  a network failure that forced decompilation.
   It gets a yellow `!` in terminal output. The row of a network failure ends
   with `network fallback`.
 - **Failed:** the artifact could not be processed. The report groups failures

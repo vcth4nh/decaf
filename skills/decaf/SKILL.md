@@ -207,10 +207,12 @@ Typical flow:
 `totals` (`artifacts`, `ok`, `partial`, `failed`, `skipped`, `maven_sources`, `decompiled`,
 `extracted`, `java_files`, `collisions`, `flagged_files`, `noted_files`, `unchecked_files`,
 `network_misses`; `ok` includes the partial ones), and `artifacts[]` with `rel`, `kind`,
-`outcome` (`ok`, `failed`, `skipped`; partial is `ok` with `missing_classes` > 0, `stubs[]`,
+`outcome` (`ok`, `failed`, `skipped`; partial is `ok` with `missing_classes` > 0, `refused` > 0, `stubs[]`,
 `flagged[]`, or a `sources_miss` that starts with `network:`, which is a network miss:
 the lookup failed and the jar was decompiled), `method`, `gav`, `repo`, `resolved_by`,
-`sources_miss`, `sources_cached`, `classes`, `java_files`, `missing_classes`, `sources_gap`,
+`sources_miss`, `sources_cached`, `classes`, `java_files`, `missing_classes`, `refused` (the entries, class
+files, or nested archive names that decaf did not use because a name or a class name can leave the output folder),
+`sources_gap`,
 `collisions`, `failure`, `attempts[]` (`engine`, `level` = `archive`, `class`, or `batch`,
 `returncode`, `timed_out`, `out_of_memory`, `stderr_tail`, `peak_rss_mb`), `check`
 (`checked`, `flagged`, `noted`, `unchecked`, `unchecked_reasons`; `null` when no check ran),

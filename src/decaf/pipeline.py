@@ -167,9 +167,11 @@ class ArtifactReport:
 
     @property
     def partial(self) -> bool:
-        """ok but degraded: engine holes, stubs, flagged files, or decompiled sources-less due to network."""
+        """ok but degraded: engine holes, refused entries, stubs, flagged files, or decompiled sources-less due to
+        network."""
         return self.outcome == "ok" and (
             self.missing_classes > 0
+            or self.refused > 0
             or bool(self.stubs)
             or bool(self.flagged)
             or (self.sources_miss or "").startswith("network:")

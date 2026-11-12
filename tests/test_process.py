@@ -5226,3 +5226,47 @@ def test_an_archive_whose_layout_is_not_plain_goes_to_the_engines_as_a_copy(tmp_
     ((target, names),) = runner.calls
     assert target != jar and target.name == "app.jar" and names == ["p/A.class"] and _plain(target)
     assert (warns, report.refused, report.classes, report.missing_classes) == ([], 0, 1, 0)
+
+
+# --- a refused item leaves a trace in the row ---
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("as_folder", [False, True])
+def test_a_refused_inner_class_makes_the_row_partial(tmp_path: Path, class_file, as_folder):
+    """A class file of an inner class that does not parse is no expected class, so no class is missing."""
+    files = {"p/A.class": class_file("p/A"), "p/A$1.class": b"no class"}
+    if as_folder:
+        source, kind, runner = _tree(tmp_path / "classes", files), ArtifactKind.CLASS_TREE, _folder_runner()
+    else:
+        source, kind, runner = _zip(tmp_path / "app.jar", list(files.items())), ArtifactKind.ARCHIVE, _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(source, "app", kind), ctx)
+    assert (report.outcome, report.classes, report.missing_classes, report.refused) == ("ok", 1, 0, 1)
+    assert report.partial and len(warns) == 1
+
+
+@pytest.mark.class_names
+def test_a_maven_row_with_a_gap_counts_its_refused_class(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "lib-1.2.jar", [("com/x/A.class", class_file("com/x/A")), ("com/x/B.class", class_file("../B"))])
+    sources = _zip(tmp_path / "lib-1.2-sources.jar", [("com/x/A.java", b"// upstream\nclass A {}")])
+    runner = writing_runner({"vineflower": {"com/x/B.java": "// engine\nclass B {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.sources_gap, report.missing_classes, report.refused) == ("maven", 1, 1, 1)
+    assert runner.calls == []  # the retry tree of the gap lacks the refused class file: no engine run
+    assert report.partial and len(warns) == 1 and warns[0].startswith("lib-1.2.jar: ")
+
+
+def test_the_row_line_shows_the_refused_count(tmp_path: Path):
+    from decaf.pipeline import ArtifactReport
+    from decaf.report_view import _status_line
+
+    r = ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="vineflower", classes=3, missing_classes=1,
+                       refused=2)
+    assert r.partial and "1 missing[/], [yellow]2 refused" in _status_line(r)
+    assert ArtifactReport(rel="a.jar", kind="archive", outcome="ok", refused=1).partial
