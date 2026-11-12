@@ -1949,6 +1949,54 @@ def test_run_batches_ready_smalls_into_one_jvm(fake_env, make_jar, tmp_path):
     assert (tmp_path / "out/src/com/s0/A.java").is_file()
 
 
+def test_a_batch_member_reads_its_class_files_in_a_worker(fake_env, make_jar, tmp_path, monkeypatch):
+    """The scheduler forms batches by name only: a crafted class file cannot stop it (#206). The worker of the batch
+    reads the class files, so the class A$, which is top-level for the JVM, counts, and its file goes to its member."""
+    from test_check import _class_with
+
+    s0 = make_jar("s0.jar", {"com/s0/A.class": _class_with("com/s0/A"), "com/s0/A$.class": _class_with("com/s0/A$")})
+    s1 = make_jar("s1.jar", {"com/s1/B.class": _class_with("com/s1/B")})
+    input_dir = tmp_path / "in"
+    make_jar("big.jar", {**{f"com/big/C{i}.class": b"x" for i in range(900)},
+                         "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()}, base=input_dir)
+    readers: list[threading.Thread] = []
+    lists_itself = check.lists_itself
+    monkeypatch.setattr(check, "lists_itself", lambda data: (readers.append(threading.current_thread()), lists_itself(data))[1])
+    all_queued = threading.Event()
+    queued = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    batches: list[list[str]] = []
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        for t in targets:
+            with zipfile.ZipFile(t) as zf:
+                for entry in zf.namelist():
+                    (Path(dest) / entry).with_suffix(".java").parent.mkdir(parents=True, exist_ok=True)
+                    (Path(dest) / entry).with_suffix(".java").write_text("class X {}\n")
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, jobs=1, cpus=1),
+                 runner=gated_solo, batch_runner=batch, on_event=on_event)
+    assert batches == [["s0.jar", "s1.jar"]]
+    rows = {r.rel: r for r in report.artifacts}
+    assert (rows["big.jar!/lib/s0.jar"].classes, rows["big.jar!/lib/s0.jar"].java_files) == (2, 2)
+    assert (rows["big.jar!/lib/s1.jar"].classes, rows["big.jar!/lib/s1.jar"].java_files) == (1, 1)
+    assert (tmp_path / "out/src/com/s0/A$.java").is_file()
+    assert readers and threading.main_thread() not in readers
+
+
 def test_a_maven_row_with_a_gap_runs_alone_not_in_a_batch(fake_env, make_jar, tmp_path):
     """#180: a batch would decompile the whole jar; the gap classes run as class retries."""
     sources = make_jar("s-sources.jar", {"com/s/A.java": "// upstream\nclass A {}", "com/s/D.java": "// upstream\nclass D {}"})

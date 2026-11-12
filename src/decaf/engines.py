@@ -690,12 +690,20 @@ def _run_per_class(
     failed (#101).
 
     CFR and Procyon take class files as positional arguments, and an inner class rides along with
-    its outer class (#106). A JVM that stops with an error, out of memory, or at the timeout can
-    leave classes without a file, so each class of its group then gets a JVM of its own, in the
-    time that is left. The timeout is for the whole folder (#113).
+    its outer class (#106), but not a class that is top-level for the JVM (#206). A JVM that stops
+    with an error, out of memory, or at the timeout can leave classes without a file, so each class
+    of its group then gets a JVM of its own, in the time that is left. The timeout is for the whole
+    folder (#113).
     """
+    from . import check, pipeline  # here, not at the top: both modules import this one
+
     files = {f.relative_to(root).as_posix()[: -len(".class")]: f for f in sorted(root.rglob("*.class"))}
-    tops = [(stem, f) for stem, f in files.items() if outer_stem(stem, files) is None]
+    # A class that does not list itself in its InnerClasses attribute, for example the module class Foo$ of a Scala
+    # object, is a top-level class for the JVM: no outer class nests it, so it needs its own argument (#206).
+    named = [stem + ".class" for stem in files if outer_stem(stem, files) is not None]
+    unnested = {n[: -len(".class")] for n, data in pipeline._read_classes(root, named)
+                if check.lists_itself(data) is False}
+    tops = [(stem, f) for stem, f in files.items() if outer_stem(stem, files) is None or stem in unnested]
     deadline = time.monotonic() + timeout
     results: list[EngineResult] = []
     final: list[EngineResult] = []  # the results that decide the exit code: a failed group JVM does not

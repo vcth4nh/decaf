@@ -519,15 +519,23 @@ def _source_file(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes
     return pool[0].get(int.from_bytes(data[at:at + 2], "big")) if at is not None else None
 
 
+_WALK_MAX = 100_000  # fields, methods, and their attributes: real classes have far fewer (#206)
+
+
 def _class_attribute(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int, name: bytes) -> int | None:
     """The offset of the data of a class attribute, or None when the class has no such attribute; pos is the
-    offset of fields_count. A cut file raises ValueError."""
+    offset of fields_count. A cut file raises ValueError, and so does a file with more than _WALK_MAX fields,
+    methods, and attributes of them: a crafted file can make the walk take seconds."""
     utf8 = pool[0]
     u2 = lambda at: int.from_bytes(data[at:at + 2], "big")  # noqa: E731
+    steps = 0
     for _ in range(2):  # the fields, then the methods: skip each with its attributes
         count, pos = u2(pos), pos + 2
         for _ in range(count):
             attributes, pos = u2(pos + 6), pos + 8
+            steps += 1 + attributes
+            if steps > _WALK_MAX:
+                raise ValueError("too many members")
             for _ in range(attributes):
                 pos += 6 + int.from_bytes(data[pos + 2:pos + 6], "big")
     if pos + 2 > len(data):
@@ -552,7 +560,9 @@ def lists_itself(data: bytes) -> bool | None:
         return None
     if b"InnerClasses" not in data:
         return False
-    this_class = int.from_bytes(data[pool[2] + 2:pool[2] + 4], "big")
+    this_class = _class_at(pool, data, pool[2] + 2)
+    if this_class is None:  # this_class names no Class entry: the file does not parse
+        return None
     start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
     count = int.from_bytes(data[start - 2:start], "big")
     try:
@@ -562,7 +572,8 @@ def lists_itself(data: bytes) -> bool | None:
     if at is None:  # the name is only a constant, for example after a tool removed the attribute
         return False
     entries = int.from_bytes(data[at:at + 2], "big")
-    return any(int.from_bytes(data[at + 2 + 8 * k:at + 4 + 8 * k], "big") == this_class for k in range(entries))
+    # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
+    return any(_class_at(pool, data, at + 2 + 8 * k) == this_class for k in range(entries))
 
 
 SOURCE = Path(__file__).with_name("checker") / "Checker.java"

@@ -505,7 +505,7 @@ def _class_stem(entry: str) -> str:
     return normalize_java_rel(entry)[: -len(".class")]
 
 
-def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
+def _stems_and_claims(source: Path, read: bool = True) -> tuple[set[str], set[str]]:
     """One pass over the class entries: (top-level class stems, claims).
 
     Claims are the other source rels this archive could yield: module-info/package-info,
@@ -513,6 +513,11 @@ def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
     They attribute batch output back to its member and keep claimants
     from sharing a batch, but never join expectations (#75): such a file is
     copied when an engine emits it, exactly like a solo run — never retried.
+
+    A class with an outer class by name that does not list itself in its InnerClasses attribute, for example the
+    module class Foo$ of a Scala object, is a top-level class for the JVM: no file of another class holds it, so it
+    is expected (#206). A class file that decaf cannot read stays an inner class, as in _read_unnested. With
+    read=False, the rule is by name only: no class file is read, and the union of the sets is the same.
     """
     if source.is_dir():
         entries = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
@@ -531,7 +536,10 @@ def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
         else:
             stems.add(_class_stem(e))
     inner = {s for s in stems if outer_stem(s, stems) is not None}
-    return stems - inner, claims | inner
+    names = [e for e in entries if _class_stem(e) in inner] if read else []
+    tops = {_class_stem(name) for name, data in _read_classes(source, names)
+            if check.lists_itself(data) is False}  # a multi-release class: one entry is enough
+    return (stems - inner) | tops, claims | (inner - tops)
 
 
 def expected_class_stems(source: Path) -> set[str]:
@@ -581,12 +589,12 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
                 written.add(pkg.replace(".", "/") + "/" + p.name)
         rest = {s for s in rest if not any(s + suffix in written for suffix in maven.MAVEN_SOURCE_SUFFIXES)}
     covered: set[str] = set()
+    unnamed: set[str] = set()  # classes with an outer class by name whose class file names no source file (#206)
     try:
         with zipfile.ZipFile(binary) as zf:
             entry: dict[str, str] = {}  # stem -> the entry to read: the base entry, else a META-INF/versions/N entry
-            for name in zf.namelist():
-                if not name.endswith(".class"):
-                    continue
+            names = [n for n in zf.namelist() if n.endswith(".class")]
+            for name in names:
                 stem = _class_stem(name)
                 if stem in rest and (stem not in entry or not _strip_container(name).startswith("META-INF/versions/")):
                     entry[stem] = name
@@ -602,9 +610,36 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
                 # A set lookup only: the attribute of a crafted class can hold a path (../A.java).
                 if source is not None and (package + "/" + source if package else source) in written:
                     covered.add(stem)
+                elif source is None and data is not None and outer_stem(stem, expected) is not None:
+                    unnamed.add(stem)
+            gap = rest - covered
+            # A class that is top-level for the JVM, such as a Kotlin X$$Lambda$N, often names no source file. Its
+            # source is then in the file of its outer class by name, when a class of that family names it. Generated
+            # code that no class names, such as undertow's HttpRequestParser$$generated, stays a gap (#206).
+            outer = {s: outer_stem(s, expected) for s in unnamed}
+            wanted = {o for o in outer.values() if o not in gap}
+            refs: dict[str, dict[str, set[str]]] = {}  # family -> stem of a class of it -> the classes that it names
+            for name in names:
+                stem = _class_stem(name)
+                family = outer_stem(stem, expected) or stem
+                if family not in wanted:
+                    continue
+                try:
+                    with zf.open(name) as f:
+                        data = _bounded(f)
+                except ZIP_ERRORS:
+                    continue
+                if data is not None:
+                    refs.setdefault(family, {}).setdefault(stem, set()).update(check.package_refs(data))
     except ZIP_ERRORS:
         return rest
-    return rest - covered
+    named = {  # the class itself and the classes below it are no proof
+        s for s, o in outer.items() if o in wanted and any(
+            s.rpartition("/")[2] in found
+            for m, found in refs.get(o, {}).items() if m != s and not m.startswith(s + "$")
+        )
+    }
+    return gap - named
 
 
 def _strip_container(rel: str) -> str:
@@ -1004,8 +1039,8 @@ def _between(key: str, family: str) -> list[str]:
 def _read_unnested(source: Path, keys: set[str], held: _Held) -> None:
     """Note for each key whether its class file lists itself in its InnerClasses attribute. A class that does not
     is a top-level class for the JVM, for example the module class Foo$ of a Scala object, so decaf takes no file
-    of another class to hold it. CFR and Procyon get only the outer classes in a class retry (#106), so they write
-    no file of it (#159)."""
+    of another class to hold it (#159). CFR and Procyon get its class file as an argument of its own, so they write
+    a file of it (#206)."""
     if held.names is None:
         held.names = {}
         for names in _family_entries(source).values():
@@ -1429,6 +1464,8 @@ def _attempt(
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
     """Copy the .class files (plus their inner classes) for missing stems into a temp tree.
 
+    A missing stem brings the family of its top-level class by name: a missing Foo$ that is top-level for the
+    JVM brings Foo and its inner classes too, so the engines have each class file that they can need (#206).
     Each class goes in once: its base class, or the class of its lowest META-INF/versions folder
     when it has no base class. With two versions of a class in one tree, an engine can write the
     body of one version as the other, or only one of them (#107).
@@ -1452,10 +1489,11 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
         number = rel.split("/", 3)[2]
         return int(number) if number.isdigit() else -1  # the JVM reads no other folder
 
+    families = {outer_stem(s, stems) or s for s in missing}
     lowest: dict[str, int] = {}
     for n in names:
         t, v = top(n), version(n)
-        if t in missing and v >= 0:
+        if t in families and v >= 0:
             lowest[t] = min(lowest.get(t, v), v)
 
     def wanted(entry: str) -> bool:
@@ -1699,7 +1737,13 @@ def _retry_missing_classes(
 def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport) -> None:
     gap = ctx.maven_gaps.pop(artifact.rel, None)
     if gap is not None:  # a Maven hit whose sources lack classes: the engines write them (#180)
-        _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held())
+        # The retry tree of a gap class has the family of its outer class by name (#206), so an engine can also
+        # write a class that the sources jar wrote. Such a file goes, as a file of a class that an earlier output
+        # wrote (#107): only the gap classes and the classes below them by name get engine files.
+        stems, claims = _stems_and_claims(artifact.path, read=False)  # the union is the same without the reads
+        published = {s for s in stems | claims
+                     if s not in gap and not any(s[:i] in gap for i in range(len(s)) if s[i] == "$")}
+        _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held(written=published))
         return
     source = target if target.is_dir() else artifact.path
     expected = expected_class_stems(source)
@@ -2083,6 +2127,8 @@ def _decompile_batch(
     """
     if engines.PROCESSES.closed:
         return [], [(a, t, r) for a, t, r, _, _ in members]
+    # The scheduler formed the batch by name only; the union of the sets is the same with the class files (#206)
+    members = [(a, t, r, *_stems_and_claims(t)) for a, t, r, _, _ in members]
     name = ctx.chain[0]
     heap = ctx.memory_plan.heap_mb(1)  # a batch JVM takes one slot
     batch_id = next(ctx.batch_ids)
@@ -2590,8 +2636,9 @@ def run(
                                         # CFR, Procyon, and JD get the classes of WEB-INF/classes/ apart (#170, #173)
                                         and not (chain[0] in _ROOTED_ENGINES and _container_classes(target) is not None)
                                     ):
+                                        # by name only: no class file is read in this thread (#206)
                                         ready_small.append(
-                                            (a, target, report, *_stems_and_claims(target))
+                                            (a, target, report, *_stems_and_claims(target, read=False))
                                         )
                                     else:
                                         heappush(ready, (-a.classes, next(seq), a, target, report))

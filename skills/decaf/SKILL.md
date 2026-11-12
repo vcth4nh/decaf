@@ -120,7 +120,9 @@ Typical flow:
   JSON do. When stdout is not a terminal, lines wrap at 80 columns, and a long path can
   break in two: use the path you gave `-o`.
 - **Counts.** `N classes` counts top-level classes. Inner and anonymous classes (`Outer$1`,
-  `Outer$Config`) are nested inside `Outer.java`; there is no `Outer$1.java`. `java_files`
+  `Outer$Config`) are nested inside `Outer.java`; there is no `Outer$1.java`. A class that is
+  top-level for the JVM counts also when its name has a `$`, for example the module class `Foo$`
+  of a Scala object, and the engines write a file of its own for it (`Foo$.java`). `java_files`
   also counts `package-info.java` files, so it can exceed `classes`. For Maven sources,
   `classes` counts the top-level classes of the binary too; `sources_gap` counts the classes
   that the sources jar lacks, the engines write them, and `missing_classes` counts the ones

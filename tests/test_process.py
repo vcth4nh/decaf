@@ -842,6 +842,202 @@ def test_stems_and_claims_keep_top_level_dollar_classes(make_jar, tmp_path):
     assert claims == {"com/a/A$1", "com/a/$Util$In"}
 
 
+def _named_inner_classes() -> dict[str, bytes]:
+    """Classes with an outer class by name. Foo$ does not list itself in its InnerClasses attribute, as the module
+    class of a Scala object: it is a top-level class for the JVM. A$1 lists itself. The file of Cut$1 is cut, and
+    Big$1 is above the size limit of a class file (the test sets the limit): decaf cannot read them."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    inner = _class_with_inner_classes("com/a/A$1", (("com/a/A$1", "com/a/A"),))
+    return {
+        "com/a/A.class": _class_with("com/a/A"), "com/a/A$1.class": inner,
+        "com/a/Foo.class": _class_with("com/a/Foo"), "com/a/Foo$.class": _class_with("com/a/Foo$"),
+        "com/a/Cut.class": _class_with("com/a/Cut"), "com/a/Cut$1.class": _class_with("com/a/Cut$1")[:12],
+        "com/a/Big.class": _class_with("com/a/Big"), "com/a/Big$1.class": _class_with("com/a/Big$1") + bytes(100),
+        "com/a/package-info.class": _class_with("com/a/package-info"), "module-info.class": _class_with("module-info"),
+    }
+
+
+@pytest.mark.parametrize("folder", [False, True])
+def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar, tmp_path, monkeypatch, folder):
+    """Foo$ does not list itself, so CFR and Procyon write it only from its own class file, and it is expected. Before,
+    it was a claim, so a lost Foo$ was never missing, retried, or counted (#206). A class that lists itself, and a
+    class file that decaf cannot read, stay claims, as module-info and package-info do."""
+    from decaf import pipeline
+
+    entries = _named_inner_classes()
+    if folder:
+        source = tmp_path / "classes"
+        for name, data in entries.items():
+            (source / name).parent.mkdir(parents=True, exist_ok=True)
+            (source / name).write_bytes(data)
+    else:
+        source = make_jar("t.jar", entries)
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(entries["com/a/Big$1.class"]) - 1)
+    stems, claims = pipeline._stems_and_claims(source)
+    assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big"}
+    assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info"}
+
+
+def test_stems_and_claims_by_name_only_read_no_class_file(make_jar, monkeypatch):
+    """The scheduler forms batches with the rule by name only; the union of the sets is the same (#206)."""
+    from test_check import _class_with
+
+    from decaf.pipeline import _stems_and_claims
+
+    jar = make_jar("t.jar", {"p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$")})
+    assert _stems_and_claims(jar) == ({"p/Foo", "p/Foo$"}, set())
+    monkeypatch.setattr(check, "lists_itself", lambda data: pytest.fail("a class file was read"))
+    assert _stems_and_claims(jar, read=False) == ({"p/Foo"}, {"p/Foo$"})
+
+
+def test_stems_and_claims_keep_an_inner_class_whose_entry_is_damaged(make_damaged_jar):
+    from test_check import _class_with
+
+    from decaf.pipeline import _stems_and_claims
+
+    jar = make_damaged_jar("t.jar", {"p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$")},
+                           damaged=("p/Foo$.class",))
+    assert _stems_and_claims(jar) == ({"p/Foo"}, {"p/Foo$"})
+
+
+@pytest.mark.parametrize("top", ["p/Foo$.class", "META-INF/versions/9/p/Foo$.class"])
+def test_stems_and_claims_expect_a_multi_release_class_when_one_entry_is_top_level_for_the_jvm(make_jar, top):
+    """One entry of Foo$ lists itself, and the other entry does not: Foo$ is expected (#206)."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    from decaf.pipeline import _stems_and_claims
+
+    inner = _class_with_inner_classes("p/Foo$", (("p/Foo$", "p/Foo"),))
+    jar = make_jar("mr.jar", {
+        "p/Foo.class": _class_with("p/Foo"),
+        **{name: _class_with("p/Foo$") if name == top else inner
+           for name in ("p/Foo$.class", "META-INF/versions/9/p/Foo$.class")},
+        "p/Bar.class": _class_with("p/Bar"),
+        "META-INF/versions/9/p/Bar$1.class": _class_with_inner_classes("p/Bar$1", (("p/Bar$1", None),)),
+    })
+    assert _stems_and_claims(jar) == ({"p/Foo", "p/Foo$", "p/Bar"}, {"p/Bar$1"})
+
+
+@pytest.mark.parametrize("missing, expected", [
+    ({"p/Foo$"}, ["p/Foo$.class", "p/Foo$1.class", "p/Foo.class"]),  # the engines get every file that they can need
+    ({"p/Foo"}, ["p/Foo$.class", "p/Foo$1.class", "p/Foo.class"]),
+    ({"p/Bar"}, ["p/Bar.class"]),
+    ({"p/Foo$", "p/V$"}, ["META-INF/versions/11/p/V$.class", "META-INF/versions/11/p/V.class", "p/Foo$.class",
+                          "p/Foo$1.class", "p/Foo.class"]),  # the lowest version of each family by name (#107)
+])
+def test_a_class_retry_of_a_class_that_is_top_level_for_the_jvm_gets_its_family_by_name(
+    make_jar, tmp_path: Path, missing, expected,
+):
+    """A missing Foo$ brings the class files of the name family of Foo into the retry tree (#206)."""
+    from decaf.pipeline import _extract_failed_classes
+
+    jar = make_jar("t.jar", {n: b"c" for n in (
+        "p/Foo.class", "p/Foo$.class", "p/Foo$1.class", "p/Bar.class", "META-INF/versions/9/p/Foo$.class",
+        "META-INF/versions/11/p/V.class", "META-INF/versions/11/p/V$.class", "META-INF/versions/17/p/V$.class",
+    )})
+    out = _extract_failed_classes(jar, missing, make_ctx(tmp_path, writing_runner({})))
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*.class")) == expected
+
+
+def _foo_folder(tmp_path: Path) -> Path:
+    """A class folder of p/Foo with its inner class Foo$1, the class Foo$ that is top-level for the JVM, and p/Bar."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    root = tmp_path / "in"
+    (root / "p").mkdir(parents=True)
+    for name in ("Foo", "Foo$", "Bar"):
+        (root / f"p/{name}.class").write_bytes(_class_with(f"p/{name}"))
+    (root / "p/Foo$1.class").write_bytes(_class_with_inner_classes("p/Foo$1", (("p/Foo$1", None),)))
+    return root
+
+
+def _cfr_like(monkeypatch, skip: dict[str, set[str]] | None = None) -> list[list[str]]:
+    """CFR and Procyon on class files: a file for each class file that they get as an argument, at the path of its
+    class name; an inner class rides along. skip: the classes of which an engine writes no file. Returns the
+    names of the class files of each JVM."""
+    from decaf import engines
+
+    seen: list[list[str]] = []
+
+    def build(spec, jar_path, targets, dest, **kw):
+        return [spec.name, str(dest), *map(str, targets)]
+
+    def run(spec, cmd, timeout, on_stderr_line):
+        seen.append(sorted(Path(t).name for t in cmd[2:]))
+        for t in cmd[2:]:
+            name = check.class_name(Path(t).read_bytes())
+            if name not in (skip or {}).get(cmd[0], ()):
+                (Path(cmd[1]) / f"{name}.java").parent.mkdir(parents=True, exist_ok=True)
+                (Path(cmd[1]) / f"{name}.java").write_text(f"class X {{}} // {cmd[0]}")
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    monkeypatch.setattr(engines, "build_batch_command", build)
+    monkeypatch.setattr(engines, "_exec_command", run)
+    return seen
+
+
+def test_a_class_folder_gives_its_own_file_to_a_class_that_is_top_level_for_the_jvm(tmp_path: Path, monkeypatch):
+    """Before, CFR got no class file of Foo$, so no file of it came out, and the row had 2 classes and no missing
+    class (#206)."""
+    from decaf import engines
+
+    seen = _cfr_like(monkeypatch)
+    ctx = make_ctx(tmp_path, engines.run_engine, engine="cfr", fallback=False)
+    report, _ = process_artifact(Artifact(_foo_folder(tmp_path), "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert seen == [["Bar.class", "Foo$.class", "Foo.class"]]
+    assert sorted(p.name for p in (tmp_path / "out/src/p").iterdir()) == ["Bar.java", "Foo$.java", "Foo.java"]
+    assert (report.classes, report.java_files, report.missing_classes) == (3, 3, 0)
+
+
+@pytest.mark.parametrize("fallback, missing", [(False, 1), (True, 0)])
+def test_a_class_that_is_top_level_for_the_jvm_and_has_no_file_is_missing_and_retried(
+    tmp_path: Path, monkeypatch, fallback, missing,
+):
+    """CFR writes no file of Foo$, as JD does for some such classes. The row shows it as missing, and a class retry of
+    the next engine gets the class files of the family of Foo. Before, the loss had no sign (#206)."""
+    from decaf import engines
+
+    seen = _cfr_like(monkeypatch, skip={"cfr": {"p/Foo$"}})
+    ctx = make_ctx(tmp_path, engines.run_engine, engine="cfr", fallback=fallback)
+    ctx.chain = ["cfr", "procyon"] if fallback else ["cfr"]
+    report, _ = process_artifact(Artifact(_foo_folder(tmp_path), "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert (report.classes, report.java_files, report.missing_classes) == (3, 3 - missing, missing)
+    assert [(a.engine, a.level) for a in report.attempts] == [("cfr", "archive"), ("procyon", "class")][: 1 + fallback]
+    assert seen[1:] == ([["Foo$.class", "Foo.class"]] if fallback else [])
+    if fallback:
+        assert (tmp_path / "out/src/p/Foo$.java").read_text() == "class X {} // procyon"
+
+
+@pytest.mark.parametrize("writes, missing", [(True, 0), (False, 1)])
+def test_a_batch_member_counts_its_class_that_is_top_level_for_the_jvm(make_jar, tmp_path, writes, missing):
+    """The batch gives the file of Foo$ to its member, and the row counts Foo$ (#206)."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    from decaf.pipeline import _decompile_batch
+
+    def batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        for t in targets:
+            with zipfile.ZipFile(t) as zf:
+                for entry in zf.namelist():
+                    if check.lists_itself(zf.read(entry)) or (entry == "p/Foo$.class" and not writes):
+                        continue  # an inner class rides with its outer class
+                    (Path(dest) / entry).with_suffix(".java").parent.mkdir(parents=True, exist_ok=True)
+                    (Path(dest) / entry).with_suffix(".java").write_text("class X {}")
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    m1 = _member(make_jar, "a.jar", {
+        "p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$"),
+        "p/Foo$1.class": _class_with_inner_classes("p/Foo$1", (("p/Foo$1", None),)),
+    })
+    m2 = _member(make_jar, "b.jar", {"q/B.class": _class_with("q/B")})
+    done, requeue = _decompile_batch([m1, m2], _batch_ctx(tmp_path, batch))
+    assert requeue == []
+    assert [(r.rel, r.classes, r.java_files, r.missing_classes) for r in done] == [
+        ("a.jar", 2, 2 - missing, missing), ("b.jar", 1, 1, 0),
+    ]
+
+
 def test_decompile_batch_keeps_dollar_classes_with_their_member(make_jar, tmp_path):
     """#106: the split gives a $ class to the member that has its class file, and drops none."""
     from decaf.pipeline import MirrorWriter, _decompile_batch
@@ -1298,6 +1494,67 @@ def test_sources_gap_takes_no_package_from_a_cut_head(make_jar, tmp_path: Path):
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"Buffer", "okio/Buffer"}
 
 
+_K, _KL = "com/x/K", "com/x/K$$Lambda$0"
+
+
+def _k_classes(class_file, lambda_file: str | None, namer: str | None) -> dict[str, bytes]:
+    """K and its lambda K$$Lambda$0, a class that is top-level for the JVM. namer: the class whose constant pool has
+    a Class entry of the lambda: K, the inner class K$1, or the class K$$Lambda$0$1 below the lambda."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    classes = {
+        f"{_K}.class": _class_with(_K, interfaces=(_KL,)) if namer == "K" else _class_with(_K),
+        f"{_KL}.class": class_file(_KL, lambda_file),
+    }
+    if namer == "K$1":
+        classes[f"{_K}$1.class"] = _class_with_inner_classes(f"{_K}$1", ((f"{_K}$1", _K), (_KL, None)))
+    if namer == "K$$Lambda$0$1":
+        classes[f"{_KL}$1.class"] = _class_with_inner_classes(f"{_KL}$1", ((f"{_KL}$1", _KL),))
+    return classes
+
+
+@pytest.mark.parametrize("sources, lambda_file, namer, gap", [
+    ({"com/x/K.kt": "class K"}, None, "K", set()),  # the file of the outer class K holds the lambda
+    ({"com/x/K.kt": "class K"}, None, "K$1", set()),  # an inner class of K names it
+    ({"com/x/K.kt": "class K"}, None, None, {_KL}),  # no class of the family of K names it, for example generated code
+    ({"com/x/K.kt": "class K"}, None, "K$$Lambda$0$1", {_KL}),  # a class below the lambda is no proof
+    ({}, None, "K", {_K, _KL}),  # the outer class is a gap: the lambda too
+    ({"com/x/K.kt": "class K"}, "Other.kt", "K", {_KL}),  # its attribute names an absent file: a gap
+    ({"com/x/K.kt": "class K", "com/x/Other.kt": "fun o() {}"}, "Other.kt", None, set()),
+])
+def test_sources_gap_covers_a_class_without_a_source_file_attribute_by_its_outer_class(
+    make_jar, class_file, tmp_path: Path, sources, lambda_file, namer, gap,
+):
+    """The class K$$Lambda$0 is top-level for the JVM, so it is expected (#206). Its class file names no source file,
+    so the file of its outer class by name covers it, when the sources have that file and a class of the family of
+    K names the lambda. A class with a SourceFile attribute keeps the rules of #180."""
+    jar = make_jar("lib.jar", _k_classes(class_file, lambda_file, namer))
+    tree = _files(tmp_path / "tree", sources)
+    expected = expected_class_stems(jar)
+    assert expected == {_K, _KL}
+    assert _sources_gap(jar, expected, tree) == gap
+
+
+def test_sources_gap_covers_a_scala_module_class_by_its_source_file(make_jar, class_file, tmp_path: Path):
+    """The module class Foo$ of a Scala object names Foo.scala, as Foo does (#206, the rule of #180)."""
+    jar = make_jar("lib.jar", {
+        "s/Foo.class": class_file("s/Foo", "Foo.scala"), "s/Foo$.class": class_file("s/Foo$", "Foo.scala"),
+    })
+    tree = _files(tmp_path / "tree", {"s/Foo.scala": "object Foo"})
+    assert _sources_gap(jar, expected_class_stems(jar), tree) == set()
+
+
+def test_sources_gap_keeps_a_class_without_an_outer_file_rule_when_its_entry_cannot_be_read(
+    make_damaged_jar, class_file, tmp_path: Path,
+):
+    """The entry of K$$Lambda$0 is damaged, so decaf does not know that it names no source file: a gap (#206)."""
+    jar = make_damaged_jar("lib.jar", {"com/x/K.class": class_file("com/x/K", "K.kt") * 4,
+                                       "com/x/K$$Lambda$0.class": class_file("com/x/K$$Lambda$0") * 4},
+                           damaged=("com/x/K$$Lambda$0.class",))
+    tree = _files(tmp_path / "tree", {"com/x/K.kt": "class K"})
+    assert _sources_gap(jar, {"com/x/K", "com/x/K$$Lambda$0"}, tree) == {"com/x/K$$Lambda$0"}
+
+
 def test_declared_package_reads_one_package_line(tmp_path: Path):
     p = tmp_path / "A.java"
     p.write_text("package com.x$y;\nclass A {}")
@@ -1330,6 +1587,62 @@ def test_maven_sources_that_lack_a_class_get_it_from_the_engines(make_jar, tmp_p
     assert not report.partial and report.sources_miss is None
     assert "upstream" in (tmp_path / "out/src/com/x/A.java").read_text()
     assert "engine" in (tmp_path / "out/src/com/x/B.java").read_text()
+
+
+def _foo_gen_jar(make_jar, class_file) -> tuple[Path, Path]:
+    """p/Foo and p/Foo$$Gen, a class that is top-level for the JVM; the sources jar has p/Foo.java only."""
+    jar = make_jar("lib-1.2.jar", {
+        "p/Foo.class": class_file("p/Foo", "Foo.java"), "p/Foo$$Gen.class": class_file("p/Foo$$Gen", "Foo$$Gen.java"),
+    })
+    return jar, make_jar("lib-1.2-sources.jar", {"p/Foo.java": "// upstream\nclass Foo {}"})
+
+
+def every_class_runner(text: str = "// engine"):
+    """Fake engine: one file for each class file of a folder target, at the path of its class name."""
+    sent: list[list[str]] = []
+
+    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        names = sorted(check.class_name(p.read_bytes()) for p in Path(target).rglob("*.class"))
+        sent.append(names)
+        for name in names:
+            (Path(dest) / f"{name}.java").parent.mkdir(parents=True, exist_ok=True)
+            (Path(dest) / f"{name}.java").write_text(f"{text} {spec.name}\nclass X {{}}\n")
+        return EngineResult(spec.name, 0, False, len(names), "")
+
+    _run.sent = sent
+    return _run
+
+
+@pytest.mark.parametrize("mirror", [False, True], ids=["merge", "mirror"])
+def test_the_gap_run_keeps_the_published_file_of_the_outer_class(make_jar, class_file, tmp_path: Path, mirror):
+    """The gap class Foo$$Gen brings the family of Foo into its retry tree (#206), and the engine also writes Foo.
+    The sources jar wrote Foo, so the file of the engine goes, as a file of a class that an earlier output wrote
+    (#107). Before, it replaced the published file in the mirror layout, and with --merge the row had a collision."""
+    jar, sources = _foo_gen_jar(make_jar, class_file)
+    runner = every_class_runner()
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True,
+                   writer=MirrorWriter(tmp_path / "out") if mirror else None)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert runner.sent == [["p/Foo", "p/Foo$$Gen"]]
+    out = tmp_path / ("out/lib-1.2.jar" if mirror else "out/src")
+    assert (out / "p/Foo.java").read_text() == "// upstream\nclass Foo {}"
+    assert (out / "p/Foo$$Gen.java").read_text().startswith("// engine vineflower")
+    assert (report.method, report.classes, report.sources_gap, report.missing_classes) == ("maven", 2, 1, 0)
+    assert (report.java_files, report.collisions) == (2, [])
+
+
+def test_a_flagged_gap_file_is_held_and_retried(make_jar, class_file, tmp_path: Path):
+    jar, sources = _foo_gen_jar(make_jar, class_file)
+    runner = writing_runner({
+        "vineflower": {"p/Foo.java": "class Foo {} // vf", "p/Foo$$Gen.java": "// FLAG vf"},
+        "cfr": {"p/Foo.java": "class Foo {} // cfr", "p/Foo$$Gen.java": "class Foo$$Gen {} // cfr"},
+    })
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [(a.engine, a.level) for a in report.attempts] == [("vineflower", "class"), ("cfr", "class")]
+    assert (tmp_path / "out/src/p/Foo$$Gen.java").read_text() == "class Foo$$Gen {} // cfr"
+    assert (tmp_path / "out/src/p/Foo.java").read_text() == "// upstream\nclass Foo {}"
+    assert (report.flagged, report.missing_classes, report.java_files, report.collisions) == ([], 0, 2, [])
 
 
 def test_maven_sources_in_a_source_set_folder_are_no_gap(make_jar, class_file, tmp_path: Path):
@@ -3567,12 +3880,20 @@ def test_root_prefix_is_empty_when_the_name_does_not_match(tmp_path: Path, class
     assert _root_prefix(tmp_path, "target/classes/s/Gone.class") == ""  # cannot be read
 
 
+def _inner_class_file(name: str) -> bytes:
+    """A class file of an inner class: it lists itself in its InnerClasses attribute, so it is no expected class
+    (#206)."""
+    from test_check import _class_with_inner_classes
+
+    return _class_with_inner_classes(name, ((name, name.rsplit("$", 1)[0]),))
+
+
 def _class_folder(tmp_path: Path, class_file) -> Path:
     root = tmp_path / "in"
     _tree(root, {
         "target/classes/p/A.class": class_file("p/A"),
         "target/classes/q/B.class": class_file("q/B"),
-        "target/classes/q/B$Nested.class": class_file("q/B$Nested"),
+        "target/classes/q/B$Nested.class": _inner_class_file("q/B$Nested"),
     })
     return root
 
@@ -3626,7 +3947,7 @@ def test_a_rooted_engine_gets_the_classes_of_a_war_without_their_container(make_
     war = make_jar("app.war", {
         "WEB-INF/web.xml": "<web-app/>",
         "WEB-INF/classes/com/x/A.class": class_file("com/x/A"),
-        "WEB-INF/classes/com/x/A$1.class": class_file("com/x/A$1"),
+        "WEB-INF/classes/com/x/A$1.class": _inner_class_file("com/x/A$1"),
     })
     runner = by_name_runner()
     ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False, writer=MirrorWriter(tmp_path / "out"))
@@ -3665,7 +3986,7 @@ def test_a_retry_tree_with_two_roots_gives_two_runs(make_jar, tmp_path: Path, cl
     jar = make_jar("boot.jar", {
         "BOOT-INF/classes/com/x/Done.class": class_file("com/x/Done"),
         "BOOT-INF/classes/com/x/A.class": class_file("com/x/A"),
-        "BOOT-INF/classes/com/x/A$1.class": class_file("com/x/A$1"),
+        "BOOT-INF/classes/com/x/A$1.class": _inner_class_file("com/x/A$1"),
         "org/boot/L.class": class_file("org/boot/L"),
     })
     vineflower = writing_runner({"vineflower": {"BOOT-INF/classes/com/x/Done.java": "class Done {}"}})
