@@ -5938,3 +5938,22 @@ def test_a_folder_entry_with_a_name_that_fails_the_rule_stays_out_with_no_count(
     copy, refused = _engine_copy(jar, tmp_path)
     assert refused == ["/abs/js/x.js"] and _outside_names(jar) == ["/abs/js/x.js"]
     assert _entries(copy) == [("r.txt", b"r")]
+
+
+def test_after_ctrl_c_a_gap_row_runs_no_tests_of_its_archive(make_jar, tmp_path, monkeypatch):
+    import decaf.pipeline as pipeline
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import ArtifactReport
+
+    monkeypatch.setattr(pipeline, "_engine_copy", lambda *a: pytest.fail("the tests of the copy after Ctrl-C"))
+    jar = make_jar("a.jar", {"com/a/A.class": b"x", "com/a/B.class": b"y"})
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner)
+    ctx.maven_gaps["a.jar"] = {"com/a/B"}
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="maven")
+    PROCESSES.kill_all()
+    try:
+        pipeline._decompile(Artifact(jar, "a.jar", ArtifactKind.ARCHIVE), jar, ctx, report)
+    finally:
+        PROCESSES.reset()
+    assert runner.calls == [] and report.refused == 0

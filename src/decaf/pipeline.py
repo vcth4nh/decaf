@@ -2127,8 +2127,9 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         # The retry tree of a gap class has the family of its outer class by name (#206), so an engine can also
         # write a class that the sources jar wrote. Such a file goes, as a file of a class that an earlier output
         # wrote (#107): only the gap classes and the classes below them by name get engine files.
-        _, refused = _engine_copy(artifact.path, None)  # the tests of the copy, with no write
-        _note_refused(artifact, ctx, report, refused, "entries")
+        if not engines.PROCESSES.closed:  # after Ctrl-C, no tests: the retries stop at once
+            _, refused = _engine_copy(artifact.path, None)  # the tests of the copy, with no write
+            _note_refused(artifact, ctx, report, refused, "entries")
         stems, claims = _stems_and_claims(artifact.path, read=False)  # the union is the same without the reads
         published = {s for s in stems | claims
                      if s not in gap and not any(s[:i] in gap for i in range(len(s)) if s[i] == "$")}
