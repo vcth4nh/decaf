@@ -4410,7 +4410,7 @@ def test_vineflower_and_fernflower_get_the_target_unchanged(make_jar, tmp_path: 
     process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
     process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
     assert runner.sent[0] == ["target/classes/p/A.class", "target/classes/q/B$Nested.class", "target/classes/q/B.class"]
-    assert runner.calls[1] == (engine, war)
+    assert runner.calls[1] == (engine, ctx.family_dirs["app.war"][-1] / "app.war")  # the copy of the engines, as it is
 
 
 @pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
@@ -4419,7 +4419,7 @@ def test_a_rooted_engine_gets_an_archive_without_a_container_entry_unchanged(mak
     runner = writing_runner({engine: {"com/x/A.java": "class A {}"}})
     ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False)
     process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
-    assert runner.calls == [(engine, jar)]
+    assert runner.calls == [(engine, ctx.family_dirs["app.jar"][-1] / "app.jar")]  # the copy of the engines, as it is
 
 
 @pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
@@ -4814,68 +4814,167 @@ def test_the_temp_jar_leaves_out_an_entry_that_cannot_be_read(make_damaged_jar, 
 # --- no engine gets an entry name or a class name that leaves its folder ---
 
 
-@pytest.mark.class_names
-def test_refused_lists_the_entries_whose_name_leaves_the_archive(tmp_path: Path, class_file):
-    from decaf.pipeline import _refused
+def _engine_copy(jar: Path, tmp_path: Path) -> tuple[Path, list[str]]:
+    """The copy of the engines and its refused raw names; the same test without a write gives the same names."""
+    from decaf.pipeline import _engine_copy
 
+    folder = tmp_path / f"copy-{len(list(tmp_path.glob('copy-*')))}"
+    folder.mkdir()
+    copy, refused = _engine_copy(jar, folder)
+    assert _engine_copy(jar, None) == (None, refused)
+    assert list(folder.iterdir()) == [copy]  # no part file stays
+    return copy, refused
+
+
+def _entries(path: Path) -> list[tuple[str, bytes]]:
+    with zipfile.ZipFile(path) as zf:
+        return [(i.filename, zf.read(i)) for i in zf.infolist()]
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_refuses_the_entries_whose_name_leaves_the_archive(tmp_path: Path, class_file):
     jar = _zip(tmp_path / "a.jar", [
         ("p/A.class", class_file("p/A")),
         ("../up.txt", b"x"),
         ("C:/dir/", b""),
         ("p\\..\\..\\B.class", class_file("B")),
     ])
-    assert [i.filename for i in _refused(jar)] == ["../up.txt", "C:/dir/", "p\\..\\..\\B.class"]
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["../up.txt", "C:/dir/", "p\\..\\..\\B.class"]
+    assert _entries(copy) == [("p/A.class", class_file("p/A"))]
 
 
 @pytest.mark.class_names
 @pytest.mark.parametrize("name", [b"../p/A", b"p/\xc0\xae\xc0\xae/A", b"/p/A"])
-def test_refused_lists_a_class_entry_whose_class_name_leaves_the_folder(tmp_path: Path, class_file, name):
-    from decaf.pipeline import _refused
-
+def test_the_engine_copy_refuses_a_class_entry_whose_class_name_leaves_the_folder(tmp_path: Path, class_file, name):
     jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file(name)), ("p/B.class", class_file("p/B"))])
-    assert [i.filename for i in _refused(jar)] == ["p/A.class"]
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class"] and _entries(copy) == [("p/B.class", class_file("p/B"))]
 
 
 @pytest.mark.class_names
-def test_refused_lists_a_class_entry_that_does_not_parse_or_cannot_be_read(make_damaged_jar, tmp_path: Path, class_file):
-    from decaf.pipeline import _refused
-
+def test_the_engine_copy_refuses_a_class_entry_that_does_not_parse_or_cannot_be_read(make_damaged_jar, tmp_path: Path,
+                                                                                       class_file):
+    """Another entry that decaf cannot read stays out with no count."""
     jar = make_damaged_jar("a.jar", {
         "p/A.class": b"no class", "p/B.class": class_file("p/B"), "p/C.class": class_file("p/C"), "p/r.txt": b"no class",
-    }, damaged=("p/C.class",))
-    assert [i.filename for i in _refused(jar)] == ["p/A.class", "p/C.class"]
+        "p/s.txt": b"s" * 100,
+    }, damaged=("p/C.class", "p/s.txt"))
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class", "p/C.class"]
+    assert _entries(copy) == [("p/B.class", class_file("p/B")), ("p/r.txt", b"no class")]
 
 
 @pytest.mark.class_names
-def test_refused_lists_a_class_entry_above_the_size_limit(tmp_path: Path, class_file, monkeypatch):
+def test_the_engine_copy_refuses_a_class_entry_above_the_size_limit_and_streams_another_entry(
+        make_damaged_jar, tmp_path: Path, class_file, monkeypatch):
     import decaf.pipeline as pipeline
 
     monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 64)
-    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file("p/A") + bytes(64)), ("p/B.class", class_file("p/B"))])
-    assert [i.filename for i in pipeline._refused(jar)] == ["p/A.class"]
+    big = bytes(range(256)) * 2
+    jar = make_damaged_jar("a.jar", {"p/A.class": class_file("p/A") + bytes(64), "p/B.class": class_file("p/B"),
+                                     "p/big.txt": big, "p/bad.txt": big}, damaged=("p/bad.txt",))
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class"]
+    assert _entries(copy) == [("p/B.class", class_file("p/B")), ("p/big.txt", big)]
 
 
 @pytest.mark.class_names
-def test_refused_judges_each_entry_of_a_name(tmp_path: Path, class_file):
-    """An engine can read each copy of a name: the first copy is refused, the last one is not."""
-    from decaf.pipeline import _refused
-
-    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file("../A")), ("p/A.class", class_file("p/A"))])
+@pytest.mark.parametrize("first_bad", [True, False])
+def test_the_last_entry_of_a_raw_name_decides_and_an_earlier_one_is_not_read(tmp_path: Path, class_file, first_bad,
+                                                                             monkeypatch):
+    bad, good = class_file("../A"), class_file("p/A")
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", bad if first_bad else good), ("p/B.class", class_file("p/B")),
+                                    ("p/A.class", good if first_bad else bad)])
     with zipfile.ZipFile(jar) as zf:
         first = zf.infolist()[0].header_offset
-    assert [(i.filename, i.header_offset) for i in _refused(jar)] == [("p/A.class", first)]
+    real_open = zipfile.ZipFile.open
+    read: list[int] = []
+
+    def recording_open(self, name, *a, **k):
+        read.append(getattr(name, "header_offset", -1))  # a ZipInfo to write has no offset yet
+        return real_open(self, name, *a, **k)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", recording_open)
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert first not in read
+    if first_bad:
+        assert refused == [] and _entries(copy) == [("p/A.class", good), ("p/B.class", class_file("p/B"))]
+    else:
+        assert refused == ["p/A.class"] and _entries(copy) == [("p/B.class", class_file("p/B"))]
 
 
 @pytest.mark.class_names
-def test_refused_lists_nothing_for_a_normal_archive(tmp_path: Path, class_file):
-    from decaf.pipeline import _refused
-
-    jar = _zip(tmp_path / "a.jar", [
+def test_the_engine_copy_of_a_normal_archive_has_each_entry_stored_with_its_attributes(tmp_path: Path, class_file):
+    entries = [
         ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"), ("p/", b""), ("p/A.class", class_file("p/A")),
         ("p/A$1.class", class_file("p/A$1")), ("WEB-INF/classes/q/B.class", class_file("q/B")),
-        ("META-INF/versions/9/p/A.class", class_file("p/A")), ("p/r.txt", b"x"),
-    ])
-    assert _refused(jar) == []
+        ("META-INF/versions/9/p/A.class", class_file("p/A")), ("p/r.txt", b"x" * 1000), ("p/s.sh", b"#!/bin/sh\n"),
+    ]
+    jar = tmp_path / "a.jar"
+    with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n, (name, data) in enumerate(entries):
+            info = zipfile.ZipInfo(name, (2001, 2, 3, 4, 5, 6 + 2 * n))
+            info.external_attr = (0o40755 if name.endswith("/") else 0o100750 + n) << 16
+            info.create_system = n % 2 * 3
+            zf.writestr(info, data)
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [] and copy.name == "a.jar" and _entries(copy) == entries
+    with zipfile.ZipFile(jar) as a, zipfile.ZipFile(copy) as b:
+        for x, y in zip(a.infolist(), b.infolist(), strict=True):
+            assert y.compress_type == zipfile.ZIP_STORED and y.extra == b""
+            assert (y.date_time, y.external_attr, y.create_system) == (x.date_time, x.external_attr, x.create_system)
+        assert b.getinfo("p/").is_dir()
+
+
+def _unicode_path(raw: str, name: str) -> bytes:
+    """An Info-ZIP Unicode Path extra field: zipfile takes info.filename from it, info.orig_filename stays raw."""
+    import struct
+    import zlib
+
+    text = name.encode()
+    return struct.pack("<HHBL", 0x7075, 5 + len(text), 1, zlib.crc32(raw.encode())) + text
+
+
+@pytest.mark.class_names
+def test_each_name_of_an_entry_with_two_names_gets_the_tests_and_the_copy_has_the_raw_name(tmp_path: Path,
+                                                                                            class_file):
+    jar = tmp_path / "a.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        for raw, name, data in [
+            ("p/A.class", "../A.class", class_file("p/A")),  # the zipfile name leaves the folder
+            ("../B.class", "p/B.class", class_file("p/B")),  # the raw name leaves the folder
+            ("p/C.txt", "p/C.class", b"no class"),  # a class entry by its zipfile name
+            ("p/D.class", "q/D.class", class_file("p/D")),  # both names stay inside
+        ]:
+            info = zipfile.ZipInfo(raw)
+            info.extra = _unicode_path(raw, name)
+            zf.writestr(info, data)
+    with zipfile.ZipFile(jar) as zf:
+        assert [(i.orig_filename, i.filename) for i in zf.infolist()][0] == ("p/A.class", "../A.class")
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class", "../B.class", "p/C.txt"]
+    assert _entries(copy) == [("p/D.class", class_file("p/D"))]
+
+
+@pytest.mark.class_names
+def test_a_folder_entry_is_a_folder_by_its_raw_name(tmp_path: Path, class_file):
+    jar = _raw_zip(tmp_path / "a.jar", [(b"d/", b"x"), (b"p/A.class", class_file("p/A"))])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [] and _entries(copy) == [("d/", b""), ("p/A.class", class_file("p/A"))]
+
+
+@pytest.mark.class_names
+def test_two_raw_names_with_the_same_bytes_give_the_copy_one_entry(tmp_path: Path):
+    """With no UTF-8 flag, zipfile reads the bytes as cp437; with the flag, as UTF-8: the copy writes both as one
+    name, and the last entry decides."""
+    jar = _raw_zip(tmp_path / "a.jar", [(b"p/\xc3\xa9.txt", b"1"), (b"p/\xc3\xa9.txt", b"2")], flags={1: 0x800})
+    with zipfile.ZipFile(jar) as zf:
+        assert len({i.orig_filename for i in zf.infolist()}) == 2
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "Duplicate name" warning of zipfile
+        copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [] and _entries(copy) == [("p/\xe9.txt", b"2")]
 
 
 @pytest.mark.class_names
@@ -4925,7 +5024,7 @@ def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, 
     jar = _zip(tmp_path / "app.jar", [
         ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"),
         ("p/", b""),
-        ("p/D.class", class_file("p/\0D")),  # the first entry of a name is refused
+        ("p/D.class", class_file("p/\0D")),  # an earlier entry of a name is not read
         ("p/A.class", class_file("p/A")),
         ("p/B.class", class_file("../B")),  # its class name leaves the folder
         ("../x/C.class", class_file("x/C")),  # its entry name leaves the folder
@@ -4951,8 +5050,8 @@ def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, 
         assert zf.read("p/E.class") == class_file("p/E") + b"2"
     assert target.name == "app.jar" and target != jar and target.parent in ctx.family_dirs["app.jar"]
     assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 6, 3, 3)
-    assert warns == ["app.jar: decaf does not use 4 of its entries, because a name or a class name can leave the output"
-                     " folder, or decaf cannot read the class name; the first is 'p/D.class'"]
+    assert warns == ["app.jar: decaf does not use 3 of its entries, because a name or a class name can leave the output"
+                     " folder, or decaf cannot read the class name; the first is 'p/B.class'"]
     assert jar.read_bytes() == before
 
 
@@ -4976,15 +5075,17 @@ def test_the_last_entry_of_a_name_decides_what_the_copy_gets(tmp_path: Path, cla
 
 
 @pytest.mark.class_names
-def test_an_engine_gets_a_normal_archive_itself(tmp_path: Path, class_file):
+def test_an_engine_gets_a_copy_of_a_normal_archive(tmp_path: Path, class_file):
     jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("p/r.txt", b"r")])
     runner = _names_runner()
     ctx = make_ctx(tmp_path, runner, fallback=False)
     warns: list[str] = []
     ctx.on_warn = warns.append
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
-    assert [t for t, _ in runner.calls] == [jar] and warns == [] and "app.jar" not in ctx.family_dirs
-    assert (report.classes, report.missing_classes) == (1, 0)
+    ((target, names),) = runner.calls
+    assert target != jar and target.name == "app.jar" and target.parent in ctx.family_dirs["app.jar"]
+    assert _entries(target) == _entries(jar) and warns == []
+    assert (report.classes, report.missing_classes, report.refused) == (1, 0, 0)
 
 
 @pytest.mark.class_names
@@ -5187,13 +5288,12 @@ def test_the_mirror_writer_refuses_a_folder_that_is_not_below_its_root(tmp_path:
     assert [p for p in tmp_path.rglob("*") if p.is_file()] == [jar]
 
 
-# --- the layout of an archive: the entry list of zipfile is not the only view ---
+# --- an archive built by hand ---
 
 
-def _raw_zip(path: Path, entries: list[tuple[bytes, bytes]], *, prefix: bytes = b"", junk_after: int | None = None,
-             local_names: dict[int, bytes] | None = None, offsets: dict[int, int] | None = None) -> Path:
-    """A stored zip, built by hand: junk_after inserts 4 bytes after that entry, local_names gives an entry another
-    name in its local header, and offsets gives the central directory another offset of a local header."""
+def _raw_zip(path: Path, entries: list[tuple[bytes, bytes]], *, prefix: bytes = b"",
+             flags: dict[int, int] | None = None) -> Path:
+    """A stored zip, built by hand: prefix goes before the first entry, and flags gives an entry its flag bits."""
     import struct
     import zlib
 
@@ -5201,80 +5301,32 @@ def _raw_zip(path: Path, entries: list[tuple[bytes, bytes]], *, prefix: bytes = 
     starts = []
     for i, (name, data) in enumerate(entries):
         starts.append(len(body))
-        local = (local_names or {}).get(i, name)
+        flag = (flags or {}).get(i, 0)
         crc = zlib.crc32(data)
-        body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, 0, 0, 0, crc, len(data), len(data), len(local), 0)
-        body += local + data
-        if junk_after == i:
-            body += b"junk"
+        body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, flag, 0, 0, 0, crc, len(data), len(data), len(name), 0)
+        body += name + data
     cd_start = len(body)
     for i, (name, data) in enumerate(entries):
-        offset = (offsets or {}).get(i, starts[i])
-        central += struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0, 0, 0, 0, zlib.crc32(data), len(data),
-                               len(data), len(name), 0, 0, 0, 0, 0, offset) + name
+        flag = (flags or {}).get(i, 0)
+        central += struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flag, 0, 0, 0, zlib.crc32(data), len(data),
+                               len(data), len(name), 0, 0, 0, 0, 0, starts[i]) + name
     eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(central), cd_start, 0)
     path.write_bytes(bytes(body + central + eocd))
     return path
 
 
-def _plain(path: Path) -> bool:
-    from decaf.pipeline import _plain_layout
-
-    with zipfile.ZipFile(path) as zf:
-        return _plain_layout(zf)
-
-
-@pytest.mark.class_names
-def test_plain_layout_accepts_a_normal_archive_and_data_descriptors(tmp_path: Path, class_file, make_jar):
-    import io
-
-    assert _plain(make_jar("a.jar", {"p/A.class": class_file("p/A"), "p/": b"", "r.txt": b"r"}))
-    assert _plain(_raw_zip(tmp_path / "raw.jar", [(b"p/A.class", class_file("p/A")), (b"r.txt", b"r")]))
-
-    class Stream(io.RawIOBase):  # not seekable: zipfile writes a data descriptor after each entry
-        def __init__(self):
-            self.data = bytearray()
-
-        def writable(self):
-            return True
-
-        def write(self, b):
-            self.data += b
-            return len(b)
-
-    stream = Stream()
-    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("p/A.class", class_file("p/A"))
-        zf.writestr("r.txt", b"r" * 100)
-    (tmp_path / "dd.jar").write_bytes(bytes(stream.data))
-    with zipfile.ZipFile(tmp_path / "dd.jar") as zf:
-        assert all(i.flag_bits & 0x08 for i in zf.infolist())
-    assert _plain(tmp_path / "dd.jar")
-
-
-@pytest.mark.class_names
-@pytest.mark.parametrize("shape", ["prefix", "gap", "local name", "overlap"])
-def test_plain_layout_refuses_bytes_that_the_entry_list_does_not_show(tmp_path: Path, class_file, shape):
-    entries = [(b"p/A.class", class_file("p/A")), (b"p/B.class", class_file("p/B"))]
-    kw = {"prefix": {"prefix": b"#!/bin/sh\n"}, "gap": {"junk_after": 0}, "local name": {"local_names": {1: b"p/C.class"}},
-          "overlap": {"offsets": {1: 0}}}[shape]
-    if shape == "overlap":
-        entries[1] = (b"p/A.class", class_file("p/A"))  # a second central entry of the first local header
-    assert not _plain(_raw_zip(tmp_path / "x.jar", entries, **kw))
-
-
 @pytest.mark.class_names
 def test_a_name_with_a_nul_is_refused_by_its_name_before_the_cut(tmp_path: Path, class_file):
-    from decaf.pipeline import _refused
-
     jar = _raw_zip(tmp_path / "a.jar", [(b"p/A.class\0x", class_file("p/A")), (b"p/B.class", class_file("p/B"))])
     with zipfile.ZipFile(jar) as zf:
         assert zf.namelist()[0] == "p/A.class"  # zipfile cuts the name at the NUL
-    assert [i.orig_filename for i in _refused(jar)] == ["p/A.class\0x"]
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class\0x"] and _entries(copy) == [("p/B.class", class_file("p/B"))]
 
 
 @pytest.mark.class_names
-def test_an_archive_whose_layout_is_not_plain_goes_to_the_engines_as_a_copy(tmp_path: Path, class_file):
+def test_an_archive_with_bytes_before_its_first_entry_goes_to_the_engines_as_a_copy_without_them(tmp_path: Path,
+                                                                                                  class_file):
     jar = _raw_zip(tmp_path / "app.jar", [(b"p/A.class", class_file("p/A"))], prefix=b"#!/bin/sh\n")
     runner = _names_runner()
     ctx = make_ctx(tmp_path, runner, fallback=False)
@@ -5282,7 +5334,8 @@ def test_an_archive_whose_layout_is_not_plain_goes_to_the_engines_as_a_copy(tmp_
     ctx.on_warn = warns.append
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     ((target, names),) = runner.calls
-    assert target != jar and target.name == "app.jar" and names == ["p/A.class"] and _plain(target)
+    assert target != jar and target.name == "app.jar" and names == ["p/A.class"]
+    assert target.read_bytes().startswith(b"PK\x03\x04")
     assert (warns, report.refused, report.classes, report.missing_classes) == ([], 0, 1, 0)
 
 
@@ -5332,11 +5385,11 @@ def test_the_row_line_shows_the_refused_count(tmp_path: Path):
 
 
 @pytest.mark.class_names
-def test_refused_reads_a_class_entry_whose_suffix_has_other_case(tmp_path: Path, class_file):
-    from decaf.pipeline import _refused
-
-    jar = _zip(tmp_path / "a.jar", [("p/A.CLASS", class_file("../A")), ("p/B.Class", class_file("p/B"))])
-    assert [i.filename for i in _refused(jar)] == ["p/A.CLASS"]
+def test_the_engine_copy_reads_a_class_entry_whose_suffix_has_other_case(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "a.jar", [("p/A.CLASS", class_file("../A")), ("p/B.Class", class_file("p/B")),
+                                    ("p/C.claſſ", b"no class")])  # the long s: upper() and casefold() give s
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.CLASS", "p/C.claſſ"] and _entries(copy) == [("p/B.Class", class_file("p/B"))]
 
 
 def _raw_names(path: Path) -> list[bytes]:
@@ -5346,11 +5399,8 @@ def _raw_names(path: Path) -> list[bytes]:
 
 @pytest.mark.class_names
 def test_the_copy_keeps_the_name_bytes_of_a_utf8_name_without_the_utf8_flag(tmp_path: Path, class_file):
-    from decaf.pipeline import _copy_without_refused
-
     jar = _raw_zip(tmp_path / "a.jar", [(b"p/A.class", class_file("p/A")), (b"p/\xc3\xa9t\xc3\xa9.txt", b"r")])
-    (tmp_path / "copy").mkdir()
-    copy = _copy_without_refused(jar, tmp_path / "copy")
+    copy, _ = _engine_copy(jar, tmp_path)
     assert _raw_names(copy) == _raw_names(jar) == [b"p/A.class", b"p/\xc3\xa9t\xc3\xa9.txt"]
 
 

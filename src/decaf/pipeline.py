@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import contextlib
 import hashlib
 import json
 import os
@@ -710,29 +711,8 @@ def _safe_class(data: bytes | None) -> bool:
     return data is not None and check.class_names_stay_inside(data)
 
 
-def _refused_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:
-    """Does no engine get this entry? Its name does not stay inside, or it is a class entry that decaf cannot read
-    or whose class name decaf cannot prove to stay inside. A disk error raises."""
-    if not stays_inside(info.orig_filename):  # the name before zipfile cuts it at a NUL
-        return True
-    if info.is_dir() or not info.filename.lower().endswith(".class"):  # a reader can ignore the case
-        return False
-    try:
-        with zf.open(info) as f:  # by its ZipInfo: an engine can read each entry of a name
-            data = _bounded(f)
-    except ZIP_ERRORS as exc:
-        if isinstance(exc, OSError) and exc.errno is not None:
-            raise  # the disk, not the entry
-        return True
-    return not _safe_class(data)
-
-
-def _refused(source: Path) -> list[zipfile.ZipInfo] | list[str]:
-    """The items of a source that no engine gets: the refused entries of an archive (_refused_entry), each entry
-    of a name apart, or the class files of a folder (paths below it) whose class name fails _safe_class."""
-    if not source.is_dir():
-        with zipfile.ZipFile(source) as zf:
-            return [info for info in zf.infolist() if _refused_entry(zf, info)]
+def _refused(source: Path) -> list[str]:
+    """The class files of a folder (paths below it) that no engine gets: their class names fail _safe_class."""
     out: list[str] = []
     for p in sorted(source.rglob("*.class")):
         if not p.is_file():
@@ -747,43 +727,6 @@ def _refused(source: Path) -> list[zipfile.ZipInfo] | list[str]:
     return out
 
 
-_DESCRIPTOR_SIZES = (12, 16, 20, 24)  # a data descriptor: with or without its signature, 32-bit or 64-bit sizes
-
-
-def _plain_layout(zf: zipfile.ZipFile) -> bool:
-    """Do the entries of the central directory, in the order of their local headers, cover the file from offset 0
-    to the central directory, with no gap and no overlap, each with the same name in its local header?
-
-    Then a reader of the local headers and a reader of the central directory see the same entries. Each doubt (a
-    short read, a wrong signature, an error) gives False, which costs only a copy of the archive.
-    """
-    try:
-        infos = sorted(zf.infolist(), key=lambda i: i.header_offset)
-        pos, descriptor = 0, False
-
-        def follows(start: int) -> bool:
-            """Does start follow the end of the entry before it: at once, or after its data descriptor?"""
-            return start - pos in _DESCRIPTOR_SIZES if descriptor else start == pos
-
-        with open(zf.filename, "rb") as f:
-            for info in infos:
-                if not follows(info.header_offset):
-                    return False
-                f.seek(info.header_offset)
-                head = f.read(30)
-                if len(head) != 30 or head[:4] != b"PK\x03\x04":
-                    return False
-                name_len, extra_len = int.from_bytes(head[26:28], "little"), int.from_bytes(head[28:30], "little")
-                encoding = "utf-8" if info.flag_bits & 0x800 else "cp437"
-                if f.read(name_len) != info.orig_filename.encode(encoding):
-                    return False
-                pos = info.header_offset + 30 + name_len + extra_len + info.compress_size
-                descriptor = bool(info.flag_bits & 0x08)
-        return follows(zf.start_dir)
-    except (*ZIP_ERRORS, AttributeError, TypeError):
-        return False
-
-
 def _copy_name(info: zipfile.ZipInfo) -> str:
     """The name of an entry in a copy, with the bytes of the input where zipfile can write them: a name with no UTF-8
     flag that zipfile read as cp437, and whose bytes are valid UTF-8, keeps its bytes (zipfile writes it as UTF-8)."""
@@ -796,38 +739,84 @@ def _copy_name(info: zipfile.ZipInfo) -> str:
         return name  # other bytes: zipfile writes the cp437 text as UTF-8
 
 
-def _copy_without_refused(archive: Path, folder: Path) -> Path:
-    """A copy of the archive in folder, with its file name, without the _refused_entry entries.
+def _is_class_entry(name: str) -> bool:
+    """Does a name end with .class for a reader that ignores the case?"""
+    return name.lower().endswith(".class") or name.upper().endswith(".CLASS") or name.casefold().endswith(".class")
 
-    The copy has one entry for each name, and the last entry of a name decides, as in Java, _root_jar, and
-    safe_extract_zip: when the last entry is refused or cannot be read, the copy has no entry of that name, and an
-    earlier entry of the name never goes in. The entries keep the order of the first entry of each name. Each entry
-    goes through a file, not through memory.
+
+def _read_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo, part: Path | None) -> bytes | Path | None:
+    """The data of an entry, read one time: its bytes up to _CLASS_FILE_MAX; above that, the part file that holds
+    them, or None with no part file. None also when decaf cannot read the entry. A disk error raises."""
+    try:
+        with zf.open(info) as src:  # by its ZipInfo: not an earlier entry of the name
+            data = src.read(_CLASS_FILE_MAX + 1)
+            if len(data) <= _CLASS_FILE_MAX:
+                return data
+            if part is None:
+                return None
+            with open(part, "wb") as f:
+                f.write(data)
+                shutil.copyfileobj(src, f, 1 << 20)
+            return part
+    except ZIP_ERRORS as exc:
+        if isinstance(exc, OSError) and exc.errno is not None:
+            raise  # the disk, not the entry
+        return None
+
+
+def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[str]]:
+    """One pass over an archive that tests each entry and writes the copy that the engines get: (the copy in folder,
+    with the file name of the archive, the raw names of the refused entries). With folder None, the same tests run
+    with no write and no read of an entry that is not a class entry: (None, the refused names).
+
+    The copy has one entry for each raw name, as the copy writes it (_copy_name), and the last entry of a name
+    decides, as in Java: an earlier entry is not read. The entries keep the order of the first entry of each name.
+    An entry is refused when its raw name, its zipfile name, or its name in the copy does not stay inside, or when it
+    is a class entry by one of its names and decaf cannot read it or its data fails _safe_class. A folder entry (by
+    its raw name) goes in as a folder. Another entry that decaf cannot read stays out with no count, and a large one
+    goes through a part file, so a read error leaves no part of it in the copy. The copy is stored, with no extra
+    field: each of its entries has one name.
     """
-    jar = folder / archive.name  # an engine reads the suffix, and one engine names its output after the file
-    part = folder / "entry.part"
-    with zipfile.ZipFile(archive) as zf, zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as out:
+    refused: list[str] = []
+    # an engine reads the suffix, and one engine names its output after the file
+    jar = folder / archive.name if folder is not None else None
+    part = jar.with_name(jar.name + ".part") if jar is not None else None
+    with zipfile.ZipFile(archive) as zf, (
+        zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) if jar is not None else contextlib.nullcontext()
+    ) as out:
         last: dict[str, zipfile.ZipInfo] = {}
         for info in zf.infolist():
-            last[info.filename] = info  # a dict keeps the place of the first entry of a name
-        for info in last.values():
-            if _refused_entry(zf, info):
-                continue
-            try:
-                with zf.open(info) as src, open(part, "wb") as f:
-                    shutil.copyfileobj(src, f)
-            except ZIP_ERRORS as exc:
-                if isinstance(exc, OSError) and exc.errno is not None:
-                    raise  # the disk, not the entry
-                continue
-            entry = zipfile.ZipInfo(_copy_name(info), info.date_time)
-            entry.external_attr = info.external_attr
-            entry.compress_type = zipfile.ZIP_STORED if info.is_dir() else zipfile.ZIP_DEFLATED
-            entry.file_size = part.stat().st_size
-            with open(part, "rb") as f, out.open(entry, "w") as dst:
-                shutil.copyfileobj(f, dst)
-    part.unlink(missing_ok=True)  # no part when each entry is refused
-    return jar
+            last[_copy_name(info)] = info  # a dict keeps the place of the first entry of a name
+        try:
+            for name, info in last.items():
+                raw = info.orig_filename  # info.filename: cut at a NUL, or taken from an extra field
+                if not (stays_inside(raw) and stays_inside(info.filename) and stays_inside(name)):
+                    refused.append(raw)
+                    continue
+                entry = zipfile.ZipInfo(name, info.date_time)
+                entry.external_attr, entry.create_system = info.external_attr, info.create_system
+                if raw.endswith("/"):
+                    if out is not None:
+                        out.writestr(entry, b"")
+                    continue
+                is_class = _is_class_entry(raw) or _is_class_entry(info.filename)
+                if out is None and not is_class:
+                    continue
+                data = _read_entry(zf, info, None if is_class else part)
+                if is_class and not _safe_class(data):
+                    refused.append(raw)
+                elif out is None or data is None:
+                    continue
+                elif isinstance(data, bytes):
+                    out.writestr(entry, data)
+                else:
+                    entry.file_size = data.stat().st_size
+                    with open(data, "rb") as f, out.open(entry, "w") as dst:
+                        shutil.copyfileobj(f, dst, 1 << 20)
+        finally:
+            if part is not None:
+                part.unlink(missing_ok=True)
+    return jar, refused
 
 
 def _note_refused(artifact: Artifact, ctx: Ctx, report: ArtifactReport, names: list[str], unit: str) -> None:
@@ -2400,19 +2389,17 @@ def _fetch_stage(
             if hit and not gap:  # no engine runs: only the names of the nested archives were not used
                 _note_refused(artifact, ctx, report, bad, "entries")
                 return report, nested, None
-            refused = _refused(artifact.path)
-            _note_refused(artifact, ctx, report, [info.orig_filename for info in refused], "entries")
-            if gap:  # the engines get only the retry trees of the gap classes
+            if gap:  # the engines get only the retry trees of the gap classes: the same tests, no copy
+                _, refused = _engine_copy(artifact.path, None)
+                _note_refused(artifact, ctx, report, refused, "entries")
                 return report, nested, artifact.path
-            if not refused:
-                with zipfile.ZipFile(artifact.path) as zf:
-                    plain = _plain_layout(zf)
-                if plain:  # else the engines get a copy, as for a refused entry, with no warning
-                    return report, nested, artifact.path
+            # An engine never reads the input archive: it reads a copy that decaf wrote from the entries it tested.
             folder = _tmp_dir(ctx)
             with ctx.family_lock:
                 ctx.family_dirs.setdefault(artifact.rel, []).append(folder)  # it goes when the row is final
-            return report, nested, _copy_without_refused(artifact.path, folder)
+            copy, refused = _engine_copy(artifact.path, folder)
+            _note_refused(artifact, ctx, report, refused, "entries")
+            return report, nested, copy
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
@@ -3016,9 +3003,9 @@ def run(
                                     if (
                                         batch_runner is not None
                                         and not target.is_dir()
-                                        # a copy without refused entries: a batch takes the expected classes from
-                                        # its target, so the refused classes would not count as missing
-                                        and target == a.path
+                                        # a batch takes the expected classes from its target (the copy), so a
+                                        # refused class would not count as missing
+                                        and not report.refused
                                         and a.classes < _SMALL_CLASSES
                                         and chain[0] in engines.BATCH_ENGINES
                                         and report.method != "maven"  # a Maven row with a gap: its class retries run alone (#180)
