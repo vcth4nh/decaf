@@ -1997,6 +1997,7 @@ def test_a_batch_member_reads_its_class_files_in_a_worker(fake_env, make_jar, tm
     assert readers and threading.main_thread() not in readers
 
 
+@pytest.mark.class_names
 @pytest.mark.parametrize("refused", [False, True])
 def test_an_archive_with_a_refused_entry_is_no_batch_target(fake_env, make_jar, tmp_path, class_file, refused):
     """A batch takes the expected classes from its target, and the copy without the refused entries lacks them."""

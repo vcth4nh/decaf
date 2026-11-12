@@ -14,8 +14,9 @@ import pytest
 def fake_class_files_go_to_the_engines(request, monkeypatch):
     """Many tests use fake class files such as b"x" or a bare header. They do not parse, so in a real run no
     engine gets them. Here such a file goes to the engines; a class file whose constant pool parses gets the real
-    test. A test with the mark class_names gets the real test for each file."""
-    if request.node.get_closest_marker("class_names") is not None:
+    test. A test with the mark class_names, and a test of real engines (the mark slow), gets the real test for each
+    file."""
+    if request.node.get_closest_marker("class_names") is not None or request.node.get_closest_marker("slow") is not None:
         return
     from decaf import check, pipeline
 

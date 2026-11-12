@@ -1852,7 +1852,10 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
     for rel in _refused(out):
         (out / rel).unlink()
     count = sum(1 for p in out.rglob("*.class") if p.is_file())
-    return out if count else None
+    if not count:
+        _drop(out)
+        return None
+    return out
 
 
 # CFR and Procyon write a class at the path of its name, and JD takes the path below its input as the name (#199,

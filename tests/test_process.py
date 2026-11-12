@@ -4776,6 +4776,7 @@ def test_the_temp_jar_leaves_out_an_entry_that_cannot_be_read(make_damaged_jar, 
 # --- no engine gets an entry name or a class name that leaves its folder ---
 
 
+@pytest.mark.class_names
 def test_refused_lists_the_entries_whose_name_leaves_the_archive(tmp_path: Path, class_file):
     from decaf.pipeline import _refused
 
@@ -4788,6 +4789,7 @@ def test_refused_lists_the_entries_whose_name_leaves_the_archive(tmp_path: Path,
     assert [i.filename for i in _refused(jar)] == ["../up.txt", "C:/dir/", "p\\..\\..\\B.class"]
 
 
+@pytest.mark.class_names
 @pytest.mark.parametrize("name", [b"../p/A", b"p/\xc0\xae\xc0\xae/A", b"/p/A"])
 def test_refused_lists_a_class_entry_whose_class_name_leaves_the_folder(tmp_path: Path, class_file, name):
     from decaf.pipeline import _refused
@@ -4806,6 +4808,7 @@ def test_refused_lists_a_class_entry_that_does_not_parse_or_cannot_be_read(make_
     assert [i.filename for i in _refused(jar)] == ["p/A.class", "p/C.class"]
 
 
+@pytest.mark.class_names
 def test_refused_lists_a_class_entry_above_the_size_limit(tmp_path: Path, class_file, monkeypatch):
     import decaf.pipeline as pipeline
 
@@ -4814,6 +4817,7 @@ def test_refused_lists_a_class_entry_above_the_size_limit(tmp_path: Path, class_
     assert [i.filename for i in pipeline._refused(jar)] == ["p/A.class"]
 
 
+@pytest.mark.class_names
 def test_refused_judges_each_entry_of_a_name(tmp_path: Path, class_file):
     """An engine can read each copy of a name: the first copy is refused, the last one is not."""
     from decaf.pipeline import _refused
@@ -4824,6 +4828,7 @@ def test_refused_judges_each_entry_of_a_name(tmp_path: Path, class_file):
     assert [(i.filename, i.header_offset) for i in _refused(jar)] == [("p/A.class", first)]
 
 
+@pytest.mark.class_names
 def test_refused_lists_nothing_for_a_normal_archive(tmp_path: Path, class_file):
     from decaf.pipeline import _refused
 
@@ -4877,6 +4882,7 @@ def _names_runner():
     return _run
 
 
+@pytest.mark.class_names
 def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, class_file):
     jar = _zip(tmp_path / "app.jar", [
         ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"),
@@ -4912,6 +4918,7 @@ def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, 
     assert jar.read_bytes() == before
 
 
+@pytest.mark.class_names
 @pytest.mark.parametrize("first_bad", [True, False])
 def test_the_last_entry_of_a_name_decides_what_the_copy_gets(tmp_path: Path, class_file, first_bad):
     """As in Java: a refused first entry still gives the copy the last one; a refused last entry gives the copy no
@@ -4930,6 +4937,7 @@ def test_the_last_entry_of_a_name_decides_what_the_copy_gets(tmp_path: Path, cla
     assert (report.classes, report.missing_classes) == (2, 0 if first_bad else 1)
 
 
+@pytest.mark.class_names
 def test_an_engine_gets_a_normal_archive_itself(tmp_path: Path, class_file):
     jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("p/r.txt", b"r")])
     runner = _names_runner()
@@ -4941,6 +4949,7 @@ def test_an_engine_gets_a_normal_archive_itself(tmp_path: Path, class_file):
     assert (report.classes, report.missing_classes) == (1, 0)
 
 
+@pytest.mark.class_names
 def test_the_warning_shows_a_control_character_of_the_first_name_as_an_escape(tmp_path: Path, class_file):
     jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("\x1b[2J/../B.class", class_file("B"))])
     ctx = make_ctx(tmp_path, _names_runner(), fallback=False)
@@ -4974,6 +4983,7 @@ def _snapshot(folder: Path) -> dict[str, bytes]:
     return {p.relative_to(folder).as_posix(): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
 
 
+@pytest.mark.class_names
 def test_an_engine_gets_the_class_folder_without_its_refused_class_files(tmp_path: Path, class_file):
     folder = _tree(tmp_path / "classes", {
         "p/A.class": class_file("p/A"), "p/A$1.class": class_file("p/A$1"), "p/B.class": class_file("p/../../B"),
@@ -4992,6 +5002,7 @@ def test_an_engine_gets_the_class_folder_without_its_refused_class_files(tmp_pat
     assert _snapshot(folder) == before
 
 
+@pytest.mark.class_names
 def test_a_normal_class_folder_gives_the_engine_each_class_file(tmp_path: Path, class_file):
     """copy_class_tree copies each class file: the expected classes of the folder and of its copy are the same."""
     folder = _tree(tmp_path / "classes", {
@@ -5007,6 +5018,7 @@ def test_a_normal_class_folder_gives_the_engine_each_class_file(tmp_path: Path, 
     assert (report.classes, report.missing_classes, report.java_files) == (4, 0, 4)
 
 
+@pytest.mark.class_names
 def test_a_retry_tree_lacks_the_refused_class_files_of_a_family(tmp_path: Path, class_file):
     """The first engine writes no file for p/A. The retry tree of its family lacks p/A$1.class, whose class name
     leaves the folder, and an entry whose name leaves the folder with a backslash."""
@@ -5021,6 +5033,7 @@ def test_a_retry_tree_lacks_the_refused_class_files_of_a_family(tmp_path: Path, 
     assert runner.sent[1] == ["p/A.class"]
 
 
+@pytest.mark.class_names
 def test_the_root_jar_leaves_out_a_path_with_a_drive_or_a_backslash_parent(tmp_path: Path, class_file):
     from decaf.pipeline import _root_jar
 
@@ -5037,6 +5050,7 @@ def test_the_root_jar_leaves_out_a_path_with_a_drive_or_a_backslash_parent(tmp_p
         assert zf.namelist() == ["com/x/A.class"]
 
 
+@pytest.mark.class_names
 def test_an_archive_with_only_refused_entries_gives_the_engines_an_empty_copy(tmp_path: Path, class_file):
     jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("../A")), ("../r.txt", b"r")])
     runner = _names_runner()
@@ -5046,6 +5060,7 @@ def test_an_archive_with_only_refused_entries_gives_the_engines_an_empty_copy(tm
     assert (report.outcome, report.failure, report.classes, report.missing_classes) == ("failed", "all engines failed", 1, 0)
 
 
+@pytest.mark.class_names
 def test_a_class_folder_that_holds_the_temp_root_counts_only_its_own_classes(tmp_path: Path, class_file):
     """The input folder can hold the temp folder of the run: the expected classes come from the copy, also with a
     refused class file, as on main."""
@@ -5116,6 +5131,7 @@ def test_a_nested_archive_name_that_leaves_its_folder_gives_no_row(tmp_path: Pat
     assert _outside(tmp_path, known) == []
 
 
+@pytest.mark.class_names
 def test_the_mirror_writer_refuses_a_folder_that_is_not_below_its_root(tmp_path: Path, make_jar):
     """Defense in depth: a rel whose folder leaves the output folder raises, also in add_resources and add_blob."""
     from decaf.pipeline import OutsideOutput
@@ -5170,6 +5186,7 @@ def _plain(path: Path) -> bool:
         return _plain_layout(zf)
 
 
+@pytest.mark.class_names
 def test_plain_layout_accepts_a_normal_archive_and_data_descriptors(tmp_path: Path, class_file, make_jar):
     import io
 
@@ -5197,6 +5214,7 @@ def test_plain_layout_accepts_a_normal_archive_and_data_descriptors(tmp_path: Pa
     assert _plain(tmp_path / "dd.jar")
 
 
+@pytest.mark.class_names
 @pytest.mark.parametrize("shape", ["prefix", "gap", "local name", "overlap"])
 def test_plain_layout_refuses_bytes_that_the_entry_list_does_not_show(tmp_path: Path, class_file, shape):
     entries = [(b"p/A.class", class_file("p/A")), (b"p/B.class", class_file("p/B"))]
@@ -5207,6 +5225,7 @@ def test_plain_layout_refuses_bytes_that_the_entry_list_does_not_show(tmp_path: 
     assert not _plain(_raw_zip(tmp_path / "x.jar", entries, **kw))
 
 
+@pytest.mark.class_names
 def test_a_name_with_a_nul_is_refused_by_its_name_before_the_cut(tmp_path: Path, class_file):
     from decaf.pipeline import _refused
 
@@ -5216,6 +5235,7 @@ def test_a_name_with_a_nul_is_refused_by_its_name_before_the_cut(tmp_path: Path,
     assert [i.orig_filename for i in _refused(jar)] == ["p/A.class\0x"]
 
 
+@pytest.mark.class_names
 def test_an_archive_whose_layout_is_not_plain_goes_to_the_engines_as_a_copy(tmp_path: Path, class_file):
     jar = _raw_zip(tmp_path / "app.jar", [(b"p/A.class", class_file("p/A"))], prefix=b"#!/bin/sh\n")
     runner = _names_runner()
@@ -5262,6 +5282,7 @@ def test_a_maven_row_with_a_gap_counts_its_refused_class(tmp_path: Path, class_f
     assert report.partial and len(warns) == 1 and warns[0].startswith("lib-1.2.jar: ")
 
 
+@pytest.mark.class_names
 def test_the_row_line_shows_the_refused_count(tmp_path: Path):
     from decaf.pipeline import ArtifactReport
     from decaf.report_view import _status_line
@@ -5272,6 +5293,7 @@ def test_the_row_line_shows_the_refused_count(tmp_path: Path):
     assert ArtifactReport(rel="a.jar", kind="archive", outcome="ok", refused=1).partial
 
 
+@pytest.mark.class_names
 def test_refused_reads_a_class_entry_whose_suffix_has_other_case(tmp_path: Path, class_file):
     from decaf.pipeline import _refused
 
@@ -5284,6 +5306,7 @@ def _raw_names(path: Path) -> list[bytes]:
         return [i.orig_filename.encode("utf-8" if i.flag_bits & 0x800 else "cp437") for i in zf.infolist()]
 
 
+@pytest.mark.class_names
 def test_the_copy_keeps_the_name_bytes_of_a_utf8_name_without_the_utf8_flag(tmp_path: Path, class_file):
     from decaf.pipeline import _copy_without_refused
 
@@ -5291,3 +5314,13 @@ def test_the_copy_keeps_the_name_bytes_of_a_utf8_name_without_the_utf8_flag(tmp_
     (tmp_path / "copy").mkdir()
     copy = _copy_without_refused(jar, tmp_path / "copy")
     assert _raw_names(copy) == _raw_names(jar) == [b"p/A.class", b"p/\xc3\xa9t\xc3\xa9.txt"]
+
+
+@pytest.mark.class_names
+def test_a_retry_tree_with_no_class_file_left_goes_at_once(tmp_path: Path, class_file):
+    from decaf.pipeline import _extract_failed_classes
+
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file("../A")), ("p/B.class", class_file("p/B"))])
+    ctx = make_ctx(tmp_path, _names_runner())
+    assert _extract_failed_classes(jar, {"p/A"}, ctx) is None
+    assert list(ctx.tmp_root.iterdir()) == []
