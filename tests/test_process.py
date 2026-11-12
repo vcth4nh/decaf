@@ -242,6 +242,44 @@ def test_resolution_miss_recorded_in_report(make_jar, tmp_path: Path):
     )
 
 
+def test_group_sources_of_the_central_build_give_a_decompiled_row(make_jar, tmp_path: Path):
+    """#189: one URL gives the .sha1 of a patched build and the sources jar of the Central build."""
+    import hashlib
+
+    import httpx
+
+    from decaf.config import MAVEN_CENTRAL
+    from decaf.maven import resolve_sources, sha1_of
+
+    jar = make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties":
+                                   "groupId=com.example\nartifactId=lib\nversion=1.2\n", "com/x/A.class": b"patched"})
+    upstream = make_jar("up/lib-1.2-sources.jar", {"com/x/A.java": "// upstream\nclass A {}"}).read_bytes()
+
+    def handler(request):
+        host, path = request.url.host, request.url.path
+        if path.endswith("-sources.jar.sha1"):
+            return httpx.Response(200, text=hashlib.sha1(upstream).hexdigest())
+        if path.endswith(".jar.sha1"):
+            return httpx.Response(200, text=sha1_of(jar) if host == "group.test" else "0" * 40)
+        if host == "group.test" and path.endswith("-sources.jar"):
+            return httpx.Response(200, content=upstream)
+        return httpx.Response(404)
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+            return resolve_sources(jar_path, ["https://group.test/m2", MAVEN_CENTRAL], c, cache_dir, **kw)
+
+    runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=resolver, maven=True)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert report.outcome == "ok" and report.method == "vineflower"
+    assert report.sources_miss == (
+        "found com.example:lib:1.2 in pom.properties but the -sources.jar in https://group.test/m2 "
+        "is the sources jar of another build on Maven Central"
+    )
+    assert "upstream" not in (tmp_path / "out/src/com/x/A.java").read_text()
+
+
 def test_maven_verbose_line_on_hit_and_miss(make_jar, tmp_path: Path):
     jar = make_jar("lib-1.2.jar", {"com/x/A.class": b"x"})
     sources = make_jar("lib-1.2-sources.jar", {"com/x/A.java": "class A {}"})

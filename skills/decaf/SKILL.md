@@ -33,7 +33,8 @@ Typical flow:
   the SHA-1 of the published jar. The sources come only from a repository whose `.sha1` file
   of the artifact matches the jar. A patched, shaded, or private jar that no configured
   repository holds is decompiled. The lookup sends the SHA-1 of each jar without
-  `pom.properties` to Maven Central; `--no-maven` makes no lookup and decompiles everything.
+  `pom.properties` to Maven Central, and the coordinates of each sources jar from another
+  repository; `--no-maven` makes no lookup and decompiles everything.
 - **Five engines, automatic fallback.** Vineflower, then CFR, Fernflower, Procyon, JD. An
   engine that crashes, times out, misses classes, or writes a stub hands the archive or the
   class to the next one. `--engine cfr` only changes the first engine; the fallback stays on
