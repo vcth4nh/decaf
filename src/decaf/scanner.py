@@ -151,6 +151,8 @@ def stays_inside(name: str) -> bool:
     of only dots and spaces with two or more dots (Windows drops the dots and spaces at the end of a part,
     so "..." and ".. " are ".."), and a NUL character.
     """
+    if "." not in name and ":" not in name and "\\" not in name and "\0" not in name:
+        return name != "" and not name.startswith("/")  # the same result, fast: most class names
     parts = name.replace("\\", "/").split("/")
     if not parts[0] or ":" in parts[0] or "\0" in name:
         return False

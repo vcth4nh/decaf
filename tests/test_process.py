@@ -4842,7 +4842,7 @@ def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, cla
     folder = tmp_path / "classes"
     for rel, data in {"p/A.class": class_file("p/A"), "p/B.class": class_file("../B"), "p/C.class": b"no class",
                       "p/D.class": class_file("p/D"), "p/r.txt": b"x",
-                      "p/d.class/E.class": class_file("p/d.class/E")}.items():  # a folder named d.class is no file
+                      "p/d.class/E.class": class_file("p/E")}.items():  # a folder named d.class is no file
         (folder / rel).parent.mkdir(parents=True, exist_ok=True)
         (folder / rel).write_bytes(data)
     real_open = open

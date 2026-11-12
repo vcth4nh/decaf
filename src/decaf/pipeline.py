@@ -706,9 +706,8 @@ def _bounded(f) -> bytes | None:
 
 
 def _safe_class(data: bytes | None) -> bool:
-    """Can decaf prove that the class name of a class file stays inside the output folder?"""
-    name = check.safe_class_name(data) if data is not None else None
-    return name is not None and stays_inside(name)
+    """Can decaf prove that the class names of a class file stay inside the output folder?"""
+    return data is not None and check.class_names_stay_inside(data)
 
 
 def _refused_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:

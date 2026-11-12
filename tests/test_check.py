@@ -370,6 +370,7 @@ def test_safe_class_name_reads_this_class():
     _class_file(b"p/\xc0\x80"),  # the 2-byte form of NUL
     _class_file(b"p/\xff"),  # no UTF-8
     _class_file("p/\U0001f600"),  # a 4-byte form: a class file has none
+    _class_file("p/A.B"), _class_file("p/A;"), _class_file("[Lp/A;"),  # the JVM allows none of . ; [ in a class name
 ])
 def test_safe_class_name_gives_none_when_readers_can_differ(data):
     """Each reader gives the same text for the name bytes, or there is no name."""
@@ -748,11 +749,12 @@ def test_run_check_gives_classify_the_detached_files(tmp_path: Path, monkeypatch
     assert [r.status for r in out[0]] == ["noted", "flagged"]
 
 
-def _class_with(name: str, interfaces: tuple[str, ...] = (), utf8: tuple[str, ...] = ()) -> bytes:
-    """A minimal class file with interfaces and more Utf8 constants, e.g. an annotation descriptor."""
+def _class_with(name: str, interfaces: tuple[str | bytes, ...] = (), utf8: tuple[str, ...] = ()) -> bytes:
+    """A minimal class file with interfaces (bytes: the name bytes as they are) and more Utf8 constants, e.g. an
+    annotation descriptor."""
     pool, index = b"", {}
     for i, n in enumerate((name, *interfaces)):
-        u = n.encode()
+        u = n if isinstance(n, bytes) else n.encode()
         pool += b"\x01" + len(u).to_bytes(2, "big") + u + b"\x07" + (2 * i + 1).to_bytes(2, "big")
         index[n] = 2 * i + 2
     for s in utf8:
@@ -941,3 +943,13 @@ def test_run_check_notes_bytecode_only_errors_of_the_non_java_files(tmp_path: Pa
     jobs = [check.Job("0", (), (groovy, java), non_java=frozenset({groovy}))]
     out = check.run_check(jobs, timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
     assert [r.status for r in out[0]] == ["noted", "flagged"]
+
+
+def test_class_names_stay_inside_tests_each_class_entry_of_the_pool():
+    assert check.class_names_stay_inside(_class_with("p/A", interfaces=("java/io/Serializable", "[Ljava/lang/String;")))
+    assert not check.class_names_stay_inside(_class_with("p/A", interfaces=("../../x/I",)))
+    assert not check.class_names_stay_inside(_class_with("p/A", interfaces=(b"p/\xc0\xae\xc0\xae/I",)))
+    assert not check.class_names_stay_inside(_class_with("p/A", interfaces=("p/\U0001f600",)))
+    assert not check.class_names_stay_inside(_class_with("../A"))
+    assert not check.class_names_stay_inside(_class_with("p/A.B"))
+    assert not check.class_names_stay_inside(b"not a class")
