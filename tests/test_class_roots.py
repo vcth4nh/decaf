@@ -193,3 +193,44 @@ def test_the_sources_of_a_war_are_the_sources_of_a_plain_jar(classes: Path, tmp_
     texts = {p.relative_to(from_jar).as_posix(): p.read_bytes() for p in from_jar.rglob("*.java")}
     assert sorted(texts) == ["com/x/A.java", "p/A.java", "q/B.java"]
     assert {p.relative_to(from_war).as_posix(): p.read_bytes() for p in from_war.rglob("*.java")} == texts
+
+
+@pytest.fixture(scope="module")
+def multi_release(tmp_path_factory) -> dict[str, bytes]:
+    """p/A as a Java 8 base class and as a Java 9 variant with another body."""
+    javac = shutil.which("javac")
+    if javac is None:
+        pytest.skip("javac not available")
+    bodies = {"8": "return 1;\n    }\n", "9": 'return 9;\n    }\n\n    public String nine() {\n        return "nine";\n    }\n'}
+    out = {}
+    for release, body in bodies.items():
+        src = tmp_path_factory.mktemp(f"src{release}") / "p/A.java"
+        src.parent.mkdir()
+        src.write_text("package p;\n\npublic class A {\n    public int one() {\n        " + body + "}\n")
+        dest = tmp_path_factory.mktemp(f"classes{release}")
+        subprocess.run([javac, "--release", release, "-d", str(dest), str(src)], check=True, capture_output=True)
+        out[release] = (dest / "p/A.class").read_bytes()
+    return out
+
+
+@pytest.mark.parametrize("name, prefix", [("boot.jar", ""), ("app.war", "WEB-INF/classes/")])
+def test_cfr_keeps_the_versions_of_a_class_apart_in_an_archive_with_a_container_root(
+    classes: Path, multi_release: dict[str, bytes], tmp_path: Path, name, prefix
+):
+    """The temp jar of a root has the manifest of the archive. Before, it had no Multi-Release line, and CFR wrote
+    the body of the variant as p/A.java and no variant file."""
+    archive = tmp_path / "in" / name
+    archive.parent.mkdir(parents=True)
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n")
+        zf.writestr(prefix + "p/A.class", multi_release["8"])
+        zf.writestr(prefix + "META-INF/versions/9/p/A.class", multi_release["9"])
+        if not prefix:  # a container root, so the classes at the jar root get a temp jar too
+            zf.write(classes / "com/x/A.class", "BOOT-INF/classes/com/x/A.class")
+    out = tmp_path / "out"
+    row = _run(archive, out, "--engine", "cfr", "--no-fallback", "--no-check")
+    assert row["missing_classes"] == 0
+    base = (out / name / prefix / "p/A.java").read_text()
+    variant = (out / name / prefix / "META-INF/versions/9/p/A.java").read_text()
+    assert "return 1;" in base and "nine" not in base
+    assert "return 9;" in variant and '"nine"' in variant

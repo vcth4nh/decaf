@@ -4313,3 +4313,17 @@ def test_run_merges_a_class_folder_above_its_package_root_by_package(fake_env, t
     report = run(Settings(input=input_dir, output=out, maven=False, mirror=mirror), runner=perfect_engine)
     assert report.artifacts[0].missing_classes == 0
     assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*.java")) == written
+
+
+def test_run_merge_cuts_a_root_prefix_only_from_the_class_file_with_that_prefix(fake_env, tmp_path, class_file):
+    """lib/p/L.class is the class lib.p.L at its package root, lib/q/B.class is q.B. Before, the merge wrote
+    src/p/L.java with package lib.p; as the prefix lib/ of q.B was cut from each path."""
+    input_dir = tmp_path / "in"
+    for rel, name in (("lib/p/L", "lib/p/L"), ("lib/q/B", "q/B")):
+        p = input_dir / f"{rel}.class"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(class_file(name))
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False, mirror=False), runner=perfect_engine)
+    assert report.artifacts[0].missing_classes == 0
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*.java")) == ["src/lib/p/L.java", "src/q/B.java"]

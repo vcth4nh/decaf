@@ -190,35 +190,46 @@ def _resource_members(archive: Path, include_sources: bool) -> list[str]:
 class MergeWriter:
     """Merges source files (.java/.kt by default) from many trees into one package tree.
 
-    Collisions are deterministic: the tree with the lowest sort_key wins,
+    Collisions are deterministic: the tree with the lowest sort_key wins, and of one sort_key a base class before
+    its versions twin, then the lowest engine path,
     regardless of the order in which worker threads deliver results. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
-    The root prefixes of a class folder (target/classes/) are cut before all else (#199).
+    The root prefix of each class file of a class folder (target/classes/) is cut before all else (#199).
     """
 
     def __init__(
-        self, src_root: Path, *, case_insensitive: bool = False, roots: dict[str, list[str]] | None = None
+        self, src_root: Path, *, case_insensitive: bool = False, roots: dict[str, dict[str, str]] | None = None
     ) -> None:
         self.root = src_root
         self._lock = threading.Lock()
         self._case_insensitive = case_insensitive
-        self._index: dict[str, tuple[tuple[str, bool], str, str]] = {}  # key -> (rank, sha256, rel)
-        # artifact rel -> the root prefixes of its class files, the longest first
-        self._roots = {rel: sorted(prefixes, key=len, reverse=True) for rel, prefixes in (roots or {}).items()}
+        self._index: dict[str, tuple[tuple[str, bool, str], str, str]] = {}  # key -> (rank, sha256, rel)
+        # artifact rel -> {the path of a class file without .class: its root prefix}, only non-empty prefixes
+        self._roots = roots or {}
 
     def _cut(self, sort_key: str, raw: str) -> str:
-        for prefix in self._roots.get(sort_key, ()):
-            if raw.startswith(prefix):
-                return raw[len(prefix) :]
-        return raw
+        """raw without the root prefix of the class file with its path; a path of no such class file stays."""
+        prefix = self._roots.get(sort_key, {}).get(raw[: len(raw) - len(PurePosixPath(raw).suffix)], "")
+        return raw[len(prefix) :]
 
     def _twin(self, sort_key: str, raw: str) -> bool:
         return _strip_container(self._cut(sort_key, raw)).startswith("META-INF/versions/")
 
-    def out_path(self, sort_key: str, raw: str) -> str:
-        """The path below src/ of an engine file of the artifact sort_key, the report path too (#174)."""
+    def _target(self, sort_key: str, raw: str) -> str:
+        """The path below src/ of an engine file of the artifact sort_key."""
         return normalize_java_rel(self._cut(sort_key, raw))
+
+    def out_path(self, sort_key: str, raw: str) -> str:
+        """The report path of an engine file: its path below src/ (#174), but a versions twin keeps its versions
+        folder when the file at that path is the base class of the same artifact."""
+        rel = self._target(sort_key, raw)
+        if self._twin(sort_key, raw):
+            with self._lock:
+                existing = self._index.get(casefs.fold(rel) if self._case_insensitive else rel)
+            if existing is not None and existing[0][0] == sort_key and not existing[0][1]:
+                return _strip_container(self._cut(sort_key, raw))
+        return rel
 
     def add_tree(self, tree: Path, sort_key: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         java = 0
@@ -232,8 +243,9 @@ class MergeWriter:
             java += 1
             raw = p.relative_to(tree).as_posix()
             # A held or retried base class can come in a later tree than its twin: of one sort key, the base wins.
-            rank = (sort_key, self._twin(sort_key, raw))
-            rel = self.out_path(sort_key, raw)
+            # Of two files of one sort key, the first engine path wins, in any order of the trees.
+            rank = (sort_key, self._twin(sort_key, raw), raw)
+            rel = self._target(sort_key, raw)
             key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
@@ -251,6 +263,8 @@ class MergeWriter:
                     if existing[2] != rel:
                         entry["dropped_path"] = existing[2]
                         (self.root / existing[2]).unlink(missing_ok=True)
+                    if sort_key == existing[0][0] and raw != existing[0][2]:
+                        entry |= {"kept_file": raw, "dropped_file": existing[0][2]}
                     collisions.append(entry)
                     self._index[key] = (rank, digest, rel)
                     target = self.root / rel
@@ -260,6 +274,8 @@ class MergeWriter:
                     entry = {"path": existing[2], "kept": existing[0][0], "dropped": sort_key}
                     if existing[2] != rel:
                         entry["dropped_path"] = rel
+                    if sort_key == existing[0][0] and raw != existing[0][2]:
+                        entry |= {"kept_file": existing[0][2], "dropped_file": raw}
                     collisions.append(entry)
         return java, collisions
 
@@ -1343,7 +1359,7 @@ def _hold_output(
 
 def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
     """End of the chain: write the held files (the first engine's file) and list them (#96, #99)."""
-    path = partial(ctx.writer.out_path, rel)  # a list gives the path of the written file (#174)
+    path = partial(ctx.writer.out_path, rel)  # a list gives the path of the written file (#174), see out_path
     for keys in held.nests.values():  # the spares: a chosen file nests their classes (#159)
         for k in keys:
             f = held.files.pop(k, None)
@@ -1514,9 +1530,15 @@ def _root_jar(archive: Path, prefix: str, jar: Path) -> None:
     An engine gets the same entries as from a plain jar, so it writes the same text. Of two entries with one name,
     the last one goes in, and an entry that cannot be read stays out, as in safe_extract_zip. An entry whose path
     below the prefix leaves the jar root stays out too. Each entry goes through a file, not through memory.
+    The META-INF/MANIFEST.MF of the archive is the first entry: CFR reads its Multi-Release line to keep the
+    META-INF/versions/ copy of a class apart from the base class.
     """
     with zipfile.ZipFile(archive) as zf:
         chosen: dict[str, zipfile.ZipInfo] = {}
+        try:
+            chosen["META-INF/MANIFEST.MF"] = zf.getinfo("META-INF/MANIFEST.MF")
+        except KeyError:
+            pass
         for info in zf.infolist():
             name = info.filename
             if info.is_dir() or not name.endswith(".class") or _container_prefix(name) != prefix:
@@ -1545,9 +1567,12 @@ def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, des
     target stays as it is. An archive with WEB-INF/classes/ or BOOT-INF/classes/ gives a temporary jar for each
     root: from a folder, CFR writes other text than from a jar. In a folder, a root is its own folder when each
     class file below it has its prefix, else a copy. The timeout is for the whole target, as in _run_per_class.
+    A root whose folder below dest is not inside dest (an entry name that leaves the output folder) gets no run, so
+    its classes are missing, as safe_extract_zip skips such an entry.
     """
     if spec.name not in _ROOTED_ENGINES:
         return ctx.runner(spec, jar, target, dest, timeout, **kw)
+    resolved_dest = dest.resolve()
     temps: list[Path] = []
     try:
         if target.is_dir():
@@ -1564,6 +1589,12 @@ def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, des
         results: list[engines.EngineResult] = []
         timed_out = False
         for prefix in sorted(set(prefixes.values())):
+            try:
+                inside = (dest / prefix).resolve().is_relative_to(resolved_dest)
+            except OSError:
+                inside = False
+            if not inside:
+                continue
             if results and engines.PROCESSES.closed:
                 break
             left = deadline - time.monotonic()
@@ -2422,11 +2453,13 @@ def run(
             if settings.mirror:
                 writer = MirrorWriter(settings.output, resources=settings.resources)
             else:
-                roots = {  # a class folder merges by package, not at target/classes/ (#199)
-                    a.rel: [r for r in {_root_prefix(a.path, p.relative_to(a.path).as_posix())
-                                        for p in a.path.rglob("*.class")} if r]
-                    for a in artifacts if a.kind is ArtifactKind.CLASS_TREE
-                }
+                # a class folder merges by package, not at target/classes/ (#199)
+                roots: dict[str, dict[str, str]] = {}
+                for a in artifacts:
+                    if a.kind is ArtifactKind.CLASS_TREE:
+                        rels = (p.relative_to(a.path).as_posix() for p in a.path.rglob("*.class"))
+                        prefixes = {rel[: -len(".class")]: _root_prefix(a.path, rel) for rel in rels}
+                        roots[a.rel] = {stem: prefix for stem, prefix in prefixes.items() if prefix}
                 writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None, roots=roots)
             ctx = Ctx(
                 settings=settings,

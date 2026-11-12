@@ -61,7 +61,8 @@ def test_merge_keeps_the_base_version_of_a_multi_release_class(tmp_path: Path):
     t = tree(tmp_path / "t", {"META-INF/versions/11/com/x/A.java": "// v11", "com/x/A.java": "// base"})
     java, collisions = w.add_tree(t, "mr.jar")
     assert (tmp_path / "src/com/x/A.java").read_text() == "// base"
-    assert java == 2 and [c["path"] for c in collisions] == ["com/x/A.java"]
+    assert java == 2 and collisions == [{"path": "com/x/A.java", "kept": "mr.jar", "dropped": "mr.jar",
+                                         "kept_file": "com/x/A.java", "dropped_file": "META-INF/versions/11/com/x/A.java"}]
 
 
 @pytest.mark.parametrize("twin_first", [True, False], ids=["twin-first", "base-first"])
@@ -72,7 +73,8 @@ def test_merge_keeps_the_base_version_from_another_tree_of_the_artifact(tmp_path
     base = tree(tmp_path / "t2", {"com/x/A.java": "// base"})
     collisions = [c for t in ((twin, base) if twin_first else (base, twin)) for c in w.add_tree(t, "mr.jar")[1]]
     assert (tmp_path / "src/com/x/A.java").read_text() == "// base"
-    assert collisions == [{"path": "com/x/A.java", "kept": "mr.jar", "dropped": "mr.jar"}]  # as for one tree
+    assert collisions == [{"path": "com/x/A.java", "kept": "mr.jar", "dropped": "mr.jar",  # as for one tree
+                           "kept_file": "com/x/A.java", "dropped_file": "META-INF/versions/11/com/x/A.java"}]
 
 
 def test_merge_lowest_key_wins_also_over_a_base_version(tmp_path: Path):
@@ -317,7 +319,7 @@ def test_merge_flag_off_keeps_exact_keys(tmp_path: Path):
 
 
 def test_merge_cuts_the_root_prefix_of_a_class_folder(tmp_path: Path):
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     t = tree(tmp_path / "t", {"target/classes/p/A.java": "class A {}", "other/q/B.java": "class B {}"})
     assert w.add_tree(t, "_classes") == (2, [])
     assert sorted(p.relative_to(tmp_path / "src").as_posix() for p in (tmp_path / "src").rglob("*.java")) == [
@@ -325,28 +327,57 @@ def test_merge_cuts_the_root_prefix_of_a_class_folder(tmp_path: Path):
     ]
 
 
-def test_merge_cuts_the_longest_root_prefix(tmp_path: Path):
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["a/", "a/b/"]})
-    t = tree(tmp_path / "t", {"a/b/p/A.java": "class A {}", "a/q/B.java": "class B {}"})
+def test_merge_cuts_only_the_prefix_of_the_class_file_with_that_path(tmp_path: Path):
+    """lib/p/L.class is the class lib.p.L, lib/q/B.class is q.B. Before, the merge cut lib/ of each path, and wrote
+    src/p/L.java with package lib.p;."""
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"lib/q/B": "lib/", "lib/q/B$Nested": "lib/"}})
+    t = tree(tmp_path / "t", {"lib/p/L.java": "package lib.p;", "lib/q/B.java": "package q;"})
+    assert w.add_tree(t, "_classes") == (2, [])
+    assert sorted(p.relative_to(tmp_path / "src").as_posix() for p in (tmp_path / "src").rglob("*.java")) == [
+        "lib/p/L.java", "q/B.java",
+    ]
+
+
+def test_merge_cuts_the_root_prefix_of_an_inner_class_file_written_apart(tmp_path: Path):
+    roots = {"target/classes/p/A": "target/classes/", "target/classes/p/A$1": "target/classes/"}
+    w = MergeWriter(tmp_path / "src", roots={"_classes": roots})
+    t = tree(tmp_path / "t", {"target/classes/p/A.java": "class A {}", "target/classes/p/A$1.java": "class A$1 {}"})
     w.add_tree(t, "_classes")
-    assert (tmp_path / "src/p/A.java").is_file() and (tmp_path / "src/q/B.java").is_file()
+    assert sorted(p.relative_to(tmp_path / "src").as_posix() for p in (tmp_path / "src").rglob("*.java")) == [
+        "p/A$1.java", "p/A.java",
+    ]
 
 
 def test_merge_sees_a_versions_twin_after_the_root_prefix_cut(tmp_path: Path):
     """mr/META-INF/versions/11/p/A.java is the versions twin of mr/p/A.java (#107)."""
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["mr/"]})
+    stems = ("mr/META-INF/versions/11/p/A", "mr/p/A", "mr/META-INF/versions/11/q/B", "mr/q/B")
+    w = MergeWriter(tmp_path / "src", roots={"_classes": dict.fromkeys(stems, "mr/")})
     twin = tree(tmp_path / "t1", {"mr/META-INF/versions/11/p/A.java": "// v11"})
     base = tree(tmp_path / "t2", {"mr/p/A.java": "// base"})
     collisions = [c for t in (twin, base) for c in w.add_tree(t, "_classes")[1]]
     assert (tmp_path / "src/p/A.java").read_text() == "// base"
-    assert collisions == [{"path": "p/A.java", "kept": "_classes", "dropped": "_classes"}]
+    assert collisions == [{"path": "p/A.java", "kept": "_classes", "dropped": "_classes",
+                           "kept_file": "mr/p/A.java", "dropped_file": "mr/META-INF/versions/11/p/A.java"}]
     both = tree(tmp_path / "t3", {"mr/META-INF/versions/11/q/B.java": "// v11", "mr/q/B.java": "// base"})
     w.add_tree(both, "_classes")
     assert (tmp_path / "src/q/B.java").read_text() == "// base"
 
 
+@pytest.mark.parametrize("order", [("alice", "bob"), ("bob", "alice")])
+def test_merge_keeps_the_first_engine_path_of_two_classes_with_one_name(tmp_path: Path, order):
+    """alice/Top.class and bob/Top.class are two classes Top of one class folder. Before, the file of the engine run
+    that came first stayed, and the entry did not name the two files."""
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"alice/Top": "alice/", "bob/Top": "bob/"}})
+    collisions = []
+    for name in order:
+        collisions += w.add_tree(tree(tmp_path / name, {f"{name}/Top.java": f"// {name}"}), "_classes")[1]
+    assert (tmp_path / "src/Top.java").read_text() == "// alice"
+    assert collisions == [{"path": "Top.java", "kept": "_classes", "dropped": "_classes",
+                           "kept_file": "alice/Top.java", "dropped_file": "bob/Top.java"}]
+
+
 def test_merge_keeps_the_path_of_an_artifact_without_root_prefixes(tmp_path: Path):
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     t = tree(tmp_path / "t", {"target/classes/p/A.java": "class A {}", "WEB-INF/classes/q/B.java": "class B {}"})
     w.add_tree(t, "app.war")
     assert (tmp_path / "src/target/classes/p/A.java").is_file() and (tmp_path / "src/q/B.java").is_file()
@@ -354,7 +385,7 @@ def test_merge_keeps_the_path_of_an_artifact_without_root_prefixes(tmp_path: Pat
 
 def test_merge_gives_a_class_folder_and_a_jar_with_one_class_one_file(tmp_path: Path):
     """Before, the class folder wrote target/classes/p/A.java, and the jar wrote p/A.java (#199)."""
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     assert w.add_tree(tree(tmp_path / "t1", {"target/classes/p/A.java": "class A {}"}), "_classes") == (1, [])
     assert w.add_tree(tree(tmp_path / "t2", {"p/A.java": "class A {}"}), "app.jar") == (1, [])  # identical
     _, collisions = w.add_tree(tree(tmp_path / "t3", {"p/A.java": "class A { /* b */ }"}), "b.jar")
@@ -364,7 +395,7 @@ def test_merge_gives_a_class_folder_and_a_jar_with_one_class_one_file(tmp_path: 
 
 def test_out_path_is_the_path_of_the_written_file(tmp_path: Path):
     """The report path of a held file (#174): below src/ with --merge, below the artifact folder in mirror mode."""
-    merge = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    merge = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     assert merge.out_path("_classes", "target/classes/p/A.java") == "p/A.java"
     assert merge.out_path("app.war", "WEB-INF/classes/com/x/A.java") == "com/x/A.java"
     assert merge.out_path("mr.jar", "META-INF/versions/11/com/x/A.java") == "com/x/A.java"
@@ -372,3 +403,36 @@ def test_out_path_is_the_path_of_the_written_file(tmp_path: Path):
     mirror = MirrorWriter(tmp_path / "out")
     assert mirror.out_path("app.war", "WEB-INF/classes/com/x/A.java") == "WEB-INF/classes/com/x/A.java"
     assert mirror.out_path("_classes", "target/classes/p/A.java") == "target/classes/p/A.java"
+
+
+# --- the report path of a versions twin with --merge ---
+
+
+def test_out_path_of_a_versions_twin_with_a_base_class_keeps_the_versions_folder(tmp_path: Path):
+    """Before, the report gave com/y/S.java for the twin, and src/com/y/S.java was the base class."""
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"mr/p/A": "mr/", "mr/META-INF/versions/11/p/A": "mr/"}})
+    w.add_tree(tree(tmp_path / "t1", {"com/y/S.java": "// base", "META-INF/versions/11/com/y/S.java": "// v11"}), "mr.jar")
+    w.add_tree(tree(tmp_path / "t2", {
+        "WEB-INF/classes/q/B.java": "// base", "WEB-INF/classes/META-INF/versions/9/q/B.java": "// v9",
+    }), "app.war")
+    w.add_tree(tree(tmp_path / "t3", {"mr/p/A.java": "// base", "mr/META-INF/versions/11/p/A.java": "// v11"}), "_classes")
+    assert w.out_path("mr.jar", "META-INF/versions/11/com/y/S.java") == "META-INF/versions/11/com/y/S.java"
+    assert w.out_path("mr.jar", "com/y/S.java") == "com/y/S.java"
+    assert w.out_path("app.war", "WEB-INF/classes/META-INF/versions/9/q/B.java") == "META-INF/versions/9/q/B.java"
+    assert w.out_path("_classes", "mr/META-INF/versions/11/p/A.java") == "META-INF/versions/11/p/A.java"
+    assert (tmp_path / "src/com/y/S.java").read_text() == "// base"
+
+
+def test_out_path_of_a_versions_twin_without_a_base_class_is_the_output_path(tmp_path: Path):
+    w = MergeWriter(tmp_path / "src")
+    w.add_tree(tree(tmp_path / "t1", {"META-INF/versions/11/com/y/S.java": "// v11"}), "mr.jar")
+    w.add_tree(tree(tmp_path / "t2", {"com/y/S.java": "// base of z"}), "z.jar")  # another artifact: the twin stays
+    assert w.out_path("mr.jar", "META-INF/versions/11/com/y/S.java") == "com/y/S.java"
+    assert (tmp_path / "src/com/y/S.java").read_text() == "// v11"
+
+
+def test_out_path_of_a_versions_twin_in_mirror_mode_is_the_engine_path(tmp_path: Path):
+    mirror = MirrorWriter(tmp_path / "out")
+    mirror.add_tree(tree(tmp_path / "t", {"com/y/S.java": "// base", "META-INF/versions/11/com/y/S.java": "// v11"}), "mr.jar")
+    assert mirror.out_path("mr.jar", "META-INF/versions/11/com/y/S.java") == "META-INF/versions/11/com/y/S.java"
+    assert mirror.out_path("mr.jar", "com/y/S.java") == "com/y/S.java"
