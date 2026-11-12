@@ -5782,3 +5782,17 @@ def test_a_row_whose_class_files_decaf_refused_each_starts_no_engine(make_jar, t
     assert runner.calls == [] and report.attempts == []
     assert (report.outcome, report.failure) == ("failed", "no class file is left: decaf refused each one")
     assert (report.classes, report.refused, report.missing_classes) == (2, 2, 0)
+
+
+def test_the_warning_cuts_a_long_name(tmp_path: Path):
+    from decaf.pipeline import ArtifactReport, _note_refused
+
+    warns: list[str] = []
+    ctx = make_ctx(tmp_path, _names_runner())
+    ctx.on_warn = warns.append
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    _note_refused(Artifact(tmp_path / "a.jar", "a.jar", ArtifactKind.ARCHIVE), ctx, report, ["../" + "\xe9" * 500], "entries")
+    shown = ascii("../" + "\xe9" * 500)[:200]
+    assert warns[0].endswith(f"; the first is {shown}...") and report.refused == 1
+    _note_refused(Artifact(tmp_path / "a.jar", "a.jar", ArtifactKind.ARCHIVE), ctx, report, ["../x"], "entries")
+    assert warns[1].endswith("; the first is '../x'")

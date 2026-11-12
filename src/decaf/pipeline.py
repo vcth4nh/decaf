@@ -853,14 +853,19 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
     return jar, refused
 
 
+_WARN_NAME_MAX = 200  # characters of the ascii() text of the first refused name in the warning
+
+
 def _note_refused(artifact: Artifact, ctx: Ctx, report: ArtifactReport, names: list[str], unit: str) -> None:
     """Count the refused items of a row, and print one warning for them."""
     if not names:
         return
     report.refused += len(names)
     if ctx.on_warn is not None:
+        first = ascii(names[0])
+        first = first if len(first) <= _WARN_NAME_MAX else first[:_WARN_NAME_MAX] + "..."
         ctx.on_warn(f"{artifact.rel}: decaf does not use {len(names)} of its {unit}, because a name or a class name"
-                    f" can leave the output folder, or decaf cannot read the class name; the first is {ascii(names[0])}")
+                    f" can leave the output folder, or decaf cannot read the class name; the first is {first}")
 
 
 def _class_versions(source: Path) -> tuple[dict[str, int], dict[str, str]]:
