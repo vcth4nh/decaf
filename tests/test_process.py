@@ -5712,3 +5712,13 @@ def test_decaf_writes_no_file_with_the_name_of_an_entry_that_the_row_counts_as_r
     written = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*") if p.is_file())
     assert written == ["lib.jar/s.txt"]
     assert report.refused == 1
+
+
+def test_the_engine_copy_refuses_a_name_that_zipfile_cannot_write(tmp_path: Path):
+    """A name with no UTF-8 flag is cp437: each high byte becomes two bytes of UTF-8 in the copy, and a name of the
+    copy above 65,535 bytes does not fit in its field."""
+    long_name = b"p/" + b"\xff" * 40_000 + b".txt"
+    jar = _raw_zip(tmp_path / "a.jar", [(long_name, b"x"), (b"r.txt", b"r")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [long_name.decode("cp437")]
+    assert _entries(copy) == [("r.txt", b"r")]
