@@ -10,6 +10,19 @@ import httpx
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def fake_class_files_go_to_the_engines(request, monkeypatch):
+    """Many tests use fake class files such as b"x" or a bare header. They do not parse, so in a real run no
+    engine gets them. Here such a file goes to the engines; a class file whose constant pool parses gets the real
+    test. A test with the mark class_names gets the real test for each file."""
+    if request.node.get_closest_marker("class_names") is not None:
+        return
+    from decaf import check, pipeline
+
+    real = pipeline._safe_class
+    monkeypatch.setattr(pipeline, "_safe_class", lambda data: data is not None and (check._pool(data) is None or real(data)))
+
+
 @pytest.fixture
 def make_jar(tmp_path: Path):
     """Build a zip/jar at tmp_path/relname with {entry_name: content} members."""

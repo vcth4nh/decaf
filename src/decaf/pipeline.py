@@ -727,6 +727,41 @@ def _refused(source: Path) -> list[zipfile.ZipInfo] | list[str]:
     return out
 
 
+def _copy_without_refused(archive: Path, folder: Path) -> Path:
+    """A copy of the archive in folder, with its file name, without the _refused_entry entries.
+
+    The entries keep their order, and each entry of a name that is not refused stays. An entry that cannot be read
+    stays out, as in _root_jar. Each entry goes through a file, not through memory.
+    """
+    jar = folder / archive.name  # an engine reads the suffix, and one engine names its output after the file
+    part = folder / "entry.part"
+    with zipfile.ZipFile(archive) as zf, zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as out:
+        for info in zf.infolist():
+            if _refused_entry(zf, info):
+                continue
+            try:
+                with zf.open(info) as src, open(part, "wb") as f:
+                    shutil.copyfileobj(src, f)
+            except ZIP_ERRORS as exc:
+                if isinstance(exc, OSError) and exc.errno is not None:
+                    raise  # the disk, not the entry
+                continue
+            entry = zipfile.ZipInfo(info.filename, info.date_time)
+            entry.external_attr = info.external_attr
+            entry.compress_type = zipfile.ZIP_STORED if info.is_dir() else zipfile.ZIP_DEFLATED
+            entry.file_size = part.stat().st_size
+            out.NameToInfo.pop(info.filename, None)  # a second entry of a name stays, with no "Duplicate name" warning
+            with open(part, "rb") as f, out.open(entry, "w") as dst:
+                shutil.copyfileobj(f, dst)
+    part.unlink()
+    return jar
+
+
+def _refused_warning(rel: str, count: int, unit: str, first: str) -> str:
+    return (f"{rel}: no engine gets {count} of its {unit}, because a name or a class name can leave the output"
+            f" folder, or decaf cannot read the class name; the first is {ascii(first)}")
+
+
 def _class_versions(source: Path) -> tuple[dict[str, int], dict[str, str]]:
     """Lowest class-file major version of each top-level class file, by _held_key (#99),
     and the language of each class from Kotlin, Groovy, or Scala (#108)."""
@@ -2252,8 +2287,19 @@ def _fetch_stage(
                     if gap:
                         msg += f"; {len(gap)} classes not in the sources jar"
                     ctx.on_stderr(f"maven {artifact.rel}: {msg}")
-            if not hit or gap:
+            if gap:  # the engines get only the retry trees of the gap classes, without the refused class files
                 return report, nested, artifact.path
+            if not hit:
+                refused = _refused(artifact.path)
+                if not refused:
+                    return report, nested, artifact.path
+                folder = _tmp_dir(ctx)
+                with ctx.family_lock:
+                    ctx.family_dirs.setdefault(artifact.rel, []).append(folder)  # it goes when the row is final
+                target = _copy_without_refused(artifact.path, folder)
+                if ctx.on_warn is not None:
+                    ctx.on_warn(_refused_warning(artifact.rel, len(refused), "entries", refused[0].filename))
+                return report, nested, target
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
@@ -2857,6 +2903,9 @@ def run(
                                     if (
                                         batch_runner is not None
                                         and not target.is_dir()
+                                        # a copy without refused entries: a batch takes the expected classes from
+                                        # its target, so the refused classes would not count as missing
+                                        and target == a.path
                                         and a.classes < _SMALL_CLASSES
                                         and chain[0] in engines.BATCH_ENGINES
                                         and report.method != "maven"  # a Maven row with a gap: its class retries run alone (#180)

@@ -1,4 +1,5 @@
 import re
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -4720,7 +4721,7 @@ def test_the_row_counts_a_class_whose_entry_name_leaves_the_output_folder_as_mis
     report, _ = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
     assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 2, 1, 1)
     assert _sources(tmp_path / "out") == ["app.war/WEB-INF/classes/q/B.java"]
-    assert _files_outside(tmp_path, tmp_path / "out", {war}) == []
+    assert _files_outside(tmp_path, tmp_path / "out", {war, *ctx.tmp_root.rglob("*")}) == []  # the copy is a temp file
 
 
 def test_the_temp_jar_goes_when_the_engine_raises(tmp_path: Path, class_file):
@@ -4795,6 +4796,7 @@ def test_refused_lists_a_class_entry_whose_class_name_leaves_the_folder(tmp_path
     assert [i.filename for i in _refused(jar)] == ["p/A.class"]
 
 
+@pytest.mark.class_names
 def test_refused_lists_a_class_entry_that_does_not_parse_or_cannot_be_read(make_damaged_jar, tmp_path: Path, class_file):
     from decaf.pipeline import _refused
 
@@ -4833,6 +4835,7 @@ def test_refused_lists_nothing_for_a_normal_archive(tmp_path: Path, class_file):
     assert _refused(jar) == []
 
 
+@pytest.mark.class_names
 def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, class_file, monkeypatch):
     import decaf.pipeline as pipeline
 
@@ -4850,3 +4853,79 @@ def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, cla
 
     monkeypatch.setattr("builtins.open", failing_open)
     assert pipeline._refused(folder) == ["p/B.class", "p/C.class", "p/D.class"]
+
+
+def _names_runner():
+    """Fake engine: records the target and its entry names, and writes one file for each top-level class entry."""
+    calls: list[tuple[Path, list[str]]] = []
+
+    def _run(spec, jar_path, target, dest, timeout, **kw):
+        with zipfile.ZipFile(target) as zf:
+            names = zf.namelist()
+        calls.append((Path(target), names))
+        n = 0
+        for name in dict.fromkeys(names):
+            if name.endswith(".class") and "$" not in name.rsplit("/", 1)[-1]:
+                out = Path(dest) / (name[: -len(".class")] + ".java")
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text("class X {}\n")
+                n += 1
+        return EngineResult(spec.name, 0, False, n, "")
+
+    _run.calls = calls
+    return _run
+
+
+def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"),
+        ("p/", b""),
+        ("p/A.class", class_file("p/A")),
+        ("p/B.class", class_file("../B")),  # its class name leaves the folder
+        ("../x/C.class", class_file("x/C")),  # its entry name leaves the folder
+        ("p/D.class", class_file("p/\0D")),  # the first copy of a name is refused
+        ("p/D.class", class_file("p/D")),  # the last copy is not
+        ("p/E.class", class_file("p/E") + b"1"),  # two good copies of a name both stay
+        ("p/E.class", class_file("p/E") + b"2"),
+        ("p/r.txt", b"r"),
+    ])
+    before = jar.read_bytes()
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "Duplicate name" warning of zipfile
+        report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    ((target, names),) = runner.calls
+    assert names == ["META-INF/MANIFEST.MF", "p/", "p/A.class", "p/D.class", "p/E.class", "p/E.class", "p/r.txt"]
+    with zipfile.ZipFile(target) as zf:
+        assert zf.read("p/D.class") == class_file("p/D") and zf.getinfo("p/").is_dir()
+        assert [zf.read(i) for i in zf.infolist() if i.filename == "p/E.class"] == [
+            class_file("p/E") + b"1", class_file("p/E") + b"2"]
+    assert target.name == "app.jar" and target != jar and target.parent in ctx.family_dirs["app.jar"]
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 5, 2, 3)
+    assert warns == ["app.jar: no engine gets 3 of its entries, because a name or a class name can leave the output"
+                     " folder, or decaf cannot read the class name; the first is 'p/B.class'"]
+    assert jar.read_bytes() == before
+
+
+def test_an_engine_gets_a_normal_archive_itself(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("p/r.txt", b"r")])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [t for t, _ in runner.calls] == [jar] and warns == [] and "app.jar" not in ctx.family_dirs
+    assert (report.classes, report.missing_classes) == (1, 0)
+
+
+def test_the_warning_shows_a_control_character_of_the_first_name_as_an_escape(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("\x1b[2J/../B.class", class_file("B"))])
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert warns == ["app.jar: no engine gets 1 of its entries, because a name or a class name can leave the output"
+                     " folder, or decaf cannot read the class name; the first is '\\x1b[2J/../B.class'"]

@@ -1997,6 +1997,45 @@ def test_a_batch_member_reads_its_class_files_in_a_worker(fake_env, make_jar, tm
     assert readers and threading.main_thread() not in readers
 
 
+@pytest.mark.parametrize("refused", [False, True])
+def test_an_archive_with_a_refused_entry_is_no_batch_target(fake_env, make_jar, tmp_path, class_file, refused):
+    """A batch takes the expected classes from its target, and the copy without the refused entries lacks them."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": class_file("com/s0/A")})
+    s1 = make_jar("s1.jar", {"com/s1/B.class": class_file("com/s1/B"),
+                             "com/s1/C.class": class_file("../C" if refused else "com/s1/C")})
+    input_dir = tmp_path / "in"
+    make_jar("big.jar", {**{f"com/big/C{i}.class": class_file(f"com/big/C{i}") for i in range(900)},
+                         "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()}, base=input_dir)
+    all_queued = threading.Event()
+    queued = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    batches: list[list[str]] = []
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    warns: list[str] = []
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, fallback=False, jobs=1,
+                          cpus=1),
+                 runner=gated_solo, batch_runner=recording_batch, on_event=on_event, on_warn=warns.append)
+    assert batches == ([] if refused else [["s0.jar", "s1.jar"]])
+    row = next(r for r in report.artifacts if r.rel.endswith("s1.jar"))
+    assert (row.classes, row.missing_classes) == ((2, 1) if refused else (2, 0))
+    assert len([w for w in warns if "no engine gets" in w]) == refused
+
+
 def test_a_maven_row_with_a_gap_runs_alone_not_in_a_batch(fake_env, make_jar, tmp_path):
     """#180: a batch would decompile the whole jar; the gap classes run as class retries."""
     sources = make_jar("s-sources.jar", {"com/s/A.java": "// upstream\nclass A {}", "com/s/D.java": "// upstream\nclass D {}"})
@@ -3472,6 +3511,7 @@ def test_run_damaged_class_entry_of_a_war_fails_none_of_its_libraries(fake_env, 
     war.parent.mkdir(parents=True)
     with zipfile.ZipFile(war, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("WEB-INF/classes/com/w/W.class", b"\xca\xfe\xba\xbe" + bytes(200))
+        zf.writestr("WEB-INF/classes/com/w/V.class", b"v")  # no engine gets W.class, so the war needs another class
         zf.writestr("WEB-INF/lib/dep.jar", dep.read_bytes())
     _damage_entry(war, "WEB-INF/classes/com/w/W.class")
     report = run(
@@ -3931,7 +3971,10 @@ def _deflated_jar(path: Path, entries: dict[str, bytes]) -> Path:
     return path
 
 
-def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path):
+def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path, monkeypatch):
+    from decaf import pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 32 << 20)  # an engine gets the 25 MB class file
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})  # 73 + 48 x 25 = 1273 MB
     warnings: list[str] = []
@@ -3977,6 +4020,7 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
 
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 32 << 20)  # an engine gets the 25 MB class file
     reads: list[Path] = []
     monkeypatch.setattr(pipeline, "_class_bytes", lambda target: reads.append(target) or 0)
     for out, engine in (("out", "jd"), ("out2", "vineflower")):
@@ -3989,7 +4033,10 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
         assert len(reads) == (engine == "vineflower")  # jd has no size model: decaf does not read the jar
 
 
-def test_run_warns_for_a_batch_eligible_jar_too(fake_env, tmp_path):
+def test_run_warns_for_a_batch_eligible_jar_too(fake_env, tmp_path, monkeypatch):
+    from decaf import pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 32 << 20)  # an engine gets the 25 MB class file
     """#114: a jar under 3000 classes got no estimate, but a batch JVM has one share too."""
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
