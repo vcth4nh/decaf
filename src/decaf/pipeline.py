@@ -1276,7 +1276,7 @@ def _plan_family(
             if old is None and now is None:  # no file of this class: its inner classes take their own files
                 out: dict[str, _HeldFile] = {}
                 gaps = frozenset({key})
-                for k in _units(olds.keys() | new.keys() | {key}, parents, walks).get(key, ()):
+                for k in _units((olds.keys() | new.keys() | unnested | {key}) - written, parents, walks).get(key, ()):
                     out |= best(k)
                     gaps |= lost[k]
             elif old is None or now is None:

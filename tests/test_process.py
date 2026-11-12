@@ -4024,6 +4024,31 @@ def test_a_clean_file_replaces_a_flagged_file_by_a_top_level_class_with_an_empty
     assert report.flagged == [] and report.missing_classes == 1  # A$1: no engine wrote it
 
 
+def test_a_clean_file_replaces_a_flagged_file_by_a_top_level_class_below_a_class_with_an_empty_file(
+    make_jar, tmp_path: Path,
+):
+    """A$1$X is top-level for the JVM and has no file. Fernflower wrote a flagged A and an empty file of A$1, and the
+    clean A of Vineflower nests A$1. A$1$X is a class that no file holds for both files of A, so the clean A replaces
+    the flagged A. Before, the branch of a class without a file left A$1$X out of the tree, so A$1$X was a gap for
+    one file only, and the flagged file went out (#213)."""
+    from test_check import _class_with
+
+    jar = make_jar("app.jar", {
+        "com/x/A.class": _lister("com/x/A", lists=(("com/x/A$1", None),)),
+        "com/x/A$1.class": _inner("com/x/A$1", None, enclosing="com/x/A"),
+        "com/x/A$1$X.class": _class_with("com/x/A$1$X"),
+    })
+    runner = writing_runner({
+        "fernflower": {_A: "class A {} // FLAG ff", _A1: ""}, "vineflower": {_A: "class A { /* vf + A$1 */ }"},
+    })
+    out = tmp_path / "out"
+    ctx = make_ctx(tmp_path, runner, engine="fernflower", checker=marker_checker(), writer=MirrorWriter(out))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    written = {p.relative_to(out / "app.jar").as_posix(): p.read_text() for p in out.rglob("*.java")}
+    assert written == {_A: "class A { /* vf + A$1 */ }"}
+    assert report.flagged == []
+
+
 def test_a_stub_of_a_stale_inner_class_stays_when_the_file_of_the_outer_class_does_not_hold_it(
     make_jar, tmp_path: Path,
 ):
