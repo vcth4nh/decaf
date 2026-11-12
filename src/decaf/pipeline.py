@@ -194,24 +194,23 @@ class MergeWriter:
     regardless of the order in which worker threads deliver results. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
-    The root prefixes of a class folder (target/classes/) are cut before all else (#199).
+    The root prefix of each class file of a class folder (target/classes/) is cut before all else (#199).
     """
 
     def __init__(
-        self, src_root: Path, *, case_insensitive: bool = False, roots: dict[str, list[str]] | None = None
+        self, src_root: Path, *, case_insensitive: bool = False, roots: dict[str, dict[str, str]] | None = None
     ) -> None:
         self.root = src_root
         self._lock = threading.Lock()
         self._case_insensitive = case_insensitive
         self._index: dict[str, tuple[tuple[str, bool], str, str]] = {}  # key -> (rank, sha256, rel)
-        # artifact rel -> the root prefixes of its class files, the longest first
-        self._roots = {rel: sorted(prefixes, key=len, reverse=True) for rel, prefixes in (roots or {}).items()}
+        # artifact rel -> {the path of a class file without .class: its root prefix}, only non-empty prefixes
+        self._roots = roots or {}
 
     def _cut(self, sort_key: str, raw: str) -> str:
-        for prefix in self._roots.get(sort_key, ()):
-            if raw.startswith(prefix):
-                return raw[len(prefix) :]
-        return raw
+        """raw without the root prefix of the class file with its path; a path of no such class file stays."""
+        prefix = self._roots.get(sort_key, {}).get(raw[: len(raw) - len(PurePosixPath(raw).suffix)], "")
+        return raw[len(prefix) :]
 
     def _twin(self, sort_key: str, raw: str) -> bool:
         return _strip_container(self._cut(sort_key, raw)).startswith("META-INF/versions/")
@@ -2437,11 +2436,13 @@ def run(
             if settings.mirror:
                 writer = MirrorWriter(settings.output, resources=settings.resources)
             else:
-                roots = {  # a class folder merges by package, not at target/classes/ (#199)
-                    a.rel: [r for r in {_root_prefix(a.path, p.relative_to(a.path).as_posix())
-                                        for p in a.path.rglob("*.class")} if r]
-                    for a in artifacts if a.kind is ArtifactKind.CLASS_TREE
-                }
+                # a class folder merges by package, not at target/classes/ (#199)
+                roots: dict[str, dict[str, str]] = {}
+                for a in artifacts:
+                    if a.kind is ArtifactKind.CLASS_TREE:
+                        rels = (p.relative_to(a.path).as_posix() for p in a.path.rglob("*.class"))
+                        prefixes = {rel[: -len(".class")]: _root_prefix(a.path, rel) for rel in rels}
+                        roots[a.rel] = {stem: prefix for stem, prefix in prefixes.items() if prefix}
                 writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None, roots=roots)
             ctx = Ctx(
                 settings=settings,

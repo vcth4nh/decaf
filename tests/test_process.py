@@ -3779,7 +3779,8 @@ def test_report_paths_of_a_class_folder_with_merge_are_below_src(tmp_path: Path,
     runner = writing_runner({"vineflower": {
         "target/classes/com/x/A.java": "// FLAG", "target/classes/com/x/B.java": _VF_STUB + "// ENV\n",
     }})
-    writer = MergeWriter(tmp_path / "out/src", roots={"_classes": ["target/classes/"]})
+    stems = ("target/classes/com/x/A", "target/classes/com/x/B")
+    writer = MergeWriter(tmp_path / "out/src", roots={"_classes": dict.fromkeys(stems, "target/classes/")})
     ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker(), writer=writer)
     report, _ = process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
     assert [f["path"] for f in report.flagged] == ["com/x/A.java"]

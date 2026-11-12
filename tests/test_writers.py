@@ -317,7 +317,7 @@ def test_merge_flag_off_keeps_exact_keys(tmp_path: Path):
 
 
 def test_merge_cuts_the_root_prefix_of_a_class_folder(tmp_path: Path):
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     t = tree(tmp_path / "t", {"target/classes/p/A.java": "class A {}", "other/q/B.java": "class B {}"})
     assert w.add_tree(t, "_classes") == (2, [])
     assert sorted(p.relative_to(tmp_path / "src").as_posix() for p in (tmp_path / "src").rglob("*.java")) == [
@@ -325,16 +325,31 @@ def test_merge_cuts_the_root_prefix_of_a_class_folder(tmp_path: Path):
     ]
 
 
-def test_merge_cuts_the_longest_root_prefix(tmp_path: Path):
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["a/", "a/b/"]})
-    t = tree(tmp_path / "t", {"a/b/p/A.java": "class A {}", "a/q/B.java": "class B {}"})
+def test_merge_cuts_only_the_prefix_of_the_class_file_with_that_path(tmp_path: Path):
+    """lib/p/L.class is the class lib.p.L, lib/q/B.class is q.B. Before, the merge cut lib/ of each path, and wrote
+    src/p/L.java with package lib.p;."""
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"lib/q/B": "lib/", "lib/q/B$Nested": "lib/"}})
+    t = tree(tmp_path / "t", {"lib/p/L.java": "package lib.p;", "lib/q/B.java": "package q;"})
+    assert w.add_tree(t, "_classes") == (2, [])
+    assert sorted(p.relative_to(tmp_path / "src").as_posix() for p in (tmp_path / "src").rglob("*.java")) == [
+        "lib/p/L.java", "q/B.java",
+    ]
+
+
+def test_merge_cuts_the_root_prefix_of_an_inner_class_file_written_apart(tmp_path: Path):
+    roots = {"target/classes/p/A": "target/classes/", "target/classes/p/A$1": "target/classes/"}
+    w = MergeWriter(tmp_path / "src", roots={"_classes": roots})
+    t = tree(tmp_path / "t", {"target/classes/p/A.java": "class A {}", "target/classes/p/A$1.java": "class A$1 {}"})
     w.add_tree(t, "_classes")
-    assert (tmp_path / "src/p/A.java").is_file() and (tmp_path / "src/q/B.java").is_file()
+    assert sorted(p.relative_to(tmp_path / "src").as_posix() for p in (tmp_path / "src").rglob("*.java")) == [
+        "p/A$1.java", "p/A.java",
+    ]
 
 
 def test_merge_sees_a_versions_twin_after_the_root_prefix_cut(tmp_path: Path):
     """mr/META-INF/versions/11/p/A.java is the versions twin of mr/p/A.java (#107)."""
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["mr/"]})
+    stems = ("mr/META-INF/versions/11/p/A", "mr/p/A", "mr/META-INF/versions/11/q/B", "mr/q/B")
+    w = MergeWriter(tmp_path / "src", roots={"_classes": dict.fromkeys(stems, "mr/")})
     twin = tree(tmp_path / "t1", {"mr/META-INF/versions/11/p/A.java": "// v11"})
     base = tree(tmp_path / "t2", {"mr/p/A.java": "// base"})
     collisions = [c for t in (twin, base) for c in w.add_tree(t, "_classes")[1]]
@@ -346,7 +361,7 @@ def test_merge_sees_a_versions_twin_after_the_root_prefix_cut(tmp_path: Path):
 
 
 def test_merge_keeps_the_path_of_an_artifact_without_root_prefixes(tmp_path: Path):
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     t = tree(tmp_path / "t", {"target/classes/p/A.java": "class A {}", "WEB-INF/classes/q/B.java": "class B {}"})
     w.add_tree(t, "app.war")
     assert (tmp_path / "src/target/classes/p/A.java").is_file() and (tmp_path / "src/q/B.java").is_file()
@@ -354,7 +369,7 @@ def test_merge_keeps_the_path_of_an_artifact_without_root_prefixes(tmp_path: Pat
 
 def test_merge_gives_a_class_folder_and_a_jar_with_one_class_one_file(tmp_path: Path):
     """Before, the class folder wrote target/classes/p/A.java, and the jar wrote p/A.java (#199)."""
-    w = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     assert w.add_tree(tree(tmp_path / "t1", {"target/classes/p/A.java": "class A {}"}), "_classes") == (1, [])
     assert w.add_tree(tree(tmp_path / "t2", {"p/A.java": "class A {}"}), "app.jar") == (1, [])  # identical
     _, collisions = w.add_tree(tree(tmp_path / "t3", {"p/A.java": "class A { /* b */ }"}), "b.jar")
@@ -364,7 +379,7 @@ def test_merge_gives_a_class_folder_and_a_jar_with_one_class_one_file(tmp_path: 
 
 def test_out_path_is_the_path_of_the_written_file(tmp_path: Path):
     """The report path of a held file (#174): below src/ with --merge, below the artifact folder in mirror mode."""
-    merge = MergeWriter(tmp_path / "src", roots={"_classes": ["target/classes/"]})
+    merge = MergeWriter(tmp_path / "src", roots={"_classes": {"target/classes/p/A": "target/classes/"}})
     assert merge.out_path("_classes", "target/classes/p/A.java") == "p/A.java"
     assert merge.out_path("app.war", "WEB-INF/classes/com/x/A.java") == "com/x/A.java"
     assert merge.out_path("mr.jar", "META-INF/versions/11/com/x/A.java") == "com/x/A.java"
