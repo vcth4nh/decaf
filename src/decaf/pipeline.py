@@ -744,6 +744,91 @@ def _family_entries(source: Path) -> dict[str, list[str]]:
     return out
 
 
+def _class_parents(source: Path, families: Collection[str] | None = None) -> dict[str, str | None]:
+    """The parent of each class with an outer class by name, from the class files of its family: the stem of the
+    class whose file holds it, or None for a class that is top-level for the JVM (#206, #207, #208).
+
+    The family of a class: the classes with the same top-level class by name. A candidate is a class of the family
+    that is not the class and is not below it by name. Q names X when the simple name of X is in the package_refs
+    of Q, and Q lists X when the InnerClasses attribute of Q has an entry of X.
+    1. The class file cannot be read or does not parse: the longest $-prefix that is a class, as before.
+    2. It does not list itself: no candidate lists it, so it is top-level. Else the outer class of such an entry
+       when it is a candidate, else the longest lister that is a $-prefix, else the first lister.
+    3. It lists itself with an outer class P, a member class: P when P is a candidate and names it. Else it is
+       stale (P was compiled again without it): top-level.
+    4. It lists itself with no outer class, an anonymous or local class: of the candidates that name it, the class
+       of its EnclosingMethod attribute, else the longest $-prefix, else the first. No candidate: stale.
+    A stem with several entries (a multi-release class, a copy below a container root): one entry is enough for a
+    fact. families: the top-level classes by name to read; None reads each family with such a class.
+    """
+    if source.is_dir():
+        names = sorted(p.relative_to(source).as_posix() for p in source.rglob("*.class"))
+    else:
+        try:
+            with zipfile.ZipFile(source) as zf:
+                names = sorted(n for n in zf.namelist() if n.endswith(".class"))
+        except ZIP_ERRORS:
+            return {}
+    entries: dict[str, list[str]] = {}
+    for name in names:
+        entries.setdefault(_class_stem(name), []).append(name)
+    tops = {s: outer_stem(s, entries) for s in entries}
+    wanted = {o for o in tops.values() if o is not None and (families is None or o in families)}
+    members: dict[str, list[str]] = {}
+    for s in sorted(entries):
+        if (tops[s] or s) in wanted:
+            members.setdefault(tops[s] or s, []).append(s)
+    links: dict[str, list[tuple[str, tuple[tuple[str, str | None], ...], str | None]]] = {}
+    refs: dict[str, set[str]] = {}
+    for name, data in _read_classes(source, [n for ms in members.values() for s in ms for n in entries[s]]):
+        stem = _class_stem(name)
+        found = check.class_links(data)
+        if found is not None and stem.endswith(found[0]) and stem[: len(stem) - len(found[0])][-1:] in ("", "/"):
+            links.setdefault(stem, []).append(found)  # the class name is the end of the path, as for a package root
+        refs.setdefault(stem, set()).update(check.package_refs(data))
+
+    def by_name(x: str) -> str:
+        cut = x.rfind("$")
+        while x[:cut] not in entries:
+            cut = x.rfind("$", 0, cut)
+        return x[:cut]
+
+    out: dict[str, str | None] = {}
+    for family, ms in members.items():
+        prefix = {s: s[: len(s) - len(links[s][0][0])] for s in ms if s in links}  # the folder above the package root
+        listed: dict[str, list[tuple[str, str | None]]] = {}  # class -> (lister, outer class of the entry)
+        for q in ms:
+            for _, found, _ in links.get(q, ()):
+                for inner, outer in found:
+                    listed.setdefault(prefix[q] + inner, []).append((q, prefix[q] + outer if outer else None))
+        for x in ms:
+            if tops[x] is None:
+                continue
+            if x not in links:  # rule 1
+                out[x] = by_name(x)
+                continue
+            simple = x.rpartition("/")[2]
+            cands = [q for q in ms if q != x and not q.startswith(x + "$")]
+            own = [(outer, enclosing) for name, found, enclosing in links[x] for inner, outer in found if inner == name]
+            if len(own) < len(links[x]):  # rule 2: one entry that does not list itself is enough (#206)
+                listers = [(q, o) for q, o in listed.get(x, ()) if q in cands]
+                outers = sorted(o for _, o in listers if o in cands)
+                lists = sorted({q for q, _ in listers})
+                prefixes = [q for q in lists if x.startswith(q + "$")]
+                out[x] = outers[0] if outers else max(prefixes, key=len) if prefixes else lists[0] if lists else None
+                continue
+            outer, enclosing = own[0]
+            if outer is not None:  # rule 3
+                p = prefix[x] + outer
+                out[x] = p if p in cands and simple in refs.get(p, ()) else None
+                continue
+            namers = [q for q in cands if simple in refs.get(q, ())]  # rule 4
+            prefixes = [q for q in namers if x.startswith(q + "$")]
+            e = prefix[x] + enclosing if enclosing else None
+            out[x] = e if e in namers else max(prefixes, key=len) if prefixes else namers[0] if namers else None
+    return out
+
+
 def _read_classes(source: Path, names: Collection[str]) -> Iterator[tuple[str, bytes]]:
     """(name, bytes) of some class entries of a source, with one open of an archive.
 

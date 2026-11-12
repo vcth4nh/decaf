@@ -879,6 +879,105 @@ def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar,
     assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info"}
 
 
+def _inner(name: str, outer: str | None, enclosing: str | None = None, lists=(), refs=()) -> bytes:
+    """A class that lists itself with this outer class (None: an anonymous or local class); lists: more entries
+    (inner class, outer class) of its InnerClasses attribute; refs: more Class entries in its constant pool."""
+    from test_check import _class_with_inner_classes
+
+    return _class_with_inner_classes(name, ((name, outer), *lists), enclosing=enclosing, refs=tuple(refs))
+
+
+def _lister(name: str, lists=(), refs=()) -> bytes:
+    """A class that does not list itself: a top-level class that lists the entries (inner class, outer class)."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    if not lists:
+        return _class_with(name, interfaces=tuple(refs))
+    return _class_with_inner_classes(name, tuple(lists), refs=tuple(refs))
+
+
+def _parents(make_jar, classes: dict[str, bytes], families=None) -> dict[str, str | None]:
+    from decaf.pipeline import _class_parents
+
+    return _class_parents(make_jar("t.jar", {f"{n}.class": data for n, data in classes.items()}), families)
+
+
+def test_class_parents_of_a_class_file_that_cannot_be_read_follow_the_name(make_jar):
+    """Rule 1: no fact from the class file, so the parent is the longest $-prefix that is a class, as before."""
+    assert _parents(make_jar, {"p/A": _lister("p/A"), "p/A$B": b"x", "p/A$B$C": b"x", "p/A$1": b"x"}) == {
+        "p/A$B": "p/A", "p/A$B$C": "p/A$B", "p/A$1": "p/A",
+    }
+
+
+def test_class_parents_of_a_class_that_does_not_list_itself(make_jar):
+    """Rule 2: no class of the family lists it: top-level (#206). A class that lists it is its parent (S8), and the
+    outer class of that entry comes first; else the longest lister that is a $-prefix, else the first lister."""
+    assert _parents(make_jar, {"X": _lister("X"), "X$": _lister("X$")}) == {"X$": None}
+    s8 = {"X": _lister("X", lists=(("X$$anon$1", None),)), "X$": _lister("X$"), "X$$anon$1": _lister("X$$anon$1")}
+    assert _parents(make_jar, s8)["X$$anon$1"] == "X"
+    by_entry = {"p/A": _lister("p/A"), "p/A$C": _inner("p/A$C", "p/A", lists=(("p/A$B", "p/A"),)),
+                "p/A$B": _lister("p/A$B")}
+    assert _parents(make_jar, by_entry)["p/A$B"] == "p/A"  # the entry in A$C names A as its outer class
+    first = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A", lists=(("p/A$1", None),)),
+             "p/A$1": _lister("p/A$1")}
+    assert _parents(make_jar, first)["p/A$1"] == "p/A$B"  # A$B is no $-prefix of A$1: the first lister
+
+
+def test_class_parents_of_a_member_class(make_jar):
+    """Rule 3: the outer class of its own entry, when that class names it. Else it is stale: the outer class was
+    compiled again without it, and only Vineflower and Fernflower write it (#207)."""
+    member = _inner("p/A$B", "p/A")
+    assert _parents(make_jar, {"p/A": _lister("p/A", lists=(("p/A$B", "p/A"),)), "p/A$B": member}) == {"p/A$B": "p/A"}
+    assert _parents(make_jar, {"p/A": _lister("p/A"), "p/A$B": member}) == {"p/A$B": None}
+    other = _inner("p/A$B", "q/Other")  # its outer class is no class of the family
+    assert _parents(make_jar, {"p/A": _lister("p/A", refs=("p/A$B",)), "p/A$B": other}) == {"p/A$B": None}
+
+
+@pytest.mark.parametrize("enclosing, namers, parent", [
+    ("X", ("X", "X$"), "X"),  # S4 and S5 with the EnclosingMethod class (#208)
+    ("X$", ("X", "X$"), "X$"),
+    (None, ("X",), "X"),  # S6: no EnclosingMethod attribute
+    (None, ("X", "X$"), "X$"),  # S7: the longest class that names it
+    ("X$", ("X",), "X"),  # the EnclosingMethod class does not name it
+    (None, (), None),  # stale
+])
+def test_class_parents_of_an_anonymous_class(make_jar, enclosing, namers, parent):
+    """Rule 4: of the classes that name it, the EnclosingMethod class, else the longest $-prefix, else the first."""
+    classes = {n: _lister(n, lists=(("X$$anon$1", None),) if n in namers else ()) for n in ("X", "X$")}
+    classes["X$$anon$1"] = _inner("X$$anon$1", None, enclosing=enclosing)
+    assert _parents(make_jar, classes) == {"X$": None, "X$$anon$1": parent}
+
+
+def test_class_parents_of_a_kotlin_inlined_class_and_a_class_named_only_below_it(make_jar):
+    """A Kotlin K$foo$$inlined$bar$1 lists itself, no class lists it, and K creates it: K names it. A class below
+    a class by name is no proof for it."""
+    inlined = "p/K$foo$$inlined$bar$1"
+    kotlin = {"p/K": _lister("p/K", refs=(inlined,)), inlined: _inner(inlined, None)}
+    assert _parents(make_jar, kotlin) == {inlined: "p/K"}
+    below = {"p/A": _lister("p/A"), "p/A$1": _inner("p/A$1", None),
+             "p/A$1$1": _inner("p/A$1$1", "p/A$1", refs=("p/A$1",))}
+    assert _parents(make_jar, below)["p/A$1"] is None
+    named = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A", refs=("p/A$1",)), "p/A$1": _inner("p/A$1", None)}
+    assert _parents(make_jar, named)["p/A$1"] == "p/A$B"  # A$B is no $-prefix of A$1: the first class that names it
+
+
+def test_class_parents_read_only_the_families_asked_for(make_jar, tmp_path):
+    """A class folder above its package root (#199): the stems keep the folder, the class files name the classes."""
+    from decaf.pipeline import _class_parents
+
+    classes = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A"), "q/C": _lister("q/C"), "q/C$": _lister("q/C$")}
+    jar = make_jar("t.jar", {f"{n}.class": d for n, d in classes.items()})
+    assert _class_parents(jar, {"q/C"}) == {"q/C$": None}
+    root = tmp_path / "in"
+    for n, d in classes.items():
+        (root / "target/classes" / f"{n}.class").parent.mkdir(parents=True, exist_ok=True)
+        (root / "target/classes" / f"{n}.class").write_bytes(d)
+    assert _class_parents(root) == {"target/classes/p/A$B": None, "target/classes/q/C$": None}
+    classes["p/A"] = _lister("p/A", lists=(("p/A$B", "p/A"),))
+    (root / "target/classes/p/A.class").write_bytes(classes["p/A"])
+    assert _class_parents(root)["target/classes/p/A$B"] == "target/classes/p/A"
+
+
 def test_stems_and_claims_by_name_only_read_no_class_file(make_jar, monkeypatch):
     """The scheduler forms batches with the rule by name only; the union of the sets is the same (#206)."""
     from test_check import _class_with
