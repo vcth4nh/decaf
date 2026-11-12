@@ -220,9 +220,11 @@
   of Maven Central. Now, after each download from a repository that is not
   Maven Central, decaf asks Maven Central for the `.jar.sha1` file of the
   coordinates. When Maven Central holds another build and the downloaded jar
-  is its sources jar, decaf drops the jar and decompiles the artifact. The
-  miss then says `is the sources jar of another build on Maven Central`.
-  When Maven Central gives no answer, the row is a network fallback. The
+  is its sources jar, decaf drops the jar. When no other repository has the
+  sources of the build, decaf decompiles the artifact. The miss of that run
+  says `is the sources jar of another build on Maven Central`; later runs
+  give the miss of the cached verdict. When Maven Central gives no answer,
+  decaf decompiles the artifact, and the row is a network fallback. The
   check costs one request for each sources jar from another repository, and
   two when Maven Central holds another build.
 

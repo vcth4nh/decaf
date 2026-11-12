@@ -24,8 +24,9 @@ to Maven coordinates: group, artifact, and version.
   another member. So after each download from a repository that is not
   Maven Central, decaf asks Maven Central for the `.sha1` file of the
   artifact. When Maven Central holds another build of the same coordinates
-  and the downloaded jar is its sources jar, decaf drops the jar and
-  decompiles the artifact.
+  and the downloaded jar is its sources jar, decaf drops the jar. When no
+  other repository has the sources of the build, decaf decompiles the
+  artifact.
 - This check finds only the sources of Maven Central. A group of two private
   repositories, or a proxy of another public repository, can still give the
   sources of another build.
