@@ -775,6 +775,19 @@ def test_lists_itself_tells_an_inner_class_from_a_top_level_class_with_a_dollar(
     assert check.lists_itself(full[:full.index(b"InnerClasses") + 6]) is None  # cut in the constant pool
 
 
+def test_lists_itself_compares_the_class_names_not_the_pool_entries():
+    """A class writer can give the self entry of the InnerClasses attribute a second Class entry of the same name.
+    The JVM compares the names, so the class is an inner class. Before, it counted as top-level (#209)."""
+    u2 = lambda v: v.to_bytes(2, "big")  # noqa: E731
+    pool = b"\x01" + u2(5) + b"p/A$1" + b"\x07" + u2(1) + b"\x07" + u2(1)  # 1: Utf8, 2 and 3: Class -> 1
+    pool += b"\x01" + u2(12) + b"InnerClasses"  # 4
+    info = u2(1) + u2(3) + u2(0) + u2(0) + u2(0)  # one entry: inner class 3, no outer class
+    body = b"\x00\x21" + u2(2) + u2(0) + u2(0) + u2(0) + u2(0)  # this_class 2; no interfaces, fields, or methods
+    body += u2(1) + u2(4) + len(info).to_bytes(4, "big") + info
+    data = b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + u2(5) + pool + body
+    assert check.lists_itself(data) is True
+
+
 def test_non_java_reads_the_markers_of_kotlin_groovy_and_scala():
     assert check.non_java(_class_with("p/K", utf8=("Lkotlin/Metadata;",)))
     assert check.non_java(_class_with("p/S", utf8=("Lscala/reflect/ScalaSignature;",)))

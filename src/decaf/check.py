@@ -552,7 +552,9 @@ def lists_itself(data: bytes) -> bool | None:
         return None
     if b"InnerClasses" not in data:
         return False
-    this_class = int.from_bytes(data[pool[2] + 2:pool[2] + 4], "big")
+    this_class = _class_at(pool, data, pool[2] + 2)
+    if this_class is None:  # this_class names no Class entry: the file does not parse
+        return None
     start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
     count = int.from_bytes(data[start - 2:start], "big")
     try:
@@ -562,7 +564,8 @@ def lists_itself(data: bytes) -> bool | None:
     if at is None:  # the name is only a constant, for example after a tool removed the attribute
         return False
     entries = int.from_bytes(data[at:at + 2], "big")
-    return any(int.from_bytes(data[at + 2 + 8 * k:at + 4 + 8 * k], "big") == this_class for k in range(entries))
+    # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
+    return any(_class_at(pool, data, at + 2 + 8 * k) == this_class for k in range(entries))
 
 
 SOURCE = Path(__file__).with_name("checker") / "Checker.java"
