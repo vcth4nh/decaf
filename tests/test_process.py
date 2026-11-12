@@ -5682,3 +5682,33 @@ def test_a_row_that_no_engine_reads_counts_the_names_that_leave_its_folder(tmp_p
         assert report.outcome == "failed" and report.failure.startswith("case collision")
     if kind == "maven hit":
         assert (report.method, report.sources_gap) == ("maven", 0)
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", [ArtifactKind.ARCHIVE, ArtifactKind.RESOURCE_ONLY, ArtifactKind.SOURCES_JAR])
+def test_decaf_writes_no_file_from_an_entry_that_the_row_counts_as_refused(tmp_path: Path, class_file, kind):
+    """These names pass the resolve test of Linux (a backslash and a colon are file name characters there), but not
+    the name rule: decaf's own extraction skips them, as the row counts them."""
+    entries = [("r.txt", b"r"), ("q\\..\\..\\up.txt", b"x"), ("C:x.txt", b"x")]
+    if kind is ArtifactKind.ARCHIVE:
+        entries.append(("p/A.class", class_file("p/A")))
+    if kind is ArtifactKind.SOURCES_JAR:
+        entries += [("p/A.java", b"class A {}"), ("q\\..\\..\\B.java", b"class B {}"), ("C:C.java", b"class C {}")]
+    jar = _zip(tmp_path / "lib.jar", entries)
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "lib.jar", kind), ctx)
+    written = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*") if p.is_file())
+    assert written == {ArtifactKind.ARCHIVE: ["lib.jar/p/A.java", "lib.jar/r.txt"],
+                       ArtifactKind.RESOURCE_ONLY: ["lib.jar/r.txt"],
+                       ArtifactKind.SOURCES_JAR: ["lib.jar/p/A.java", "lib.jar/r.txt"]}[kind]
+    assert report.refused == (4 if kind is ArtifactKind.SOURCES_JAR else 2)
+
+
+def test_decaf_writes_no_file_with_the_name_of_an_entry_that_the_row_counts_as_refused(tmp_path: Path):
+    """zipfile cuts the second name at the NUL, so both entries have one zipfile name: the refused one decides."""
+    jar = _raw_zip(tmp_path / "lib.jar", [(b"r.txt", b"good"), (b"r.txt\0x", b"bad"), (b"s.txt", b"s")])
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "lib.jar", ArtifactKind.RESOURCE_ONLY), ctx)
+    written = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*") if p.is_file())
+    assert written == ["lib.jar/s.txt"]
+    assert report.refused == 1

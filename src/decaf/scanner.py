@@ -159,6 +159,12 @@ def stays_inside(name: str) -> bool:
     return not any(p.count(".") >= 2 and not p.strip(". ") for p in parts)
 
 
+def names_stay(info: zipfile.ZipInfo) -> bool:
+    """Do both names of an entry stay inside (stays_inside): its raw name, and its zipfile name? zipfile cuts the raw
+    name at a NUL, on Windows it changes a backslash to /, and it can take the name from an extra field."""
+    return stays_inside(info.orig_filename) and stays_inside(info.filename)
+
+
 def safe_extract_zip(
     zip_path: Path,
     dest: Path,
@@ -169,7 +175,9 @@ def safe_extract_zip(
 ) -> int:
     """Extract files from a zip, refusing paths that escape dest. Returns count.
 
-    An entry that cannot be read is skipped, and its name goes to failed (#109).
+    An entry whose names fail names_stay is skipped first, as the row of the archive counts it as refused, and so is
+    each other entry with its zipfile name; then the path of each entry must resolve below dest on this OS. An entry that cannot be read is skipped, and its name goes
+    to failed (#109).
     Of two entries with one name, the last one decides, as in Java.
     A disk error, for example a full disk, still raises.
     """
@@ -177,9 +185,11 @@ def safe_extract_zip(
     dest.mkdir(parents=True, exist_ok=True)
     resolved_dest = dest.resolve()
     with zipfile.ZipFile(zip_path) as zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        refused = {info.filename for info in infos if not names_stay(info)}
+        for info in infos:
             name = info.filename
-            if info.is_dir():
+            if info.is_dir() or name in refused:
                 continue
             if members is not None and name not in members:
                 continue

@@ -38,6 +38,7 @@ from .scanner import (
     classify_counted,
     copy_class_tree,
     find_nested_archives,
+    names_stay,
     outer_stem,
     safe_extract_zip,
     scan_counted,
@@ -744,18 +745,12 @@ def _copy_name(info: zipfile.ZipInfo) -> str:
     return zipfile.ZipInfo(name).filename
 
 
-def _names_stay(info: zipfile.ZipInfo) -> bool:
-    """Do both names of an entry stay inside: its raw name, and its zipfile name (zipfile cuts the raw name at a NUL,
-    on Windows it changes a backslash to /, and it can take the name from an extra field)?"""
-    return stays_inside(info.orig_filename) and stays_inside(info.filename)
-
-
 def _outside_names(archive: Path) -> list[str]:
-    """The raw names of the entries of an archive whose names do not stay inside (_names_stay). No class is read: for
+    """The raw names of the entries of an archive whose names do not stay inside (names_stay). No class is read: for
     a row whose archive no engine reads."""
     try:
         with zipfile.ZipFile(archive) as zf:
-            return [info.orig_filename for info in zf.infolist() if not _names_stay(info)]
+            return [info.orig_filename for info in zf.infolist() if not names_stay(info)]
     except (zipfile.BadZipFile, OSError):
         return []
 
@@ -824,7 +819,7 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
         try:
             for name, info in last.items():
                 raw = info.orig_filename
-                if not (_names_stay(info) and stays_inside(name)):
+                if not (names_stay(info) and stays_inside(name)):
                     refused.append(raw)
                     continue
                 entry = zipfile.ZipInfo(name, info.date_time)
@@ -2181,7 +2176,7 @@ def _decompile_source(artifact: Artifact, source: Path, expected: set[str], ctx:
 
 
 def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
-    """The nested archives of an archive. An entry whose names do not stay inside (_names_stay) gives no artifact,
+    """The nested archives of an archive. An entry whose names do not stay inside (names_stay) gives no artifact,
     and neither does another entry with its zipfile name: the name test comes before each other use, so no path is
     made from such a name, and the bytes of such an entry never become a row. The row of the archive counts them."""
     try:
@@ -2190,9 +2185,9 @@ def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     except (zipfile.BadZipFile, OSError):
         return []
     # The work takes the zipfile name, as safe_extract_zip does: the last entry of the name.
-    outside = {info.filename for info in infos if not _names_stay(info)}
+    outside = {info.filename for info in infos if not names_stay(info)}
     found = [info.filename for info in infos
-             if _names_stay(info) and info.filename not in outside and find_nested_archives([info.filename])]
+             if names_stay(info) and info.filename not in outside and find_nested_archives([info.filename])]
     names = list(dict.fromkeys(found))  # two entries of one name: one row, and the last one wins, as in Java
     if not names:
         return []
