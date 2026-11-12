@@ -3900,6 +3900,50 @@ def test_an_empty_file_counts_as_a_class_that_its_engine_wrote_apart(make_jar, t
     assert report.java_files == len(expected) and report.missing_classes == 0
 
 
+def test_an_unchecked_file_does_not_replace_a_flagged_family_by_a_top_level_class_with_an_empty_file(
+    make_jar, tmp_path: Path,
+):
+    """A$1 is top-level for the JVM, and Vineflower wrote an empty file of it, so no file holds A$1. The unchecked A
+    of CFR does not hold A$1 either: it gives no file to a class, so it does not replace the flagged A (#99). Before,
+    the plan read only the classes with a held or new file, so the A of CFR held A$1, and the report had no flagged
+    file (#213)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // FLAG vf", _A1: ""}, "cfr": {_A: "class A {} // ENV cfr"},
+    }, classes=_a1_class("top"))
+    assert written == {_A: "class A {} // FLAG vf"}
+    assert [f["path"] for f in report.flagged] == [_A]
+
+
+def test_a_clean_file_replaces_a_flagged_file_by_a_top_level_class_with_an_empty_file(make_jar, tmp_path: Path):
+    """A$1 is top-level for the JVM. Fernflower wrote an empty file of it, and Vineflower wrote no file of it: no A
+    holds A$1, so the clean A of Fernflower replaces the flagged A. Before, the A of Vineflower held A$1, so the A of
+    Fernflower lost it, and the flagged file went out (#213)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // FLAG vf"}, "fernflower": {_A: "class A { /* ff */ }", _A1: ""},
+    }, classes=_a1_class("top"))
+    assert written == {_A: "class A { /* ff */ }"}
+    assert report.flagged == [] and report.missing_classes == 1  # A$1: no engine wrote it
+
+
+def test_a_stub_of_a_stale_inner_class_stays_when_the_file_of_the_outer_class_does_not_hold_it(
+    make_jar, tmp_path: Path,
+):
+    """A$B lists itself, but A does not name it: A was compiled again without B, so A$B is top-level for the JVM.
+    The A of Fernflower does not hold A$B, so the Vineflower stub of A$B stays, and the report lists it. Before, the
+    A of Fernflower replaced the stub, and the class was a silent loss (#207)."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    ab, stub = "com/x/A$B.java", _VF_STUB.replace("class A", "class A$B")
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A { /* vf */ }", ab: stub}, "fernflower": {_A: "class A { /* ff */ }"},
+    }, classes={
+        "com/x/A.class": _class_with("com/x/A"),
+        "com/x/A$B.class": _class_with_inner_classes("com/x/A$B", (("com/x/A$B", "com/x/A"),)),
+    })
+    assert written == {_A: "class A { /* vf */ }", ab: stub}
+    assert [s["path"] for s in report.stubs] == [ab]
+
+
 # --- CFR, Procyon, and JD get one package root at a time (#199, #200, #170, #171, #173) ---
 
 

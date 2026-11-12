@@ -979,7 +979,7 @@ class _Held:
     nests: dict[str, set[str]] = field(default_factory=dict)  # outer class -> its spares: a chosen file nests them (#159)
     tops: dict[str, str] = field(default_factory=dict)  # key -> the key of its outer class, a cache for _apply_hold
     names: dict[str, str] | None = None  # key -> its class entry in the source, read once (#159)
-    unnested: dict[str, bool] = field(default_factory=dict)  # key -> no file of another class nests it (#159)
+    parents: dict[str, dict[str, str | None]] = field(default_factory=dict)  # family -> _read_parents of its keys
 
     def stems(self, settled: bool = True) -> set[str]:
         """The class stems of the held files: a copy's key loses its container root (#107).
@@ -1114,26 +1114,25 @@ def _units(keys: Collection[str]) -> dict[str, list[str]]:
     return out
 
 
-def _between(key: str, family: str) -> list[str]:
-    """The keys between a key and the key of its outer class, by name: p/A$1 for p/A$1$1 in the family p/A."""
-    return [key[:i] for i in range(len(family) + 1, len(key)) if key[i] == "$"]
-
-
-def _read_unnested(source: Path, keys: set[str], held: _Held) -> None:
-    """Note for each key whether its class file lists itself in its InnerClasses attribute. A class that does not
-    is a top-level class for the JVM, for example the module class Foo$ of a Scala object, so decaf takes no file
-    of another class to hold it (#159). CFR and Procyon get its class file as an argument of its own, so they write
-    a file of it (#206)."""
+def _read_parents(source: Path, families: set[str], held: _Held, top: Callable[[str], str]) -> None:
+    """Note the parent of each class of the families in the source (_class_parents), with all classes, also the
+    classes without a file: the key of the class whose file holds it, or None for a class that is top-level for the
+    JVM. For example the module class Foo$ of a Scala object, or a stale class (#159, #206, #207, #213). No file of
+    another class holds a top-level class. A key of a copy keeps its container root, and so does the key of its
+    parent (#107). top: the family of a key."""
     if held.names is None:
         held.names = {}
         for names in _family_entries(source).values():
             for name in names:
                 key = _held_key(name)
                 held.names.setdefault(name[: -len(".class")] if key in (held.copies or ()) else key, name)
-    entries = {held.names[k]: k for k in keys if k in held.names}
-    held.unnested.update(dict.fromkeys(keys, False))  # no class file, or no parse: as for any inner class
-    for name, data in _read_classes(source, entries):
-        held.unnested[entries[name]] = check.lists_itself(data) is False
+    parents = _class_parents(source, {_class_stem(family + ".class") for family in families})
+    for family in families:
+        held.parents[family] = {}
+    for key, name in held.names.items():
+        if top(key) in families and (stem := _class_stem(name)) in parents:
+            parent = parents[stem]
+            held.parents[top(key)][key] = None if parent is None else key[: len(key) - len(stem)] + parent
 
 
 def _is_flagged(f: _HeldFile) -> bool:
@@ -1282,10 +1281,9 @@ def _apply_hold(
     family too, from any output: the next engine can nest the inner classes in its file of the
     outer class, so no file of an inner class goes out alone (#150). Then the outer class gets a
     retry. In a family that waits, each class has one file: _plan_family chooses it, as for one
-    file, from the held files and the files of the output (#159). A class whose class file does not
-    list itself in its InnerClasses attribute is top-level for the JVM, so no file of another class
-    holds it. The held files that a chosen file nests wait as spares, unless a file of the output
-    replaced the file of their class or of an outer class. The family is done when the outer class
+    file, from the held files and the files of the output (#159). A class that is top-level for the
+    JVM (_read_parents) has no file of another class that holds it. The held files that a chosen
+    file nests wait as spares, unless a file of the output replaced the file of their class or of an outer class. The family is done when the outer class
     has a file, no chosen file has a stub or a flag, and no unchecked chosen file nests a flagged
     spare without a stub. Then the chosen files go out, the spares go, and the outer class gets no
     more retries. Only a held file of an inner class whose family does not wait still follows the
@@ -1343,21 +1341,15 @@ def _apply_hold(
         for k, f in held.files.items():
             if top(k) in olds:
                 olds[top(k)][k] = f
-        unknown = {  # also the classes between: a class without a file can be top-level for the JVM too
-            a for family in planned for k in olds[family].keys() | members[family] if top(k) != k
-            for a in (k, *_between(k, family))
-        }
-        if unknown - held.unnested.keys():
-            _read_unnested(source, unknown - held.unnested.keys(), held)
+        if planned - held.parents.keys():  # all classes of the family, also the classes without a file (#213)
+            _read_parents(source, planned - held.parents.keys(), held, top)
     plans: dict[str, _FamilyPlan] = {}
     for family in planned:
         new: dict[str, _HeldFile] = {}
         for rel, key, stub, r in by_family[family]:  # a file of a class that an earlier output wrote goes (#107)
             if key not in held.written:
                 new.setdefault(key, _HeldFile(engine, rel, stub, r, peers[family]))
-        unnested = {
-            a for k in olds[family].keys() | new.keys() for a in (k, *_between(k, family)) if held.unnested.get(a)
-        }
+        unnested = {k for k, parent in held.parents[family].items() if parent is None}
         plans[family] = plan = _plan_family(  # after Ctrl-C the check did not run or end, so replace=False (#112)
             family, olds[family], new, held.written, unnested, replace=not engines.PROCESSES.closed,
         )
