@@ -5888,3 +5888,24 @@ def test_a_large_entry_goes_in_with_its_size(tmp_path: Path, monkeypatch):
     with zipfile.ZipFile(copy) as zf:
         assert [(i.filename, i.file_size) for i in zf.infolist()] == [("big.bin", len(big)), ("r.txt", 1)]
         assert zf.read("big.bin") == big
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", [ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE])
+def test_a_row_with_only_a_module_info_and_a_refused_item_still_runs_the_engine(make_jar, tmp_path: Path, class_file,
+                                                                               kind):
+    """module-info.class is no expected class, but it is a class file: the engine gets it."""
+    files = {"module-info.class": class_file("module-info")}
+    if kind is ArtifactKind.ARCHIVE:
+        target = _zip(tmp_path / "a.jar", [*files.items(), ("../r.txt", b"r")])
+    else:
+        target = tmp_path / "in"
+        files["p/A.class"] = class_file("../A")
+        for rel, data in files.items():
+            (target / rel).parent.mkdir(parents=True, exist_ok=True)
+            (target / rel).write_bytes(data)
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    report, _ = process_artifact(Artifact(target, "a", kind), ctx)
+    assert [c["classes"] for c in runner.calls][:1] == [["module-info.class"]]
+    assert (report.outcome, report.refused, report.java_files, report.partial) == ("ok", 1, 1, True)
