@@ -519,15 +519,23 @@ def _source_file(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes
     return pool[0].get(int.from_bytes(data[at:at + 2], "big")) if at is not None else None
 
 
+_WALK_MAX = 100_000  # fields, methods, and their attributes: real classes have far fewer (#206)
+
+
 def _class_attribute(pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int, name: bytes) -> int | None:
     """The offset of the data of a class attribute, or None when the class has no such attribute; pos is the
-    offset of fields_count. A cut file raises ValueError."""
+    offset of fields_count. A cut file raises ValueError, and so does a file with more than _WALK_MAX fields,
+    methods, and attributes of them: a crafted file can make the walk take seconds."""
     utf8 = pool[0]
     u2 = lambda at: int.from_bytes(data[at:at + 2], "big")  # noqa: E731
+    steps = 0
     for _ in range(2):  # the fields, then the methods: skip each with its attributes
         count, pos = u2(pos), pos + 2
         for _ in range(count):
             attributes, pos = u2(pos + 6), pos + 8
+            steps += 1 + attributes
+            if steps > _WALK_MAX:
+                raise ValueError("too many members")
             for _ in range(attributes):
                 pos += 6 + int.from_bytes(data[pos + 2:pos + 6], "big")
     if pos + 2 > len(data):

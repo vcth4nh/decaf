@@ -775,6 +775,21 @@ def test_lists_itself_tells_an_inner_class_from_a_top_level_class_with_a_dollar(
     assert check.lists_itself(full[:full.index(b"InnerClasses") + 6]) is None  # cut in the constant pool
 
 
+def test_a_class_file_with_more_members_than_the_walk_limit_counts_as_cut(monkeypatch):
+    """A crafted class file can hold millions of members and attributes, and the walk in Python takes seconds for each
+    file. Above the limit, the file counts as a cut file: lists_itself gives None, and source_file gives None."""
+    u2 = lambda v: v.to_bytes(2, "big")  # noqa: E731
+    pool = b"\x01" + u2(5) + b"p/A$1" + b"\x07" + u2(1)  # 1: Utf8, 2: Class -> 1
+    pool += b"\x01" + u2(12) + b"InnerClasses" + b"\x01" + u2(10) + b"SourceFile" + b"\x01" + u2(6) + b"A.java"  # 3-5
+    fields = u2(2) + (u2(0) + u2(1) + u2(1) + u2(1) + u2(5) + bytes(4)) * 2  # two fields, one empty attribute each
+    body = b"\x00\x21" + u2(2) + u2(0) + u2(0) + fields + u2(0)  # no interfaces or methods
+    body += u2(1) + u2(4) + (2).to_bytes(4, "big") + u2(5)  # SourceFile: A.java
+    data = b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + u2(6) + pool + body
+    assert (check.lists_itself(data), check.source_file(data)) == (False, "A.java")
+    monkeypatch.setattr(check, "_WALK_MAX", 3)  # two fields and two attributes: four steps
+    assert (check.lists_itself(data), check.source_file(data)) == (None, None)
+
+
 def test_lists_itself_compares_the_class_names_not_the_pool_entries():
     """A class writer can give the self entry of the InnerClasses attribute a second Class entry of the same name.
     The JVM compares the names, so the class is an inner class. Before, it counted as top-level (#209)."""
