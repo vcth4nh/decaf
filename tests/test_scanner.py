@@ -112,6 +112,26 @@ def test_safe_extract_skips_traversal(make_jar, tmp_path: Path):
     assert not (tmp_path / "escape.java").exists()
 
 
+@pytest.mark.parametrize("name", [
+    "A.class", "p/A.class", "p/q/", "a//b", ".", "./A.class", "p/.x", "p/..x", "p/x..", "p/a b", "p\\A.class",
+    "p/C:/A.class", "p/ .x",
+])
+def test_stays_inside_keeps_a_name_below_its_folder(name):
+    assert scanner.stays_inside(name)
+
+
+@pytest.mark.parametrize("name", [
+    "",  # an empty name
+    "/A.class", "\\A.class", "//host/A.class", "\\\\host\\A.class",  # absolute
+    "C:A.class", "C:/A.class", "c:\\A.class", "p:/A.class",  # a drive
+    "..", "../A.class", "p/../../A.class", "p\\..\\..\\A.class", "p/..",  # a .. part, also with a backslash
+    "p/.../A.class", "p/.. /A.class", "p/. ./A.class", "p/ ../A.class",  # Windows drops the dots and spaces at the end
+    "p/A\0.class", "\0",  # a NUL character
+])
+def test_stays_inside_refuses_a_name_that_can_leave_its_folder(name):
+    assert not scanner.stays_inside(name)
+
+
 def test_safe_extract_members_filter(make_jar, tmp_path: Path):
     jar = make_jar("d.zip", {"tool.jar": b"j", "README": b"r"})
     dest = tmp_path / "out"
