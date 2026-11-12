@@ -200,7 +200,8 @@ def _status_line(r: ArtifactReport, mark: tuple[str, str] = _MARKS) -> str:
         refused = f", [yellow]{r.refused} refused[/]" if r.refused else ""
         return f"[yellow]-[/] {safe(r.rel)} ({safe(r.failure or 'resource-only')}, skipped{refused})"
     reason = safe((r.failure or "failed").splitlines()[-1])
-    return f"[red]{mark[1]}[/] {safe(r.rel)} ({reason})"
+    refused = f", [yellow]{r.refused} refused[/]" if r.refused else ""
+    return f"[red]{mark[1]}[/] {safe(r.rel)} ({reason}{refused})"
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -334,14 +335,14 @@ def render_ending(
 
 
 def render_problems(console: Console, report: RunReport) -> None:
-    """Failed artifacts grouped by cause (desc count), then partial artifacts."""
+    """Failed artifacts grouped by cause (desc count), then partial artifacts and skipped ones with refused entries."""
     failed = [r for r in report.artifacts if r.outcome == "failed"]
     groups = _bucket_groups(failed)
     for bucket, rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         console.print(f"[dim]{len(rs)}  {bucket}[/]")
         for r in rs:
             console.print(_status_line(r, marks(console)))
-    partial = [r for r in report.artifacts if r.partial]
+    partial = [r for r in report.artifacts if r.partial or (r.outcome == "skipped" and r.refused)]
     if partial:
         if failed:
             console.print()

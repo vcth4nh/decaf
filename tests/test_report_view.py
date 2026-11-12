@@ -750,10 +750,20 @@ def test_render_artifact_shows_the_sources_gap():
      "extracted sources jar, [yellow]2 refused"),
     (dict(outcome="ok", kind="resource_only", resources_copied=3), "resources only, 3 files, [yellow]2 refused"),
     (dict(outcome="skipped", kind="resource_only"), "(resource-only, skipped, [yellow]2 refused[/])"),
+    (dict(outcome="failed", kind="archive", failure="all engines failed"), "(all engines failed, [yellow]2 refused[/])"),
 ])
 def test_the_row_line_of_each_kind_shows_the_refused_count(row, text):
     assert text in _status_line(ArtifactReport(rel="a.jar", refused=2, **row))
     assert "refused" not in _status_line(ArtifactReport(rel="a.jar", **row))
+
+
+def test_render_problems_lists_a_skipped_row_with_refused_entries():
+    arts = [ArtifactReport(rel="r.jar", kind="resource_only", outcome="skipped", refused=1),
+            ArtifactReport(rel="s.jar", kind="resource_only", outcome="skipped")]
+    console = _plain_console()
+    render_problems(console, report(artifacts=arts, totals=compute_totals(arts)))
+    out = console.file.getvalue()
+    assert "r.jar (resource-only, skipped, 1 refused)" in out and "s.jar" not in out
 
 
 def test_the_artifact_details_show_the_refused_count():

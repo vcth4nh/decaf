@@ -5336,13 +5336,14 @@ def test_the_root_jar_leaves_out_a_path_with_a_drive_or_a_backslash_parent(tmp_p
 
 
 @pytest.mark.class_names
-def test_an_archive_with_only_refused_entries_gives_the_engines_an_empty_copy(tmp_path: Path, class_file):
+def test_an_archive_with_only_refused_entries_starts_no_engine(tmp_path: Path, class_file):
     jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("../A")), ("../r.txt", b"r")])
     runner = _names_runner()
     ctx = make_ctx(tmp_path, runner, fallback=False)
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
-    assert [names for _, names in runner.calls] == [[]]
-    assert (report.outcome, report.failure, report.classes, report.missing_classes) == ("failed", "all engines failed", 1, 0)
+    assert runner.calls == []
+    assert (report.outcome, report.failure, report.classes, report.refused) == (
+        "failed", "no class file is left: decaf refused each one", 1, 2)
 
 
 @pytest.mark.class_names
@@ -5762,3 +5763,22 @@ def test_the_engine_copy_refuses_a_name_that_zipfile_cannot_write(tmp_path: Path
     copy, refused = _engine_copy(jar, tmp_path)
     assert refused == [long_name.decode("cp437")]
     assert _entries(copy) == [("r.txt", b"r")]
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", [ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE])
+def test_a_row_whose_class_files_decaf_refused_each_starts_no_engine(make_jar, tmp_path: Path, class_file, kind):
+    files = {"p/A.class": class_file("../A"), "p/B.class": class_file("../B"), "p/r.txt": b"r"}
+    if kind is ArtifactKind.ARCHIVE:
+        target = make_jar("a.jar", files)
+    else:
+        target = tmp_path / "in"
+        for rel, data in files.items():
+            (target / rel).parent.mkdir(parents=True, exist_ok=True)
+            (target / rel).write_bytes(data)
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner)
+    report, _ = process_artifact(Artifact(target, "a", kind), ctx)
+    assert runner.calls == [] and report.attempts == []
+    assert (report.outcome, report.failure) == ("failed", "no class file is left: decaf refused each one")
+    assert (report.classes, report.refused, report.missing_classes) == (2, 2, 0)

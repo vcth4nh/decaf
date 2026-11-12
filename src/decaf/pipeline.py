@@ -2141,6 +2141,10 @@ def _decompile_source(artifact: Artifact, source: Path, expected: set[str], ctx:
     folder. The engines, the hold step, and the retries read only this source."""
     target = source
     report.classes = len(expected)
+    if report.refused and not expected_class_stems(source):  # no engine gets a source with no class to decompile
+        report.outcome = "failed"
+        report.failure = "no class file is left: decaf refused each one"
+        return
     produced: set[str] = set()
     held = _Held()
     heap = ctx.memory_plan.heap_mb(_decompile_weight(artifact))
