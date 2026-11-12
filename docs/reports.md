@@ -25,10 +25,10 @@ decaf report out --memory            # ten JVMs with the largest memory peaks
   entries, stubs, flagged source files, or a network failure that forced
   decompilation.
 - **Partial:** the artifact produced output but still has missing classes,
-  refused entries (`refused`: entries that decaf did not use because a name or
-  a class name can leave the output folder, or decaf cannot read the class
-  name), stubbed methods, flagged files, or a network failure that forced
-  decompilation.
+  refused entries (`refused`: file entries that decaf did not use because a
+  name or a class name can leave the output folder, or decaf cannot read the
+  class name; a folder entry has no count), stubbed methods, flagged files, or
+  a network failure that forced decompilation.
   It gets a yellow `!` in terminal output. The row of a network failure ends
   with `network fallback`.
 - **Failed:** the artifact could not be processed. The report groups failures

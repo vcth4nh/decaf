@@ -821,8 +821,9 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
     entry by one of its names and decaf cannot read it or its data fails _safe_class. A folder entry (by one of its
     names) goes in as a folder, with no data; with a name that is refused, it stays out with no count. Another entry that decaf cannot read stays out with no count, and a large one goes through
     a part file, so a read error leaves no part of it in the copy. The copy is stored, with no extra field: each of its
-    entries has one name. A nested archive inside the copy goes in as it is, with no test of its entries: decaf
-    decompiles each nested archive in its own row, with the same tests.
+    entries has one name. A nested archive inside the copy goes in as it is, with no test of its entries. This
+    assumes that no engine opens an archive that is inside its input: decaf decompiles a nested archive in its own
+    row, with the same tests (a nested archive beyond --max-depth gets no row).
     """
     refused: list[str] = []
     # an engine reads the suffix, and one engine names its output after the file

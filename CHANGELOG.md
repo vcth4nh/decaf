@@ -242,13 +242,14 @@
   retry, hold only the archive entries and class files whose names (each name
   of the entry and each class name of the class file) stay inside the archive
   and the output folder, and whose class file decaf can read. decaf's own
-  extraction of an archive follows the same name rule, so no file comes from
-  an entry that the row does not use. The row counts each entry or name that
-  decaf did not use in the new field `refused`, and the totals count them in
-  `refused_entries`. In an ok row, `refused` > 0 makes the row partial, and a
-  refused class that is an expected class also counts as a missing class. The
-  run prints one warning for the artifact. In mirror mode, an artifact folder
-  whose name has a root, a drive, or a parent part fails the row.
+  extraction of an archive follows the same name rule: no file comes from an
+  entry whose name fails it. The row counts each file entry or name that
+  decaf did not use in the new field `refused` (a folder entry has no count),
+  and the totals count them in `refused_entries`. In an ok row, `refused` > 0
+  makes the row partial, and a refused class that is an expected class also
+  counts as a missing class. The run prints one warning for the artifact. In
+  mirror mode, an artifact folder whose name has a root, a drive, or a parent
+  part fails the row.
 
 ## [1.12.0] - 2026-10-31
 

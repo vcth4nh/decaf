@@ -97,11 +97,10 @@ Typical flow:
   SHA-1 match is kept forever, a "no sources" answer for a week. A sources jar is kept for
   the jar that it was downloaded for. Archives are unpacked in a `decaf-*` folder under the
   system temp dir (`TMPDIR`) and removed at the end, and an archive has a copy with no
-  compression there while an engine works on it (on 1,030 public jars, the copies had 2.4
-  times the size of the jars); the JVMs write `hsperfdata_<user>` in that temp dir. No flag
-  turns these writes off; `--no-maven` only adds no verdicts and no sources jars.
-  `decaf cache clean` wipes the Maven part of the cache; `--fresh-maven` ignores the verdicts
-  once.
+  compression there while an engine works on it (about 2 to 3 times the size of a normal
+  jar); the JVMs write `hsperfdata_<user>` in that temp dir. No flag turns these writes off;
+  `--no-maven` only adds no verdicts and no sources jars. `decaf cache clean` wipes the
+  Maven part of the cache; `--fresh-maven` ignores the verdicts once.
 - **CPU and memory.** By default decaf uses all cores but one and gives the engine JVMs 80%
   of the total RAM (or of a cgroup limit) as one heap budget; `--memory 8g` sets that
   budget. The line `engine memory: up to 25 GB (4 jobs, 5.8 GB heap each; a whale gets 7.8
@@ -156,6 +155,7 @@ Typical flow:
   decaf cannot help), `all engines failed` (read the attempts in `--artifact`: `timed_out`
   asks for a higher `--timeout`, `out_of_memory` for a higher `--memory`), `case collision`
   (the output tree ignores case; use a case-sensitive volume for OUT and `TMPDIR`),
+  `no class file is left: decaf refused each one` (no engine starts; see `refused`),
   `interrupted`.
 - **`✓` means no reported gaps or flags.** It can still have noted or unchecked files,
   or no compile check at all. Inspect `check` in the report: `null` means no check ran,
@@ -214,9 +214,10 @@ with `rel`, `kind`, `outcome` (`ok`, `failed`, `skipped`; partial is `ok` with
 `missing_classes` > 0, `refused` > 0, `stubs[]`, `flagged[]`, or a `sources_miss` that
 starts with `network:`, which is a network miss: the lookup failed and the jar was
 decompiled), `method`, `gav`, `repo`, `resolved_by`, `sources_miss`, `sources_cached`,
-`classes`, `java_files`, `missing_classes`, `refused` (the entries, class files, or nested
-archive names that decaf did not use because a name or a class name can leave the output
-folder, or decaf cannot read the class name), `sources_gap`, `collisions`, `failure`,
+`classes`, `java_files`, `missing_classes`, `refused` (the file entries, class files, or
+nested archive names that decaf did not use because a name or a class name can leave the
+output folder, or decaf cannot read the class name; a folder entry has no count),
+`sources_gap`, `collisions`, `failure`,
 `attempts[]` (`engine`, `level` = `archive`, `class`, or `batch`, `returncode`,
 `timed_out`, `out_of_memory`, `stderr_tail`, `peak_rss_mb`), `check` (`checked`, `flagged`,
 `noted`, `unchecked`, `unchecked_reasons`; `null` when no check ran), and the lists
