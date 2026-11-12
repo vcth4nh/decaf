@@ -5277,3 +5277,17 @@ def test_refused_reads_a_class_entry_whose_suffix_has_other_case(tmp_path: Path,
 
     jar = _zip(tmp_path / "a.jar", [("p/A.CLASS", class_file("../A")), ("p/B.Class", class_file("p/B"))])
     assert [i.filename for i in _refused(jar)] == ["p/A.CLASS"]
+
+
+def _raw_names(path: Path) -> list[bytes]:
+    with zipfile.ZipFile(path) as zf:
+        return [i.orig_filename.encode("utf-8" if i.flag_bits & 0x800 else "cp437") for i in zf.infolist()]
+
+
+def test_the_copy_keeps_the_name_bytes_of_a_utf8_name_without_the_utf8_flag(tmp_path: Path, class_file):
+    from decaf.pipeline import _copy_without_refused
+
+    jar = _raw_zip(tmp_path / "a.jar", [(b"p/A.class", class_file("p/A")), (b"p/\xc3\xa9t\xc3\xa9.txt", b"r")])
+    (tmp_path / "copy").mkdir()
+    copy = _copy_without_refused(jar, tmp_path / "copy")
+    assert _raw_names(copy) == _raw_names(jar) == [b"p/A.class", b"p/\xc3\xa9t\xc3\xa9.txt"]

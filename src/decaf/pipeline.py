@@ -784,6 +784,18 @@ def _plain_layout(zf: zipfile.ZipFile) -> bool:
         return False
 
 
+def _copy_name(info: zipfile.ZipInfo) -> str:
+    """The name of an entry in a copy, with the bytes of the input where zipfile can write them: a name with no UTF-8
+    flag that zipfile read as cp437, and whose bytes are valid UTF-8, keeps its bytes (zipfile writes it as UTF-8)."""
+    name = info.orig_filename
+    if info.flag_bits & 0x800 or name.isascii():
+        return name
+    try:
+        return name.encode("cp437").decode("utf-8")
+    except UnicodeError:
+        return name  # other bytes: zipfile writes the cp437 text as UTF-8
+
+
 def _copy_without_refused(archive: Path, folder: Path) -> Path:
     """A copy of the archive in folder, with its file name, without the _refused_entry entries.
 
@@ -808,7 +820,7 @@ def _copy_without_refused(archive: Path, folder: Path) -> Path:
                 if isinstance(exc, OSError) and exc.errno is not None:
                     raise  # the disk, not the entry
                 continue
-            entry = zipfile.ZipInfo(info.filename, info.date_time)
+            entry = zipfile.ZipInfo(_copy_name(info), info.date_time)
             entry.external_attr = info.external_attr
             entry.compress_type = zipfile.ZIP_STORED if info.is_dir() else zipfile.ZIP_DEFLATED
             entry.file_size = part.stat().st_size
