@@ -335,9 +335,10 @@ def test_run_check_marks_the_files_of_a_killed_checker_interrupted(tmp_path: Pat
     assert [(r.status, r.reason) for r in out[0]] == [("clean", None), ("unchecked", "interrupted")]
 
 
-def _class_file(name: str, long_first: bool = False) -> bytes:
-    """A minimal class file whose this_class is name; long_first puts a Long (two pool slots) first."""
-    utf = name.encode()
+def _class_file(name: str | bytes, long_first: bool = False) -> bytes:
+    """A minimal class file whose this_class is name (bytes: the name bytes as they are); long_first puts a Long
+    (two pool slots) first."""
+    utf = name if isinstance(name, bytes) else name.encode()
     pool = b"\x05" + bytes(8) if long_first else b""
     first = 3 if long_first else 1
     pool += b"\x01" + len(utf).to_bytes(2, "big") + utf + b"\x07" + first.to_bytes(2, "big")
@@ -351,6 +352,28 @@ def test_class_name_reads_this_class():
     assert check.class_name(_class_file("q/B$1", long_first=True)) == "q/B$1"
     assert check.class_name(b"not a class") is None
     assert check.class_name(_class_file("p/A")[:12]) is None
+
+
+def test_safe_class_name_reads_this_class():
+    assert check.safe_class_name(_class_file("p/A")) == "p/A"
+    assert check.safe_class_name(_class_file("q/B$1", long_first=True)) == "q/B$1"
+    assert check.safe_class_name(_class_file("p/\u00e9t\u00e9")) == "p/\u00e9t\u00e9"  # 2-byte forms
+    assert check.safe_class_name(_class_file(b"p/\xed\xa0\x80")) == "p/\ud800"  # a 3-byte form of a surrogate
+
+
+@pytest.mark.parametrize("data", [
+    b"not a class",  # does not parse
+    _class_file("p/A")[:12],  # cut in the pool
+    _class_file("p/A")[:-6],  # no this_class
+    _class_file(""),  # no name
+    _class_file(b"p/\xc0\xae\xc0\xae/A"),  # a 2-byte form of an ASCII character: no UTF-8
+    _class_file(b"p/\xc0\x80"),  # the 2-byte form of NUL
+    _class_file(b"p/\xff"),  # no UTF-8
+    _class_file("p/\U0001f600"),  # a 4-byte form: a class file has none
+])
+def test_safe_class_name_gives_none_when_readers_can_differ(data):
+    """Each reader gives the same text for the name bytes, or there is no name."""
+    assert check.safe_class_name(data) is None
 
 
 def test_run_check_gives_the_crash_text(tmp_path: Path, monkeypatch):

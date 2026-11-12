@@ -460,6 +460,24 @@ def class_name(data: bytes) -> str | None:
     return name.decode("utf-8", "replace") if name else None
 
 
+def safe_class_name(data: bytes) -> str | None:
+    """The internal name of a class file when each reader gives the same text for its bytes, else None.
+
+    None also when the class file does not parse or has no name. A reader in Java can take a 2-byte form of an
+    ASCII character as that character, and such a form is no valid UTF-8. A class file has no 4-byte form, so a
+    character above U+FFFF is no proof either.
+    """
+    pool = _pool(data)
+    name = _class_at(pool, data, pool[2] + 2) if pool is not None else None
+    if not name:
+        return None
+    try:
+        text = name.decode("utf-8", "surrogatepass")
+    except UnicodeDecodeError:
+        return None
+    return None if any(ord(c) > 0xFFFF for c in text) else text
+
+
 def _utf8(text: bytes) -> bytes:
     """The bytes of a Utf8 entry of a constant pool, to find the entry in a class file."""
     return b"\x01" + len(text).to_bytes(2, "big") + text
