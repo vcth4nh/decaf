@@ -898,7 +898,9 @@ def _class_parents(
         for x in stale:
             named = any(not below(x, q) for q in namers(x))
             out[x] = by_name(x) if named or other_broken(x, cut.get(x.rpartition("/")[0], [])) else None
-    return out  # crafted class files can give a cycle of parents: _keys_above ends it
+    # a cycle of parents comes from crafted class files, or from two anonymous classes of an old javac (no
+    # EnclosingMethod attribute) that list each other: _keys_above ends it
+    return out
 
 
 def _read_classes(source: Path, names: Collection[str]) -> Iterator[tuple[str, bytes]]:
@@ -1188,8 +1190,9 @@ def _parent_key(key: str, parents: Mapping[str, str | None]) -> str | None:
 
 
 def _keys_above(key: str, parents: Mapping[str, str | None], memo: dict[str, bool]) -> Iterator[str]:
-    """The keys above a key in the tree of a family plan, nearest first: _parent_key again and again. Crafted class
-    files can give a cycle, also through a key below a second root: a key whose walk meets a repeat takes only the
+    """The keys above a key in the tree of a family plan, nearest first: _parent_key again and again. The parents can
+    give a cycle, also through a key below a second root: crafted class files, or two anonymous classes of an old
+    javac (no EnclosingMethod attribute) that list each other. A key whose walk meets a repeat takes only the
     $-prefixes of its name, from long to short. Each step of such a chain is shorter, and no clean chain reaches such
     a key, so no walk loops. memo: key -> its walk meets a repeat, for the walks of one plan."""
     if key not in memo:

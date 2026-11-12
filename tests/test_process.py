@@ -1036,6 +1036,24 @@ def test_keys_above_a_key_end_at_a_cycle_of_parents():
     assert {k: sorted(v) for k, v in units.items()} == {"p/A": ["p/A$B", "p/A$C", "p/A$D$E", "p/A$F"]}
 
 
+def test_keys_above_two_anonymous_classes_of_an_old_javac_that_list_each_other(make_jar):
+    """An old javac (backport-util-concurrent 3.1, Executors$5 and Executors$6) writes no EnclosingMethod attribute:
+    two anonymous classes, one in the other, list themselves and each other, and A lists neither. The parents give a
+    cycle, and decaf cannot tell which class is in the other: both go below A, as on main."""
+    from decaf.pipeline import _class_parents, _keys_above, _units
+
+    jar = make_jar("t.jar", {"p/A.class": _lister("p/A"),
+                             "p/A$1.class": _inner("p/A$1", None, lists=(("p/A$2", None),)),
+                             "p/A$2.class": _inner("p/A$2", None, lists=(("p/A$1", None),))})
+    parents = _class_parents(jar)
+    assert parents == {"p/A$1": "p/A$2", "p/A$2": "p/A$1"}
+    walks: dict[str, bool] = {}
+    assert list(_keys_above("p/A$1", parents, walks)) == ["p/A"]
+    assert list(_keys_above("p/A$2", parents, walks)) == ["p/A"]
+    units = _units({"p/A", "p/A$1", "p/A$2"}, parents)
+    assert {k: sorted(v) for k, v in units.items()} == {"p/A": ["p/A$1", "p/A$2"]}
+
+
 def _linked_family() -> dict[str, bytes]:
     """Crafted links: the parents of the stems have no cycle, A$Y$1 -> A -> nothing, A$X -> A$Y$1, A$Y and A$Z ->
     A$X. Without a copy of A$Y$1 below a second root, the key of A$X there takes the name rule: A$Y, whose parent
