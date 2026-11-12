@@ -513,6 +513,10 @@ def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
     They attribute batch output back to its member and keep claimants
     from sharing a batch, but never join expectations (#75): such a file is
     copied when an engine emits it, exactly like a solo run — never retried.
+
+    A class with an outer class by name that does not list itself in its InnerClasses attribute, for example the
+    module class Foo$ of a Scala object, is a top-level class for the JVM: no file of another class holds it, so it
+    is expected (#206). A class file that decaf cannot read stays an inner class, as in _read_unnested.
     """
     if source.is_dir():
         entries = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
@@ -531,7 +535,9 @@ def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
         else:
             stems.add(_class_stem(e))
     inner = {s for s in stems if outer_stem(s, stems) is not None}
-    return stems - inner, claims | inner
+    tops = {_class_stem(name) for name, data in _read_classes(source, [e for e in entries if _class_stem(e) in inner])
+            if check.lists_itself(data) is False}  # a multi-release class: one entry is enough
+    return (stems - inner) | tops, claims | (inner - tops)
 
 
 def expected_class_stems(source: Path) -> set[str]:
@@ -1429,6 +1435,8 @@ def _attempt(
 def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path | None:
     """Copy the .class files (plus their inner classes) for missing stems into a temp tree.
 
+    A missing stem brings the family of its top-level class by name: a missing Foo$ that is top-level for the
+    JVM brings Foo and its inner classes too, so the engines have each class file that they can need (#206).
     Each class goes in once: its base class, or the class of its lowest META-INF/versions folder
     when it has no base class. With two versions of a class in one tree, an engine can write the
     body of one version as the other, or only one of them (#107).
@@ -1452,10 +1460,11 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
         number = rel.split("/", 3)[2]
         return int(number) if number.isdigit() else -1  # the JVM reads no other folder
 
+    families = {outer_stem(s, stems) or s for s in missing}
     lowest: dict[str, int] = {}
     for n in names:
         t, v = top(n), version(n)
-        if t in missing and v >= 0:
+        if t in families and v >= 0:
             lowest[t] = min(lowest.get(t, v), v)
 
     def wanted(entry: str) -> bool:
