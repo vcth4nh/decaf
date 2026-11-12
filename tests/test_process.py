@@ -4965,11 +4965,11 @@ def _entries(path: Path) -> list[tuple[str, bytes]]:
 
 @pytest.mark.class_names
 def test_the_engine_copy_refuses_the_entries_whose_name_leaves_the_archive(tmp_path: Path, class_file):
-    jar = _zip(tmp_path / "a.jar", [
-        ("p/A.class", class_file("p/A")),
-        ("../up.txt", b"x"),
-        ("C:/dir/", b""),
-        ("p\\..\\..\\B.class", class_file("B")),
+    jar = _raw_zip(tmp_path / "a.jar", [  # raw names: zipfile writes a backslash as / on Windows
+        (b"p/A.class", class_file("p/A")),
+        (b"../up.txt", b"x"),
+        (b"C:/dir/", b""),
+        (b"p\\..\\..\\B.class", class_file("B")),
     ])
     copy, refused = _engine_copy(jar, tmp_path)
     assert refused == ["../up.txt", "p\\..\\..\\B.class"]  # a folder entry has no count
@@ -5145,7 +5145,7 @@ def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, cla
     folder = tmp_path / "classes"
     for rel, data in {"p/A.class": class_file("p/A"), "p/B.class": class_file("../B"), "p/C.class": b"no class",
                       "p/D.class": class_file("p/D"), "p/r.txt": b"x",
-                      "p/d.class/E.class": class_file("p/E")}.items():  # a folder named d.class is no file
+                      "p/x.class/E.class": class_file("p/E")}.items():  # a folder named x.class is no file
         (folder / rel).parent.mkdir(parents=True, exist_ok=True)
         (folder / rel).write_bytes(data)
     real_open = open
