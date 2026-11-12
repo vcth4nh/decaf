@@ -4842,7 +4842,8 @@ def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, cla
 
     folder = tmp_path / "classes"
     for rel, data in {"p/A.class": class_file("p/A"), "p/B.class": class_file("../B"), "p/C.class": b"no class",
-                      "p/D.class": class_file("p/D"), "p/r.txt": b"x"}.items():
+                      "p/D.class": class_file("p/D"), "p/r.txt": b"x",
+                      "p/d.class/E.class": class_file("p/d.class/E")}.items():  # a folder named d.class is no file
         (folder / rel).parent.mkdir(parents=True, exist_ok=True)
         (folder / rel).write_bytes(data)
     real_open = open
@@ -4986,3 +4987,17 @@ def test_a_normal_class_folder_gives_the_engine_each_class_file(tmp_path: Path, 
     report, _ = process_artifact(Artifact(folder, "_classes", ArtifactKind.CLASS_TREE), ctx)
     assert runner.sent == [["build/C.class", "p/A$1.class", "p/A.class", "q/r/B.class"]] and warns == []
     assert (report.classes, report.missing_classes, report.java_files) == (4, 0, 4)
+
+
+def test_a_retry_tree_lacks_the_refused_class_files_of_a_family(tmp_path: Path, class_file):
+    """The first engine writes no file for p/A. The retry tree of its family lacks p/A$1.class, whose class name
+    leaves the folder, and an entry whose name leaves the folder with a backslash."""
+    jar = _zip(tmp_path / "app.jar", [
+        ("p/A.class", class_file("p/A")), ("p/A$1.class", class_file("../A$1")), ("p/B.class", class_file("p/B")),
+        ("q\\..\\..\\Z.class", class_file("Z")),
+    ])
+    runner = writing_runner({"vineflower": {"p/B.java": "class B {}"}})
+    ctx = make_ctx(tmp_path, runner)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [name for name, _ in runner.calls][:2] == ["vineflower", "cfr"]
+    assert runner.sent[1] == ["p/A.class"]

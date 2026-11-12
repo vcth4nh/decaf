@@ -717,6 +717,8 @@ def _refused(source: Path) -> list[zipfile.ZipInfo] | list[str]:
             return [info for info in zf.infolist() if _refused_entry(zf, info)]
     out: list[str] = []
     for p in sorted(source.rglob("*.class")):
+        if not p.is_file():
+            continue  # a folder named x.class
         try:
             with open(p, "rb") as f:
                 data = _bounded(f)
@@ -1763,15 +1765,17 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
 
     out = _tmp_dir(ctx)
     if source.is_dir():
-        count = 0
         for rel in names:
             if wanted(rel):
                 target = out / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source / rel, target)
-                count += 1
     else:
-        count = safe_extract_zip(source, out, members=[n for n in names if wanted(n)])
+        safe_extract_zip(source, out, members=[n for n in names if wanted(n) and stays_inside(n)])
+    # The file on the disk is the file that the engine gets: of two entries with one name, the last one.
+    for rel in _refused(out):
+        (out / rel).unlink()
+    count = sum(1 for p in out.rglob("*.class") if p.is_file())
     return out if count else None
 
 
