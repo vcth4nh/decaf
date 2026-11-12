@@ -176,8 +176,8 @@ def safe_extract_zip(
     """Extract files from a zip, refusing paths that escape dest. Returns count.
 
     An entry whose names fail names_stay is skipped first, as the row of the archive counts it as refused, and so is
-    each other entry with its zipfile name; then the path of each entry must resolve below dest on this OS. An entry that cannot be read is skipped, and its name goes
-    to failed (#109).
+    each other entry with its zipfile name; then the path of each entry must resolve below dest on this OS. An entry
+    that cannot be read is skipped, and its name goes to failed (#109).
     Of two entries with one name, the last one decides, as in Java.
     A disk error, for example a full disk, still raises.
     """
