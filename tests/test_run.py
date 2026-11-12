@@ -2001,7 +2001,8 @@ def test_a_batch_member_reads_its_class_files_in_a_worker(fake_env, make_jar, tm
 @pytest.mark.parametrize("refused", [False, True])
 def test_a_batch_member_with_a_refused_entry_runs_alone(fake_env, make_jar, tmp_path, class_file, refused):
     """A batch takes the expected classes from its target, and the copy without the refused entries lacks them: such
-    a member goes back for a solo run, which counts it one time. The other member stays in the batch."""
+    a member goes back for a solo run, which counts it one time. With one member left, it goes back too: main never
+    ran a batch of one member."""
     s0 = make_jar("s0.jar", {"com/s0/A.class": class_file("com/s0/A")})
     s1 = make_jar("s1.jar", {"com/s1/B.class": class_file("com/s1/B"),
                              "com/s1/C.class": class_file("../C" if refused else "com/s1/C")})
@@ -2035,8 +2036,8 @@ def test_a_batch_member_with_a_refused_entry_runs_alone(fake_env, make_jar, tmp_
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, fallback=False, jobs=1,
                           cpus=1),
                  runner=gated_solo, batch_runner=recording_batch, on_event=on_event, on_warn=warns.append)
-    assert batches == ([["s0.jar"]] if refused else [["s0.jar", "s1.jar"]])
-    assert solo == (["big.jar", "s1.jar"] if refused else ["big.jar"])
+    assert batches == ([] if refused else [["s0.jar", "s1.jar"]])
+    assert (solo[0], sorted(solo[1:])) == (("big.jar", ["s0.jar", "s1.jar"]) if refused else ("big.jar", []))
     row = next(r for r in report.artifacts if r.rel.endswith("s1.jar"))
     assert (row.classes, row.missing_classes, row.refused) == ((2, 1, 1) if refused else (2, 0, 0))
     assert [a.level for a in row.attempts] == (["archive"] if refused else ["batch"])

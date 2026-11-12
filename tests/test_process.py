@@ -502,7 +502,14 @@ def test_a_batch_runs_on_the_copies_and_sends_a_member_with_a_refused_entry_back
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": class_file("com/a/A")})
     m2 = _member(make_jar, "b.jar", {"com/b/B.class": class_file("com/b/B"), "com/b/C.class": class_file("../C")})
     m3 = _member(make_jar, "c.jar", {"com/c/D.class": class_file("com/c/D")})
-    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    copies: list[list[str]] = []
+    batch = _recording_batch(targets)
+
+    def batch_and_copies(spec, jar_path, ts, dest, timeout, **kw):
+        copies.append(sorted(p.name for p in ctx.tmp_root.rglob("*.jar")))
+        return batch(spec, jar_path, ts, dest, timeout, **kw)
+
+    ctx = _batch_ctx(tmp_path, batch_and_copies)
     warns: list[str] = []
     ctx.on_warn = warns.append
     done, requeue = _decompile_batch([m1, m2, m3], ctx)
@@ -510,7 +517,23 @@ def test_a_batch_runs_on_the_copies_and_sends_a_member_with_a_refused_entry_back
     assert [(a.rel, t) for a, t, _ in requeue] == [("b.jar", m2[1])]  # the input: its solo run makes its own copy
     assert (requeue[0][2].attempts, requeue[0][2].refused, warns) == ([], 0, [])
     assert [t.name for t in targets] == ["a.jar", "c.jar"] and not {m1[1], m3[1]} & set(targets)  # the copies
+    assert copies == [["a.jar", "c.jar"]]  # the copy of b.jar went at once
     assert list(ctx.tmp_root.iterdir()) == []  # the copy folders went with the batch
+
+
+@pytest.mark.class_names
+def test_a_batch_with_one_member_left_sends_each_member_back(make_jar, tmp_path, class_file):
+    """main never ran a batch of one member: the member that is left goes back for a solo run too."""
+    from decaf.pipeline import _decompile_batch
+
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": class_file("com/a/A")})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": class_file("../B")})
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert (done, [t for _, t, _ in requeue], targets) == ([], [m1[1], m2[1]], [])
+    assert all(r.attempts == [] and r.refused == 0 for _, _, r in requeue)
+    assert list(ctx.tmp_root.iterdir()) == []
 
 
 @pytest.mark.class_names
@@ -621,12 +644,12 @@ def test_decompile_batch_empty_member_requeued(make_jar, tmp_path):
 
 def test_decompile_batch_writes_sources_only(make_jar, tmp_path):
     """Resources come from the fetch stage's add_resources, not from the batch."""
-    from decaf.pipeline import MirrorWriter, _decompile_batch
+    from decaf.pipeline import MirrorWriter, _decompile_batch_copies
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "META-INF/spring.factories": b"cfg"})
     ctx = _batch_ctx(tmp_path, merged_batch_engine)
     ctx.writer = MirrorWriter(tmp_path / "out")
-    done, requeue = _decompile_batch([m1], ctx)
+    done, requeue = _decompile_batch_copies([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
     assert (tmp_path / "out/a.jar/com/a/A.java").is_file()
     assert not (tmp_path / "out/a.jar/META-INF/spring.factories").exists()
@@ -846,7 +869,7 @@ def test_decompile_batch_counts_an_empty_file_as_a_class_that_its_engine_wrote_a
 
 def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
     from decaf.engines import EngineResult
-    from decaf.pipeline import _decompile_batch
+    from decaf.pipeline import _decompile_batch_copies
 
     def inner_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
         dest = Path(dest)
@@ -859,7 +882,7 @@ def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "com/a/A$1.class": b"y"})
     ctx = _batch_ctx(tmp_path, inner_emitting_batch)
-    done, requeue = _decompile_batch([m1], ctx)
+    done, requeue = _decompile_batch_copies([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
     out = tmp_path / "out" / "src"
     assert (out / "com/a/A.java").is_file()
@@ -872,7 +895,7 @@ def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
     no-owner-stem case: a stray file with no matching member must never land
     in any output tree, even when it's the only extra file the engine wrote."""
     from decaf.engines import EngineResult
-    from decaf.pipeline import _decompile_batch
+    from decaf.pipeline import _decompile_batch_copies
 
     def stray_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
         dest = Path(dest)
@@ -884,7 +907,7 @@ def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
     ctx = _batch_ctx(tmp_path, stray_emitting_batch)
-    done, requeue = _decompile_batch([m1], ctx)
+    done, requeue = _decompile_batch_copies([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
     out = tmp_path / "out" / "src"
     assert (out / "com/a/A.java").is_file()
@@ -2429,7 +2452,7 @@ def test_batch_watcher_not_started_without_on_event(make_jar, tmp_path, monkeypa
     monkeypatch.setattr(pipeline, "_watch_batch", lambda *a, **k: calls.append(1))
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
     ctx = _batch_ctx(tmp_path, merged_batch_engine)  # on_event defaults to None
-    done, requeue = pipeline._decompile_batch([m1], ctx)
+    done, requeue = pipeline._decompile_batch_copies([m1], ctx)
     assert [r.outcome for r in done] == ["ok"] and requeue == []
     assert calls == []
 
@@ -2459,7 +2482,7 @@ def test_batch_watcher_exception_never_taints_outcome(make_jar, tmp_path, monkey
         return res
 
     ctx = _batch_ctx(tmp_path, slow_batch, on_event=lambda k, s, d: events.append((k, s, d)))
-    done, requeue = pipeline._decompile_batch([m1], ctx)
+    done, requeue = pipeline._decompile_batch_copies([m1], ctx)
     assert [r.outcome for r in done] == ["ok"] and requeue == []  # split ran on this thread, unpoisoned
     assert not [e for e in events if e[0] == "progress"]
 

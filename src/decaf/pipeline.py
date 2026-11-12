@@ -2545,7 +2545,8 @@ def _decompile_batch(
     """Stage 2 for a batch on the copies that the engines get (_engine_copy), one for each member.
 
     A batch takes the expected classes from its targets, so a member whose copy has refused entries goes back for a
-    solo run with its input, which counts and prints them one time. A requeued member gets its input back. The copy
+    solo run with its input, which counts and prints them one time, and its copy folder goes at once. With fewer than
+    two members left, each member goes back: no batch has one member. A requeued member gets its input back. The copy
     folders go when the batch ends, also after an error. After Ctrl-C, no copy is made and each member goes back.
     """
     folders: list[Path] = []
@@ -2560,13 +2561,14 @@ def _decompile_batch(
                 copy, refused = _engine_copy(t, folders[-1])
                 if refused:
                     requeue.append((a, t, r))
+                    _drop(folders.pop())
                 else:
                     inputs[copy] = t
                     kept.append((a, copy, r, stems, claims))
         except Exception:  # e.g. a full disk: each member gets its own try, and its own failure (#112)
             return [], [(a, t, r) for a, t, r, _, _ in members]
-        if not kept:
-            return [], requeue
+        if len(kept) < 2:
+            return [], [(a, t, r) for a, t, r, _, _ in members]
         done, back = _decompile_batch_copies(kept, ctx)
         return done, [(a, inputs[t], r) for a, t, r in back] + requeue
     finally:
