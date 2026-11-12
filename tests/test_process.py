@@ -316,15 +316,14 @@ def test_resource_only_container_still_descended(make_jar, tmp_path: Path):
 
 
 def test_class_tree_decompiled_from_copied_tree(tmp_path: Path):
-    root = tmp_path / "in"  # not the folder of ctx.tmp_root: the expected classes come from the input folder
-    (root / "loose/com/x").mkdir(parents=True)
-    (root / "loose/com/x/A.class").write_bytes(b"a")
+    (tmp_path / "loose/com/x").mkdir(parents=True)
+    (tmp_path / "loose/com/x/A.class").write_bytes(b"a")
     runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
     ctx = make_ctx(tmp_path, runner)
-    report, _ = process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    report, _ = process_artifact(Artifact(tmp_path, "_classes", ArtifactKind.CLASS_TREE), ctx)
     assert report.outcome == "ok"
     assert report.classes == 1
-    assert runner.sent[0] == ["loose/com/x/A.class"] and runner.calls[0][1] != root  # copied tree, not the input root
+    assert runner.sent[0] == ["loose/com/x/A.class"] and runner.calls[0][1] != tmp_path  # copied tree, not the input root
 
 
 def test_runner_exception_becomes_failed_report(make_jar, tmp_path: Path):
@@ -5026,3 +5025,15 @@ def test_an_archive_with_only_refused_entries_gives_the_engines_an_empty_copy(tm
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     assert [names for _, names in runner.calls] == [[]]
     assert (report.outcome, report.failure, report.classes, report.missing_classes) == ("failed", "all engines failed", 1, 0)
+
+
+def test_a_class_folder_that_holds_the_temp_root_counts_only_its_own_classes(tmp_path: Path, class_file):
+    """The input folder can hold the temp folder of the run: the expected classes come from the copy, also with a
+    refused class file, as on main."""
+    _tree(tmp_path / "loose", {"p/A.class": class_file("p/A"), "p/B.class": class_file("../B")})
+    runner = _folder_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)  # ctx.tmp_root is tmp_path / "work"
+    report, _ = process_artifact(Artifact(tmp_path, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert runner.sent == [["loose/p/A.class"]]
+    assert (report.classes, report.missing_classes, report.java_files) == (2, 1, 1)
+    assert ctx.tree_expected == {}  # the row took its set
