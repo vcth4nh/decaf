@@ -3707,21 +3707,26 @@ def test_the_roots_of_a_target_share_one_deadline(tmp_path: Path, class_file, mo
 
 
 def test_the_runs_of_the_roots_give_one_result(tmp_path: Path, class_file):
+    """The first non-zero return code, the highest peak, and a timeout or an out of memory error of any run."""
     from decaf.pipeline import _run_engine
 
     runner = by_name_runner(results=[
         EngineResult("cfr", 0, False, 0, "a" * 1500, 100, False),
-        EngineResult("cfr", 3, True, 0, "b" * 1500, 200, True),
+        EngineResult("cfr", 3, True, 0, "b" * 1500, 300, True),
+        EngineResult("cfr", 5, False, 0, "c" * 1500, 200, False),
     ])
     ctx = make_ctx(tmp_path, runner, engine="cfr")
-    tree = _two_roots(tmp_path, class_file)
+    tree = _tree(tmp_path / "tree", {
+        "p/A.class": class_file("p/A"), "BOOT-INF/classes/r/C.class": class_file("r/C"),
+        "WEB-INF/classes/q/B.class": class_file("q/B"),
+    })
     res = _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), tree, tmp_path / "d", 100, java="java")
     assert runner.calls[0]["target"] != tree  # a copy of the classes of the root ""
-    assert runner.calls[1]["target"] == tree / "WEB-INF/classes"  # no copy: each class file below it has its prefix
+    assert runner.calls[2]["target"] == tree / "WEB-INF/classes"  # no copy: each class file below it has its prefix
     assert (res.engine, res.returncode, res.timed_out, res.java_files, res.peak_rss_mb, res.out_of_memory) == (
-        "cfr", 3, True, 2, 200, True,
+        "cfr", 3, True, 3, 300, True,
     )
-    assert res.stderr_tail == ("a" * 1500 + "\n" + "b" * 1500)[-2000:]
+    assert res.stderr_tail == ("a" * 1500 + "\n" + "b" * 1500 + "\n" + "c" * 1500)[-2000:]
 
 
 def test_no_root_runs_after_ctrl_c(tmp_path: Path, class_file):
@@ -3970,6 +3975,26 @@ def test_the_temp_jar_goes_when_the_engine_raises(tmp_path: Path, class_file):
         _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "d", 100, java="java")
     assert [p.name for p in seen] == ["classes.jar"] and not seen[0].exists()
     assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_the_temp_jar_raises_a_disk_error(tmp_path: Path, class_file, monkeypatch):
+    """A full disk is no damaged entry: the run stops, and the temp folders go."""
+    import errno
+
+    import decaf.pipeline as pipeline
+    from decaf.pipeline import _run_engine
+
+    def full(src, dst, *a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    war = _zip(tmp_path / "app.war", [("WEB-INF/classes/com/x/A.class", class_file("com/x/A"))])
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    monkeypatch.setattr(pipeline.shutil, "copyfileobj", full)
+    with pytest.raises(OSError) as exc:
+        _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "dest", 100, java="java")
+    assert exc.value.errno == errno.ENOSPC
+    assert runner.calls == [] and list(ctx.tmp_root.iterdir()) == []
 
 
 def test_the_temp_jar_leaves_out_an_entry_that_cannot_be_read(make_damaged_jar, tmp_path: Path, class_file):
