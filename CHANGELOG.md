@@ -214,6 +214,17 @@
   flagged file. Or a clean file of Fernflower did not replace a flagged
   file. Now decaf reads the parents of all classes of the family.
 
+### Security
+
+- An engine could make an output path from the name of an archive entry or
+  from the class name inside a class file, so a name from an untrusted input
+  could put a file outside the output folder. decaf's own extraction already
+  refused such entry names, but an engine reads an archive itself, and no
+  code looked at the class name inside a class file. Now an engine gets only
+  the archive entries and class files whose names stay inside the archive
+  and the output folder, also in a retry. decaf counts the other classes as
+  missing classes and prints one warning for the artifact.
+
 ## [1.12.0] - 2026-10-31
 
 ### Added
