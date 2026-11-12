@@ -1,4 +1,5 @@
 import re
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -2949,15 +2950,23 @@ def test_a_gap_fill_keeps_the_held_files_of_its_family_until_the_end_of_the_chai
 
 def test_a_held_file_of_an_outer_class_holds_the_family_of_its_copy(make_jar, tmp_path: Path):
     """A war can have a class at the root and under WEB-INF/classes (#107). The file of an inner class rides
-    with the file of the outer class of its own copy."""
+    with the file of the outer class of its own copy. CFR gets each copy at its package root (#173)."""
     web = "WEB-INF/classes/"
     jar = make_jar("app.jar", {
         f"{root}com/x/{n}.class": _class_header(52) for root in ("", web) for n in ("A", "A$1")
     })
-    runner = writing_runner({
+    vineflower = writing_runner({
         "vineflower": {_A: _VF_STUB, _A1: _A1_VF, web + _A: _VF_STUB, web + _A1: "class A$1 { /* vf web */ }"},
-        "cfr": {_A: "class A { /* cfr */ }", web + _A: "class A { /* cfr web */ }"},
     })
+    cfr_root = writing_runner({"cfr": {_A: "class A { /* cfr */ }"}})
+    cfr_web = writing_runner({"cfr": {_A: "class A { /* cfr web */ }"}})
+
+    def runner(spec, jar_path, target, dest, timeout, **kw):
+        if spec.name != "cfr":
+            return vineflower(spec, jar_path, target, dest, timeout, **kw)
+        run = cfr_web if Path(target).as_posix().endswith("/WEB-INF/classes") else cfr_root
+        return run(spec, jar_path, target, dest, timeout, **kw)
+
     ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     out = tmp_path / "out/app.jar"
@@ -3459,3 +3468,418 @@ def test_an_empty_file_counts_as_a_class_that_its_engine_wrote_apart(make_jar, t
     report, written, _ = _run_family(make_jar, tmp_path, files)
     assert written == expected
     assert report.java_files == len(expected) and report.missing_classes == 0
+
+
+# --- CFR, Procyon, and JD get one package root at a time (#199, #200, #170, #171, #173) ---
+
+
+def _tree(base: Path, files: dict[str, bytes]) -> Path:
+    for rel, data in files.items():
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return base
+
+
+def by_name_runner(results=None, on_call=None):
+    """Fake CFR: one file for each top-level class of the target, at the path of its class name (#199)."""
+    calls: list[dict] = []
+
+    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        target = Path(target)
+        if target.is_dir():
+            entries = {p.relative_to(target).as_posix(): p.read_bytes() for p in sorted(target.rglob("*.class"))}
+        else:
+            with zipfile.ZipFile(target) as zf:
+                entries = {n: zf.read(n) for n in sorted(zf.namelist()) if n.endswith(".class")}
+        calls.append({"engine": spec.name, "target": target, "classes": sorted(entries), "timeout": timeout,
+                      "data": entries})
+        n = 0
+        for rel, data in entries.items():
+            name = check.class_name(data) or rel[: -len(".class")]
+            if "$" in name.rsplit("/", 1)[-1]:
+                continue
+            out = Path(dest) / (name + ".java")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(f"class X {{}} // {spec.name}\n")
+            n += 1
+        if on_call is not None:
+            on_call(len(calls))
+        if results is not None:
+            r = results[len(calls) - 1]
+            return EngineResult(spec.name, r.returncode, r.timed_out, n, r.stderr_tail, r.peak_rss_mb, r.out_of_memory)
+        return EngineResult(spec.name, 0, False, n, "")
+
+    _run.calls = calls
+    return _run
+
+
+def _sources(dest: Path) -> list[str]:
+    return sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+
+
+def test_root_prefix_of_a_container_entry(tmp_path: Path):
+    from decaf.pipeline import _root_prefix
+
+    assert _root_prefix(tmp_path, "WEB-INF/classes/p/A.class") == "WEB-INF/classes/"
+    assert _root_prefix(tmp_path, "app/WEB-INF/classes/p/A.class") == "app/WEB-INF/classes/"
+    assert _root_prefix(tmp_path, "BOOT-INF/classes/META-INF/versions/11/p/A.class") == "BOOT-INF/classes/"
+
+
+def test_root_prefix_from_the_class_name(tmp_path: Path, class_file):
+    from decaf.pipeline import _root_prefix
+
+    _tree(tmp_path, {
+        "target/classes/p/A.class": class_file("p/A"),
+        "target/classes/q/B$Nested.class": class_file("q/B$Nested"),
+        "p/A.class": class_file("p/A"),
+        "Top.class": class_file("Top"),
+    })
+    assert _root_prefix(tmp_path, "target/classes/p/A.class") == "target/classes/"
+    assert _root_prefix(tmp_path, "target/classes/q/B$Nested.class") == "target/classes/"
+    assert _root_prefix(tmp_path, "p/A.class") == ""
+    assert _root_prefix(tmp_path, "Top.class") == ""
+
+
+def test_root_prefix_cuts_a_versions_folder(tmp_path: Path, class_file):
+    """A versions folder stays inside its root, as before (#202 is the multi-release fault)."""
+    from decaf.pipeline import _root_prefix
+
+    _tree(tmp_path, {
+        "target/classes/META-INF/versions/11/p/A.class": class_file("p/A"),
+        "META-INF/versions/11/p/A.class": class_file("p/A"),
+    })
+    assert _root_prefix(tmp_path, "target/classes/META-INF/versions/11/p/A.class") == "target/classes/"
+    assert _root_prefix(tmp_path, "META-INF/versions/11/p/A.class") == ""
+
+
+def test_root_prefix_is_empty_when_the_name_does_not_match(tmp_path: Path, class_file):
+    from decaf.pipeline import _root_prefix
+
+    _tree(tmp_path, {
+        "target/classes/p/A.class": class_file("other/Z"),
+        "target/classes/q/B.class": class_file("ses/q/B"),  # the end of the path, but not at a "/"
+        "target/classes/r/C.class": b"x",
+    })
+    assert _root_prefix(tmp_path, "target/classes/p/A.class") == ""
+    assert _root_prefix(tmp_path, "target/classes/q/B.class") == ""
+    assert _root_prefix(tmp_path, "target/classes/r/C.class") == ""
+    assert _root_prefix(tmp_path, "target/classes/s/Gone.class") == ""  # cannot be read
+
+
+def _class_folder(tmp_path: Path, class_file) -> Path:
+    root = tmp_path / "in"
+    _tree(root, {
+        "target/classes/p/A.class": class_file("p/A"),
+        "target/classes/q/B.class": class_file("q/B"),
+        "target/classes/q/B$Nested.class": class_file("q/B$Nested"),
+    })
+    return root
+
+
+@pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
+def test_a_rooted_engine_gets_the_package_root_of_a_class_folder(tmp_path: Path, class_file, engine):
+    """Before, CFR wrote p/A.java for target/classes/p/A.class, and the row had 2 missing classes (#199)."""
+    root = _class_folder(tmp_path, class_file)
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert [c["classes"] for c in runner.calls] == [["p/A.class", "q/B$Nested.class", "q/B.class"]]
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 2, 0, 2)
+    assert _sources(tmp_path / "out") == ["_classes/target/classes/p/A.java", "_classes/target/classes/q/B.java"]
+
+
+def test_the_fallback_after_a_rooted_engine_writes_no_second_file(tmp_path: Path, class_file):
+    """Before, Vineflower wrote target/classes/p/A.java next to the p/A.java of CFR, and java_files was 4 (#199)."""
+    root = _class_folder(tmp_path, class_file)
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr", writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert [a.engine for a in report.attempts] == ["cfr"]
+    assert (report.java_files, report.missing_classes) == (2, 0)
+
+
+@pytest.mark.parametrize("engine", ["vineflower", "fernflower"])
+def test_vineflower_and_fernflower_get_the_target_unchanged(make_jar, tmp_path: Path, class_file, engine):
+    root = _class_folder(tmp_path, class_file)
+    war = make_jar("app.war", {"WEB-INF/classes/com/x/A.class": class_file("com/x/A")})
+    runner = writing_runner({engine: {"WEB-INF/classes/com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False)
+    process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    assert runner.sent[0] == ["target/classes/p/A.class", "target/classes/q/B$Nested.class", "target/classes/q/B.class"]
+    assert runner.calls[1] == (engine, war)
+
+
+@pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
+def test_a_rooted_engine_gets_an_archive_without_a_container_entry_unchanged(make_jar, tmp_path: Path, class_file, engine):
+    jar = make_jar("app.jar", {"com/x/A.class": class_file("com/x/A")})
+    runner = writing_runner({engine: {"com/x/A.java": "class A {}"}})
+    ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False)
+    process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert runner.calls == [(engine, jar)]
+
+
+@pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
+def test_a_rooted_engine_gets_the_classes_of_a_war_without_their_container(make_jar, tmp_path: Path, class_file, engine):
+    """Before, CFR and Procyon wrote com/x/A.java, and JD took WEB-INF.classes.com.x as the package (#170, #173)."""
+    war = make_jar("app.war", {
+        "WEB-INF/web.xml": "<web-app/>",
+        "WEB-INF/classes/com/x/A.class": class_file("com/x/A"),
+        "WEB-INF/classes/com/x/A$1.class": class_file("com/x/A$1"),
+    })
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    (call,) = runner.calls
+    assert call["classes"] == ["com/x/A$1.class", "com/x/A.class"]
+    assert call["target"].name == "classes.jar"  # a jar, as a plain jar: CFR writes other text from a folder
+    assert not call["target"].exists()  # the temp jar goes after the run
+    assert _sources(tmp_path / "out") == ["app.war/WEB-INF/classes/com/x/A.java", "app.war/WEB-INF/web.xml"]
+    assert (report.java_files, report.missing_classes) == (1, 0)
+
+
+def test_a_class_folder_target_is_not_modified(tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    files = {
+        "target/classes/p/A.class": class_file("p/A"),
+        "x/Z.class": class_file("x/Z"),
+        "target/classes/r/C.class": b"no class file",
+    }
+    tree = _tree(tmp_path / "tree", files)
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    res = _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), tree, dest, 100, java="java")
+    assert {p.relative_to(tree).as_posix(): p.read_bytes() for p in tree.rglob("*") if p.is_file()} == files
+    assert [c["classes"] for c in runner.calls] == [["target/classes/r/C.class", "x/Z.class"], ["p/A.class"]]
+    assert runner.calls[1]["target"] != tree / "target/classes"  # a copy: r/C.class below it has no prefix
+    assert _sources(dest) == ["target/classes/p/A.java", "target/classes/r/C.java", "x/Z.java"]
+    assert res.java_files == 3
+
+
+def test_a_retry_tree_with_two_roots_gives_two_runs(make_jar, tmp_path: Path, class_file):
+    """A Spring Boot jar has its loader classes at the root and its own classes under BOOT-INF/classes/."""
+    jar = make_jar("boot.jar", {
+        "BOOT-INF/classes/com/x/Done.class": class_file("com/x/Done"),
+        "BOOT-INF/classes/com/x/A.class": class_file("com/x/A"),
+        "BOOT-INF/classes/com/x/A$1.class": class_file("com/x/A$1"),
+        "org/boot/L.class": class_file("org/boot/L"),
+    })
+    vineflower = writing_runner({"vineflower": {"BOOT-INF/classes/com/x/Done.java": "class Done {}"}})
+    cfr = by_name_runner()
+
+    def runner(spec, *a, **k):
+        return (vineflower if spec.name == "vineflower" else cfr)(spec, *a, **k)
+
+    ctx = make_ctx(tmp_path, runner, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "boot.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [c["classes"] for c in cfr.calls] == [["org/boot/L.class"], ["com/x/A$1.class", "com/x/A.class"]]
+    assert [(a.engine, a.level, a.java_files) for a in report.attempts] == [("vineflower", "archive", 1), ("cfr", "class", 2)]
+    assert _sources(tmp_path / "out") == [
+        "boot.jar/BOOT-INF/classes/com/x/A.java", "boot.jar/BOOT-INF/classes/com/x/Done.java", "boot.jar/org/boot/L.java",
+    ]
+    assert report.missing_classes == 0
+
+
+def _two_roots(tmp_path: Path, class_file) -> Path:
+    return _tree(tmp_path / "tree", {"p/A.class": class_file("p/A"), "WEB-INF/classes/q/B.class": class_file("q/B")})
+
+
+def test_the_roots_of_a_target_share_one_deadline(tmp_path: Path, class_file, monkeypatch):
+    import decaf.pipeline as pipeline
+    from decaf.pipeline import _run_engine
+
+    now = [0.0]
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: now[0])
+    runner = by_name_runner(on_call=lambda n: now.__setitem__(0, now[0] + 60))
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    tree = _two_roots(tmp_path, class_file)
+    res = _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), tree, tmp_path / "d1", 100, java="java")
+    assert [c["timeout"] for c in runner.calls] == [100, 40]
+    assert not res.timed_out
+    runner.calls.clear()
+    res = _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), tree, tmp_path / "d2", 50, java="java")
+    assert [c["timeout"] for c in runner.calls] == [50]  # no time is left for the second root
+    assert res.timed_out
+
+
+def test_the_runs_of_the_roots_give_one_result(tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    runner = by_name_runner(results=[
+        EngineResult("cfr", 0, False, 0, "a" * 1500, 100, False),
+        EngineResult("cfr", 3, True, 0, "b" * 1500, 200, True),
+    ])
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    tree = _two_roots(tmp_path, class_file)
+    res = _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), tree, tmp_path / "d", 100, java="java")
+    assert runner.calls[0]["target"] != tree  # a copy of the classes of the root ""
+    assert runner.calls[1]["target"] == tree / "WEB-INF/classes"  # no copy: each class file below it has its prefix
+    assert (res.engine, res.returncode, res.timed_out, res.java_files, res.peak_rss_mb, res.out_of_memory) == (
+        "cfr", 3, True, 2, 200, True,
+    )
+    assert res.stderr_tail == ("a" * 1500 + "\n" + "b" * 1500)[-2000:]
+
+
+def test_no_root_runs_after_ctrl_c(tmp_path: Path, class_file):
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import _run_engine
+
+    runner = by_name_runner(on_call=lambda n: PROCESSES.kill_all())
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    try:
+        _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), _two_roots(tmp_path, class_file), tmp_path / "d", 100,
+                    java="java")
+    finally:
+        PROCESSES.reset()
+    assert len(runner.calls) == 1
+
+
+def test_the_temp_folders_of_the_roots_go_when_the_engine_raises(tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    def exploding(*a, **k):
+        raise RuntimeError("engine exploded")
+
+    ctx = make_ctx(tmp_path, exploding, engine="cfr")
+    with pytest.raises(RuntimeError):
+        _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), _two_roots(tmp_path, class_file), tmp_path / "d", 100,
+                    java="java")
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+# --- the report path of a held file is the path of the written file (#174) ---
+
+
+@pytest.mark.parametrize("mirror", [False, True], ids=["merge", "mirror"])
+def test_report_paths_of_a_war_are_the_paths_of_the_written_files(make_jar, tmp_path: Path, mirror):
+    """Before, --merge wrote src/com/x/A.java, and the report gave WEB-INF/classes/com/x/A.java (#174)."""
+    war = make_jar("app.war", {f"WEB-INF/classes/com/x/{n}.class": b"x" for n in "ABCD"})
+    web = "WEB-INF/classes/com/x/"
+    runner = writing_runner({"vineflower": {
+        web + "A.java": "// FLAG", web + "B.java": "// NOTE", web + "C.java": "// ENV", web + "D.java": _VF_STUB,
+    }})
+    writer = MirrorWriter(tmp_path / "out") if mirror else MergeWriter(tmp_path / "out/src")
+    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker(), writer=writer)
+    report, _ = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    paths = [[e["path"] for e in entries] for entries in (report.flagged, report.noted, report.unchecked, report.stubs)]
+    prefix = "WEB-INF/classes/com/x/" if mirror else "com/x/"
+    assert paths == [[prefix + "A.java"], [prefix + "B.java"], [prefix + "C.java"], [prefix + "D.java"]]
+    base = tmp_path / ("out/app.war" if mirror else "out/src")
+    assert all((base / p).is_file() for entries in paths for p in entries)
+
+
+def test_report_paths_of_a_class_folder_with_merge_are_below_src(tmp_path: Path, class_file):
+    root = _tree(tmp_path / "in", {
+        "target/classes/com/x/A.class": class_file("com/x/A"), "target/classes/com/x/B.class": class_file("com/x/B"),
+    })
+    runner = writing_runner({"vineflower": {
+        "target/classes/com/x/A.java": "// FLAG", "target/classes/com/x/B.java": _VF_STUB + "// ENV\n",
+    }})
+    writer = MergeWriter(tmp_path / "out/src", roots={"_classes": ["target/classes/"]})
+    ctx = make_ctx(tmp_path, runner, fallback=False, checker=marker_checker(), writer=writer)
+    report, _ = process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert [f["path"] for f in report.flagged] == ["com/x/A.java"]
+    assert [f["path"] for f in report.unchecked] == ["com/x/B.java"]
+    assert [s["path"] for s in report.stubs] == ["com/x/B.java"]
+    assert sorted(p.relative_to(tmp_path / "out/src").as_posix() for p in (tmp_path / "out/src").rglob("*.java")) == [
+        "com/x/A.java", "com/x/B.java",
+    ]
+
+
+# --- an archive with a container root gives a temporary jar for each root (#173) ---
+
+
+def _zip(path: Path, entries: list[tuple[str, bytes]]) -> Path:
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # "Duplicate name"
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, data in entries:
+                zf.writestr(name, data)
+    return path
+
+
+def test_the_temp_jar_of_a_root_holds_its_classes_at_their_package_path(tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    jar = _zip(tmp_path / "boot.jar", [
+        ("org/boot/L.class", class_file("org/boot/L")),
+        ("BOOT-INF/classes/com/x/A.class", class_file("com/x/A")),
+        ("BOOT-INF/classes/com/x/A$1.class", class_file("com/x/A$1")),
+        ("BOOT-INF/classes/application.properties", b"x=1"),
+    ])
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    dest = tmp_path / "dest"
+    res = _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), jar, dest, 100, java="java")
+    assert [c["target"].name for c in runner.calls] == ["classes.jar", "classes.jar"]
+    assert [sorted(c["data"]) for c in runner.calls] == [["org/boot/L.class"], ["com/x/A$1.class", "com/x/A.class"]]
+    with zipfile.ZipFile(jar) as zf:
+        assert runner.calls[1]["data"]["com/x/A.class"] == zf.read("BOOT-INF/classes/com/x/A.class")
+    assert _sources(dest) == ["BOOT-INF/classes/com/x/A.java", "org/boot/L.java"] and res.java_files == 2
+    assert all(not c["target"].exists() for c in runner.calls)
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_the_temp_jar_takes_the_last_of_two_entries_with_one_name(tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    war = _zip(tmp_path / "app.war", [
+        ("WEB-INF/classes/com/x/A.class", class_file("com/x/A") + b"first"),
+        ("WEB-INF/classes/com/x/A.class", class_file("com/x/A") + b"last"),
+    ])
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="jd")
+    _run_engine(ctx, ENGINES["jd"], Path("/fake/jd.jar"), war, tmp_path / "dest", 100, java="java")
+    (call,) = runner.calls
+    assert call["data"] == {"com/x/A.class": class_file("com/x/A") + b"last"}
+
+
+def test_the_temp_jar_leaves_out_an_entry_that_leaves_its_root(tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    war = _zip(tmp_path / "app.war", [
+        ("WEB-INF/classes/com/x/A.class", class_file("com/x/A")),
+        ("WEB-INF/classes/../evil/E.class", class_file("evil/E")),
+        ("WEB-INF/classes//abs/F.class", class_file("abs/F")),
+        ("../up/U.class", class_file("up/U")),
+        ("org/x/R.class", class_file("org/x/R")),
+    ])
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="procyon")
+    _run_engine(ctx, ENGINES["procyon"], Path("/fake/procyon.jar"), war, tmp_path / "dest", 100, java="java")
+    assert [sorted(c["data"]) for c in runner.calls] == [["org/x/R.class"], ["com/x/A.class"]]
+
+
+def test_the_temp_jar_goes_when_the_engine_raises(tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    war = _zip(tmp_path / "app.war", [("WEB-INF/classes/com/x/A.class", class_file("com/x/A"))])
+    seen: list[Path] = []
+
+    def exploding(spec, jar_path, target, dest, timeout, **kw):
+        seen.append(Path(target))
+        raise RuntimeError("engine exploded")
+
+    ctx = make_ctx(tmp_path, exploding, engine="cfr")
+    with pytest.raises(RuntimeError):
+        _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "d", 100, java="java")
+    assert [p.name for p in seen] == ["classes.jar"] and not seen[0].exists()
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_the_temp_jar_leaves_out_an_entry_that_cannot_be_read(make_damaged_jar, tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    war = make_damaged_jar("app.war", {
+        "WEB-INF/classes/com/x/A.class": class_file("com/x/A"), "WEB-INF/classes/com/x/B.class": class_file("com/x/B"),
+    }, damaged=("WEB-INF/classes/com/x/B.class",))
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "dest", 100, java="java")
+    assert [sorted(c["data"]) for c in runner.calls] == [["com/x/A.class"]]

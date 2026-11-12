@@ -33,6 +33,8 @@ decaf app.war -o out --merge
 
 - Sources from all artifacts go into `out/src/`, arranged by package.
 - Container prefixes such as `WEB-INF/classes/` are removed.
+- A class folder above its package root loses that part too:
+  `target/classes/p/A.class` gives `out/src/p/A.java`.
 - Identical duplicate classes are deduplicated.
 - Conflicting duplicates use the first file in input path order. The report
   records each collision.

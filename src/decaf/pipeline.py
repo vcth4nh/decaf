@@ -194,28 +194,46 @@ class MergeWriter:
     regardless of the order in which worker threads deliver results. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
+    The root prefixes of a class folder (target/classes/) are cut before all else (#199).
     """
 
-    def __init__(self, src_root: Path, *, case_insensitive: bool = False) -> None:
+    def __init__(
+        self, src_root: Path, *, case_insensitive: bool = False, roots: dict[str, list[str]] | None = None
+    ) -> None:
         self.root = src_root
         self._lock = threading.Lock()
         self._case_insensitive = case_insensitive
         self._index: dict[str, tuple[tuple[str, bool], str, str]] = {}  # key -> (rank, sha256, rel)
+        # artifact rel -> the root prefixes of its class files, the longest first
+        self._roots = {rel: sorted(prefixes, key=len, reverse=True) for rel, prefixes in (roots or {}).items()}
+
+    def _cut(self, sort_key: str, raw: str) -> str:
+        for prefix in self._roots.get(sort_key, ()):
+            if raw.startswith(prefix):
+                return raw[len(prefix) :]
+        return raw
+
+    def _twin(self, sort_key: str, raw: str) -> bool:
+        return _strip_container(self._cut(sort_key, raw)).startswith("META-INF/versions/")
+
+    def out_path(self, sort_key: str, raw: str) -> str:
+        """The path below src/ of an engine file of the artifact sort_key, the report path too (#174)."""
+        return normalize_java_rel(self._cut(sort_key, raw))
 
     def add_tree(self, tree: Path, sort_key: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         java = 0
         collisions: list[dict] = []
         files = sorted(tree.rglob("*"))
         # A META-INF/versions twin has the path of its base class here: the base class wins (#107).
-        files.sort(key=lambda p: _strip_container(p.relative_to(tree).as_posix()).startswith("META-INF/versions/"))
+        files.sort(key=lambda p: self._twin(sort_key, p.relative_to(tree).as_posix()))
         for p in files:
             if not p.is_file() or p.suffix.lower() not in suffixes:
                 continue
             java += 1
             raw = p.relative_to(tree).as_posix()
             # A held or retried base class can come in a later tree than its twin: of one sort key, the base wins.
-            rank = (sort_key, _strip_container(raw).startswith("META-INF/versions/"))
-            rel = normalize_java_rel(raw)
+            rank = (sort_key, self._twin(sort_key, raw))
+            rel = self.out_path(sort_key, raw)
             key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
@@ -272,6 +290,10 @@ class MirrorWriter:
 
     def dest_for(self, rel: str) -> Path:
         return self.root / self._folders.get(rel, rel)
+
+    def out_path(self, rel: str, raw: str) -> str:
+        """The path below the artifact folder of an engine file: the engine path (#174)."""
+        return raw
 
     def add_tree(self, tree: Path, rel: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
         dest = self.dest_for(rel)
@@ -1321,6 +1343,7 @@ def _hold_output(
 
 def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> None:
     """End of the chain: write the held files (the first engine's file) and list them (#96, #99)."""
+    path = partial(ctx.writer.out_path, rel)  # a list gives the path of the written file (#174)
     for keys in held.nests.values():  # the spares: a chosen file nests their classes (#159)
         for k in keys:
             f = held.files.pop(k, None)
@@ -1332,7 +1355,7 @@ def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> Non
         report.collisions += collisions
         ordered = sorted(held.files.values(), key=lambda f: f.path)
         report.stubs = [
-            {"path": f.path, "engine": f.engine, "methods": f.stub.methods, "errors": list(f.stub.errors)}
+            {"path": path(f.path), "engine": f.engine, "methods": f.stub.methods, "errors": list(f.stub.errors)}
             for f in ordered if f.stub is not None
         ]
         for key, f in held.files.items():
@@ -1341,20 +1364,20 @@ def _finish_held(rel: str, ctx: Ctx, report: ArtifactReport, held: _Held) -> Non
     _drop(held.root)
     if ctx.checker is not None:
         done = sorted(held.checks.values(), key=lambda f: f.path)
-        report.flagged = [_check_entry(f) for f in done if f.result.status == "flagged"]
-        report.noted = [_check_entry(f) for f in done if f.result.status == "noted"]
+        report.flagged = [_check_entry(f, path(f.path)) for f in done if f.result.status == "flagged"]
+        report.noted = [_check_entry(f, path(f.path)) for f in done if f.result.status == "noted"]
         report.unchecked = [
-            {"path": f.path, "engine": f.engine, "reason": f.result.reason,
+            {"path": path(f.path), "engine": f.engine, "reason": f.result.reason,
              "needs_java": f.result.needs_java, "first": f.result.first}
             for f in done if f.result.status == "unchecked"
         ]
         report.check = check.summary([f.result for f in done])
 
 
-def _check_entry(f: _HeldFile) -> dict:
-    """A flagged or noted file in the report, with its errors in line order (#99)."""
+def _check_entry(f: _HeldFile, path: str) -> dict:
+    """A flagged or noted file in the report at its output path (#174), with its errors in line order (#99)."""
     r = f.result
-    return {"path": f.path, "engine": f.engine, "kinds": list(r.kinds), "errors": r.errors,
+    return {"path": path, "engine": f.engine, "kinds": list(r.kinds), "errors": r.errors,
             "first": r.first, "messages": list(r.messages)}
 
 
@@ -1436,6 +1459,149 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
     return out if count else None
 
 
+# CFR and Procyon write a class at the path of its name, and JD takes the path below its input as the name (#199,
+# #200, #170, #171, #173). Thus they get one package root at a time, and their files go back below its prefix.
+_ROOTED_ENGINES = ("cfr", "procyon", "jd")
+
+_VERSIONS_TAIL = re.compile(r"(?:^|(?<=/))META-INF/versions/[^/]+/$")
+
+
+def _container_prefix(rel: str) -> str:
+    """rel up to the end of its WEB-INF/classes/ or BOOT-INF/classes/ part (as _strip_container finds it), else ""."""
+    for marker in _CONTAINER_ROOTS:
+        idx = rel.find(marker)
+        if idx != -1:
+            return rel[: idx + len(marker)]
+    return ""
+
+
+def _root_prefix(tree: Path, rel: str) -> str:
+    """The part of a class file path above its package root: up to the end of WEB-INF/classes/ or BOOT-INF/classes/,
+    else the path before the class name of the file (as _tree_roots reads it), else "".
+
+    A META-INF/versions/N/ folder stays below the root (#202).
+    """
+    marked = _container_prefix(rel)
+    if marked:
+        return marked
+    try:
+        with open(tree / rel, "rb") as f:
+            data = _bounded(f)
+    except OSError:
+        return ""
+    name = check.class_name(data) if data is not None else None
+    stem = rel[: -len(".class")]
+    if not name or not (stem == name or stem.endswith("/" + name)):
+        return ""
+    prefix = stem[: len(stem) - len(name)]
+    tail = _VERSIONS_TAIL.search(prefix)
+    return prefix[: tail.start()] if tail else prefix
+
+
+def _container_classes(archive: Path) -> list[str] | None:
+    """The class entries of an archive when one of them is below WEB-INF/classes/ or BOOT-INF/classes/, else None."""
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            names = [n for n in zf.namelist() if n.endswith(".class")]
+    except ZIP_ERRORS:
+        return None
+    return names if any(m in n for n in names for m in _CONTAINER_ROOTS) else None
+
+
+def _root_jar(archive: Path, prefix: str, jar: Path) -> None:
+    """A jar of the class entries of the archive with this container prefix, at their path below it (#173).
+
+    An engine gets the same entries as from a plain jar, so it writes the same text. Of two entries with one name,
+    the last one goes in, and an entry that cannot be read stays out, as in safe_extract_zip. An entry whose path
+    below the prefix leaves the jar root stays out too. Each entry goes through a file, not through memory.
+    """
+    with zipfile.ZipFile(archive) as zf:
+        chosen: dict[str, zipfile.ZipInfo] = {}
+        for info in zf.infolist():
+            name = info.filename
+            if info.is_dir() or not name.endswith(".class") or _container_prefix(name) != prefix:
+                continue
+            below = name[len(prefix) :]
+            if not below.startswith("/") and ".." not in below.split("/"):
+                chosen[below] = info
+        part = jar.with_name("entry.part")
+        with zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) as out:
+            for below, info in chosen.items():
+                try:
+                    with zf.open(info) as src, open(part, "wb") as f:
+                        shutil.copyfileobj(src, f)
+                except ZIP_ERRORS as exc:
+                    if isinstance(exc, OSError) and exc.errno is not None:
+                        raise  # the disk, not the entry
+                    continue
+                out.write(part, below)
+
+
+def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, dest: Path, timeout: float,
+                **kw) -> engines.EngineResult:
+    """ctx.runner, but CFR, Procyon, and JD get one package root of the target at a time (#199).
+
+    The other engines, and a target whose classes are all at their package root, go to ctx.runner unchanged. The
+    target stays as it is. An archive with WEB-INF/classes/ or BOOT-INF/classes/ gives a temporary jar for each
+    root: from a folder, CFR writes other text than from a jar. In a folder, a root is its own folder when each
+    class file below it has its prefix, else a copy. The timeout is for the whole target, as in _run_per_class.
+    """
+    if spec.name not in _ROOTED_ENGINES:
+        return ctx.runner(spec, jar, target, dest, timeout, **kw)
+    temps: list[Path] = []
+    try:
+        if target.is_dir():
+            prefixes = {rel: _root_prefix(target, rel)
+                        for rel in (p.relative_to(target).as_posix() for p in target.rglob("*.class"))}
+        else:
+            names = _container_classes(target)
+            if names is None:
+                return ctx.runner(spec, jar, target, dest, timeout, **kw)
+            prefixes = {name: _container_prefix(name) for name in names}
+        if not any(prefixes.values()):
+            return ctx.runner(spec, jar, target, dest, timeout, **kw)
+        deadline = time.monotonic() + timeout
+        results: list[engines.EngineResult] = []
+        timed_out = False
+        for prefix in sorted(set(prefixes.values())):
+            if results and engines.PROCESSES.closed:
+                break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                timed_out = True
+                break
+            root = target / prefix
+            if not target.is_dir():
+                temps.append(_tmp_dir(ctx))
+                root = temps[-1] / "classes.jar"  # a .jar name: Procyon reads the suffix (build_command)
+                _root_jar(target, prefix, root)
+            elif any(p != prefix for rel, p in prefixes.items() if rel.startswith(prefix)):
+                root = _tmp_dir(ctx)
+                temps.append(root)
+                for rel, p in prefixes.items():
+                    if p == prefix:
+                        (root / rel[len(prefix) :]).parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(target / rel, root / rel[len(prefix) :])
+            out = _tmp_dir(ctx)
+            temps.append(out)
+            results.append(ctx.runner(spec, jar, root, out, left, **kw))
+            for f in [p for p in out.rglob("*") if p.is_file()]:
+                moved = dest / prefix / f.relative_to(out)
+                moved.parent.mkdir(parents=True, exist_ok=True)
+                f.replace(moved)
+    finally:
+        for folder in temps:
+            _drop(folder)
+    tails = [r.stderr_tail for r in results if r.stderr_tail]
+    peaks = [r.peak_rss_mb for r in results if r.peak_rss_mb is not None]
+    return engines.EngineResult(
+        spec.name, next((r.returncode for r in results if r.returncode), 0),
+        timed_out or any(r.timed_out for r in results),
+        sum(1 for p in dest.rglob("*") if p.is_file() and p.suffix in SOURCE_SUFFIXES),
+        "\n".join(tails)[-2000:], max(peaks, default=None), any(r.out_of_memory for r in results),
+    )
+
+
 def _stream_kw_for(ctx: Ctx, name: str, rel: str) -> dict:
     # Only pass the kwarg when streaming, so custom runners without it keep working.
     if ctx.on_stderr is None:
@@ -1471,8 +1637,8 @@ def _retry_missing_classes(
             try:
                 if ctx.on_event is not None:
                     ctx.on_event("decompile", artifact.rel, f"{name} · retry {len(retry):,} classes")
-                res = ctx.runner(
-                    ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
+                res = _run_engine(
+                    ctx, ctx.specs[name], ctx.engine_jars[name], retry_tree, dest,
                     ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
                     **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
                     # the primary engine runs here only for a Maven gap (#180)
@@ -1519,8 +1685,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         try:
             if ctx.on_event is not None:
                 ctx.on_event("decompile", artifact.rel, f"{name} · {len(expected):,} classes")
-            res = ctx.runner(
-                ctx.specs[name], ctx.engine_jars[name], target, dest,
+            res = _run_engine(
+                ctx, ctx.specs[name], ctx.engine_jars[name], target, dest,
                 ctx.settings.timeout, java=ctx.java, cpu_budget=ctx.cpu_budget,
                 **({"cds_dir": ctx.cds_dir} if ctx.cds_dir is not None else {}),
                 **({"engine_args": ctx.settings.engine_args} if ctx.settings.engine_args else {}),
@@ -2256,7 +2422,12 @@ def run(
             if settings.mirror:
                 writer = MirrorWriter(settings.output, resources=settings.resources)
             else:
-                writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None)
+                roots = {  # a class folder merges by package, not at target/classes/ (#199)
+                    a.rel: [r for r in {_root_prefix(a.path, p.relative_to(a.path).as_posix())
+                                        for p in a.path.rglob("*.class")} if r]
+                    for a in artifacts if a.kind is ArtifactKind.CLASS_TREE
+                }
+                writer = MergeWriter(settings.output / "src", case_insensitive=case_label is not None, roots=roots)
             ctx = Ctx(
                 settings=settings,
                 writer=writer,
@@ -2383,6 +2554,8 @@ def run(
                                         and a.classes < _SMALL_CLASSES
                                         and chain[0] in engines.BATCH_ENGINES
                                         and report.method != "maven"  # a Maven row with a gap: its class retries run alone (#180)
+                                        # CFR, Procyon, and JD get the classes of WEB-INF/classes/ apart (#170, #173)
+                                        and not (chain[0] in _ROOTED_ENGINES and _container_classes(target) is not None)
                                     ):
                                         ready_small.append(
                                             (a, target, report, *_stems_and_claims(target))
