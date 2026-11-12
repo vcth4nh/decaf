@@ -1558,6 +1558,62 @@ def test_maven_sources_that_lack_a_class_get_it_from_the_engines(make_jar, tmp_p
     assert "engine" in (tmp_path / "out/src/com/x/B.java").read_text()
 
 
+def _foo_gen_jar(make_jar, class_file) -> tuple[Path, Path]:
+    """p/Foo and p/Foo$$Gen, a class that is top-level for the JVM; the sources jar has p/Foo.java only."""
+    jar = make_jar("lib-1.2.jar", {
+        "p/Foo.class": class_file("p/Foo", "Foo.java"), "p/Foo$$Gen.class": class_file("p/Foo$$Gen", "Foo$$Gen.java"),
+    })
+    return jar, make_jar("lib-1.2-sources.jar", {"p/Foo.java": "// upstream\nclass Foo {}"})
+
+
+def every_class_runner(text: str = "// engine"):
+    """Fake engine: one file for each class file of a folder target, at the path of its class name."""
+    sent: list[list[str]] = []
+
+    def _run(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        names = sorted(check.class_name(p.read_bytes()) for p in Path(target).rglob("*.class"))
+        sent.append(names)
+        for name in names:
+            (Path(dest) / f"{name}.java").parent.mkdir(parents=True, exist_ok=True)
+            (Path(dest) / f"{name}.java").write_text(f"{text} {spec.name}\nclass X {{}}\n")
+        return EngineResult(spec.name, 0, False, len(names), "")
+
+    _run.sent = sent
+    return _run
+
+
+@pytest.mark.parametrize("mirror", [False, True], ids=["merge", "mirror"])
+def test_the_gap_run_keeps_the_published_file_of_the_outer_class(make_jar, class_file, tmp_path: Path, mirror):
+    """The gap class Foo$$Gen brings the family of Foo into its retry tree (#206), and the engine also writes Foo.
+    The sources jar wrote Foo, so the file of the engine goes, as a file of a class that an earlier output wrote
+    (#107). Before, it replaced the published file in the mirror layout, and with --merge the row had a collision."""
+    jar, sources = _foo_gen_jar(make_jar, class_file)
+    runner = every_class_runner()
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True,
+                   writer=MirrorWriter(tmp_path / "out") if mirror else None)
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert runner.sent == [["p/Foo", "p/Foo$$Gen"]]
+    out = tmp_path / ("out/lib-1.2.jar" if mirror else "out/src")
+    assert (out / "p/Foo.java").read_text() == "// upstream\nclass Foo {}"
+    assert (out / "p/Foo$$Gen.java").read_text().startswith("// engine vineflower")
+    assert (report.method, report.classes, report.sources_gap, report.missing_classes) == ("maven", 2, 1, 0)
+    assert (report.java_files, report.collisions) == (2, [])
+
+
+def test_a_flagged_gap_file_is_held_and_retried(make_jar, class_file, tmp_path: Path):
+    jar, sources = _foo_gen_jar(make_jar, class_file)
+    runner = writing_runner({
+        "vineflower": {"p/Foo.java": "class Foo {} // vf", "p/Foo$$Gen.java": "// FLAG vf"},
+        "cfr": {"p/Foo.java": "class Foo {} // cfr", "p/Foo$$Gen.java": "class Foo$$Gen {} // cfr"},
+    })
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True, checker=marker_checker())
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [(a.engine, a.level) for a in report.attempts] == [("vineflower", "class"), ("cfr", "class")]
+    assert (tmp_path / "out/src/p/Foo$$Gen.java").read_text() == "class Foo$$Gen {} // cfr"
+    assert (tmp_path / "out/src/p/Foo.java").read_text() == "// upstream\nclass Foo {}"
+    assert (report.flagged, report.missing_classes, report.java_files, report.collisions) == ([], 0, 2, [])
+
+
 def test_maven_sources_in_a_source_set_folder_are_no_gap(make_jar, class_file, tmp_path: Path):
     """#180: the row is complete, no engine runs, and the .kt file keeps its path."""
     jar = make_jar("okio-3.4.jar", {"okio/Buffer.class": b"x", "okio/BufferKt.class": class_file("okio/BufferKt", "Buffer.kt")})

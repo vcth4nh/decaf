@@ -1714,7 +1714,13 @@ def _retry_missing_classes(
 def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactReport) -> None:
     gap = ctx.maven_gaps.pop(artifact.rel, None)
     if gap is not None:  # a Maven hit whose sources lack classes: the engines write them (#180)
-        _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held())
+        # The retry tree of a gap class has the family of its outer class by name (#206), so an engine can also
+        # write a class that the sources jar wrote. Such a file goes, as a file of a class that an earlier output
+        # wrote (#107): only the gap classes and the classes below them by name get engine files.
+        stems, claims = _stems_and_claims(artifact.path)
+        published = {s for s in stems | claims
+                     if s not in gap and not any(s[:i] in gap for i in range(len(s)) if s[i] == "$")}
+        _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held(written=published))
         return
     source = target if target.is_dir() else artifact.path
     expected = expected_class_stems(source)
