@@ -40,6 +40,7 @@ from .scanner import (
     outer_stem,
     safe_extract_zip,
     scan_counted,
+    stays_inside,
 )
 from .verdicts import VerdictCache
 
@@ -683,6 +684,47 @@ def _bounded(f) -> bytes | None:
     """The content of an open class file, or None when it is larger than _CLASS_FILE_MAX."""
     data = f.read(_CLASS_FILE_MAX + 1)
     return data if len(data) <= _CLASS_FILE_MAX else None
+
+
+def _safe_class(data: bytes | None) -> bool:
+    """Can decaf prove that the class name of a class file stays inside the output folder?"""
+    name = check.safe_class_name(data) if data is not None else None
+    return name is not None and stays_inside(name)
+
+
+def _refused_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:
+    """Does no engine get this entry? Its name does not stay inside, or it is a class entry that decaf cannot read
+    or whose class name decaf cannot prove to stay inside. A disk error raises."""
+    if not stays_inside(info.filename):
+        return True
+    if info.is_dir() or not info.filename.endswith(".class"):
+        return False
+    try:
+        with zf.open(info) as f:  # by its ZipInfo: an engine can read each entry of a name
+            data = _bounded(f)
+    except ZIP_ERRORS as exc:
+        if isinstance(exc, OSError) and exc.errno is not None:
+            raise  # the disk, not the entry
+        return True
+    return not _safe_class(data)
+
+
+def _refused(source: Path) -> list[zipfile.ZipInfo] | list[str]:
+    """The items of a source that no engine gets: the refused entries of an archive (_refused_entry), each entry
+    of a name apart, or the class files of a folder (paths below it) whose class name fails _safe_class."""
+    if not source.is_dir():
+        with zipfile.ZipFile(source) as zf:
+            return [info for info in zf.infolist() if _refused_entry(zf, info)]
+    out: list[str] = []
+    for p in sorted(source.rglob("*.class")):
+        try:
+            with open(p, "rb") as f:
+                data = _bounded(f)
+        except OSError:
+            data = None
+        if not _safe_class(data):
+            out.append(p.relative_to(source).as_posix())
+    return out
 
 
 def _class_versions(source: Path) -> tuple[dict[str, int], dict[str, str]]:

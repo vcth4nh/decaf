@@ -4770,3 +4770,83 @@ def test_the_temp_jar_leaves_out_an_entry_that_cannot_be_read(make_damaged_jar, 
     ctx = make_ctx(tmp_path, runner, engine="cfr")
     _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "dest", 100, java="java")
     assert [sorted(c["data"]) for c in runner.calls] == [["com/x/A.class"]]
+
+
+# --- no engine gets an entry name or a class name that leaves its folder ---
+
+
+def test_refused_lists_the_entries_whose_name_leaves_the_archive(tmp_path: Path, class_file):
+    from decaf.pipeline import _refused
+
+    jar = _zip(tmp_path / "a.jar", [
+        ("p/A.class", class_file("p/A")),
+        ("../up.txt", b"x"),
+        ("C:/dir/", b""),
+        ("p\\..\\..\\B.class", class_file("B")),
+    ])
+    assert [i.filename for i in _refused(jar)] == ["../up.txt", "C:/dir/", "p\\..\\..\\B.class"]
+
+
+@pytest.mark.parametrize("name", [b"../p/A", b"p/\xc0\xae\xc0\xae/A", b"/p/A"])
+def test_refused_lists_a_class_entry_whose_class_name_leaves_the_folder(tmp_path: Path, class_file, name):
+    from decaf.pipeline import _refused
+
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file(name)), ("p/B.class", class_file("p/B"))])
+    assert [i.filename for i in _refused(jar)] == ["p/A.class"]
+
+
+def test_refused_lists_a_class_entry_that_does_not_parse_or_cannot_be_read(make_damaged_jar, tmp_path: Path, class_file):
+    from decaf.pipeline import _refused
+
+    jar = make_damaged_jar("a.jar", {
+        "p/A.class": b"no class", "p/B.class": class_file("p/B"), "p/C.class": class_file("p/C"), "p/r.txt": b"no class",
+    }, damaged=("p/C.class",))
+    assert [i.filename for i in _refused(jar)] == ["p/A.class", "p/C.class"]
+
+
+def test_refused_lists_a_class_entry_above_the_size_limit(tmp_path: Path, class_file, monkeypatch):
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 64)
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file("p/A") + bytes(64)), ("p/B.class", class_file("p/B"))])
+    assert [i.filename for i in pipeline._refused(jar)] == ["p/A.class"]
+
+
+def test_refused_judges_each_entry_of_a_name(tmp_path: Path, class_file):
+    """An engine can read each copy of a name: the first copy is refused, the last one is not."""
+    from decaf.pipeline import _refused
+
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file("../A")), ("p/A.class", class_file("p/A"))])
+    with zipfile.ZipFile(jar) as zf:
+        first = zf.infolist()[0].header_offset
+    assert [(i.filename, i.header_offset) for i in _refused(jar)] == [("p/A.class", first)]
+
+
+def test_refused_lists_nothing_for_a_normal_archive(tmp_path: Path, class_file):
+    from decaf.pipeline import _refused
+
+    jar = _zip(tmp_path / "a.jar", [
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"), ("p/", b""), ("p/A.class", class_file("p/A")),
+        ("p/A$1.class", class_file("p/A$1")), ("WEB-INF/classes/q/B.class", class_file("q/B")),
+        ("META-INF/versions/9/p/A.class", class_file("p/A")), ("p/r.txt", b"x"),
+    ])
+    assert _refused(jar) == []
+
+
+def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, class_file, monkeypatch):
+    import decaf.pipeline as pipeline
+
+    folder = tmp_path / "classes"
+    for rel, data in {"p/A.class": class_file("p/A"), "p/B.class": class_file("../B"), "p/C.class": b"no class",
+                      "p/D.class": class_file("p/D"), "p/r.txt": b"x"}.items():
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_bytes(data)
+    real_open = open
+
+    def failing_open(path, *a, **k):
+        if str(path).endswith("D.class"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    assert pipeline._refused(folder) == ["p/B.class", "p/C.class", "p/D.class"]
