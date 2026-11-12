@@ -175,10 +175,11 @@
   lost without a sign, for example JD on the Kotlin `X$$Lambda$N` classes,
   and the next engine of the chain gets a retry of them. In a row with Maven
   sources, such a class counts as covered by the sources when its class file
-  names no source file and the sources hold the file of its outer class. The
-  default chain on a Scala or Kotlin jar takes about 6% to 11% more time
-  (scala-xml 34.6 s → 36.8 s, kotlin-reflect 83 s → 90 s), because CFR and
-  Procyon now also decompile these classes in their class retries.
+  names no source file, the sources hold the file of its outer class, and a
+  class of its family names it. The default chain on a Scala or Kotlin jar
+  takes about 6% to 11% more time (scala-xml 34.6 s → 36.8 s, kotlin-reflect
+  83 s → 90 s), because CFR and Procyon now also decompile these classes in
+  their class retries.
 - An inner class could count as top-level for the JVM, and its code could go
   out two times (#209). This happened when its class file names itself in a
   second constant-pool entry, which a class writer other than javac can do.

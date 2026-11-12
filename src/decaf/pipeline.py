@@ -1039,8 +1039,8 @@ def _between(key: str, family: str) -> list[str]:
 def _read_unnested(source: Path, keys: set[str], held: _Held) -> None:
     """Note for each key whether its class file lists itself in its InnerClasses attribute. A class that does not
     is a top-level class for the JVM, for example the module class Foo$ of a Scala object, so decaf takes no file
-    of another class to hold it. CFR and Procyon get only the outer classes in a class retry (#106), so they write
-    no file of it (#159)."""
+    of another class to hold it (#159). CFR and Procyon get its class file as an argument of its own, so they write
+    a file of it (#206)."""
     if held.names is None:
         held.names = {}
         for names in _family_entries(source).values():
