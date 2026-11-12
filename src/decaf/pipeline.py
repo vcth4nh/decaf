@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import os
@@ -536,7 +537,8 @@ def _stems_and_claims(source: Path, read: bool = True) -> tuple[set[str], set[st
         else:
             stems.add(_class_stem(e))
     inner = {s for s in stems if outer_stem(s, stems) is not None}
-    tops = {s for s, parent in _class_parents(source).items() if parent is None} & inner if read and inner else set()
+    parents = _class_parents(source, names=entries) if read and inner else {}  # the name list of this pass
+    tops = {s for s, parent in parents.items() if parent is None} & inner
     return (stems - inner) | tops, claims | (inner - tops)
 
 
@@ -742,7 +744,9 @@ def _family_entries(source: Path) -> dict[str, list[str]]:
     return out
 
 
-def _class_parents(source: Path, families: Collection[str] | None = None) -> dict[str, str | None]:
+def _class_parents(
+    source: Path, families: Collection[str] | None = None, names: Iterable[str] | None = None,
+) -> dict[str, str | None]:
     """The parent of each class with an outer class by name, from the class files of its family: the stem of the
     class whose file holds it, or None for a class that is top-level for the JVM (#206, #207, #208).
 
@@ -750,9 +754,11 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
     that is not the class and is not below it by name. Q knows X when the InnerClasses attribute of Q lists X, or
     when the simple name of X is in the package_refs of Q. decaf tests the lists first, and reads package_refs only
     when no class lists X, so for most jars it reads none.
-    1. The class file cannot be read or does not parse: the longest $-prefix that is a class, as before.
-    2. It does not list itself: top-level (#206). Also when a class of the family lists it: Vineflower, Fernflower,
-       and JD then nest it, but CFR and Procyon write it only from its own class file, so it must be expected.
+    1. The class file cannot be read or does not parse: the longest $-prefix that is a class, as before. The same
+       when the path of the class file does not end with its class name, and the class file lists itself.
+    2. It does not list itself: top-level (#206), also when a class of the family lists it, and also when its path
+       does not end with its class name. Fernflower and JD nest such a class in the class that lists it, and
+       Vineflower nests a member class of this kind, but CFR and Procyon write it only from its own class file.
     3. It lists itself with an outer class P, a member class: P when P is a candidate and knows it.
     4. It lists itself with no outer class, an anonymous or local class: of the candidates that know it, the class
        of its EnclosingMethod attribute, else the longest $-prefix, else the first.
@@ -760,38 +766,77 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
     package names it, for example a Kotlin class of another family that creates it. A class file that a test needs
     and that decaf cannot read or parse gives no proof: then the class keeps the longest $-prefix that is a class.
     A stem with several entries (a multi-release class, a copy below a container root): one entry is enough for a
-    fact. families: the top-level classes by name to read; None reads each family with such a class.
+    fact. families: the top-level classes by name to read; None reads each family with such a class. names: the
+    class entries of the source, when the caller has them. No step makes a list for each class, so the work stays
+    about linear in the size of the class files, also for a crafted family.
     """
-    if source.is_dir():
-        names = sorted(p.relative_to(source).as_posix() for p in source.rglob("*.class"))
-    else:
-        try:
-            with zipfile.ZipFile(source) as zf:
-                names = sorted(n for n in zf.namelist() if n.endswith(".class"))
-        except ZIP_ERRORS:
-            return {}
+    if names is None:
+        if source.is_dir():
+            names = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
+        else:
+            try:
+                with zipfile.ZipFile(source) as zf:
+                    names = [n for n in zf.namelist() if n.endswith(".class")]
+            except ZIP_ERRORS:
+                return {}
     entries: dict[str, list[str]] = {}
-    for name in names:
+    for name in sorted(names):
         entries.setdefault(_class_stem(name), []).append(name)
+    canon = {s: s for s in entries}  # one string for each stem: the facts keep no new string for each entry
     tops = {s: outer_stem(s, entries) for s in entries}
     wanted = {o for o in tops.values() if o is not None and (families is None or o in families)}
-    members: dict[str, list[str]] = {}
-    for s in sorted(entries):
-        if (tops[s] or s) in wanted:
-            members.setdefault(tops[s] or s, []).append(s)
-    links: dict[str, list[tuple[str, tuple[tuple[str, str | None], ...], str | None]]] = {}
-    for name, data in _read_classes(source, [n for ms in members.values() for s in ms for n in entries[s]]):
-        stem = _class_stem(name)
+    member = {s: tops[s] or s for s in entries if (tops[s] or s) in wanted}  # stem -> its family
+    selves: dict[str, tuple[str | None, str | None]] = {}  # stem -> (its outer class, its EnclosingMethod class)
+    alone: set[str] = set()  # the stems with an entry that does not list itself
+    listers: dict[str, set[str]] = {}  # stem -> the classes of its family that list it
+    for name, data in _read_classes(source, [n for s in member for n in entries[s]]):
         found = check.class_links(data)
-        if found is not None and stem.endswith(found[0]) and stem[: len(stem) - len(found[0])][-1:] in ("", "/"):
-            links.setdefault(stem, []).append(found)  # the class name is the end of the path, as for a package root
-    refs: dict[str, frozenset[str]] = {}  # stem -> package_refs; empty: no entry parses (a class names itself)
+        if found is None:
+            continue
+        stem, (own, links, enclosing) = canon[_class_stem(name)], found
+        # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
+        outer = next((o for i, o in links if i == own), False)
+        if outer is False:
+            alone.add(stem)
+        prefix = stem[: len(stem) - len(own)]  # the folder above the package root
+        if not stem.endswith(own) or prefix[-1:] not in ("", "/"):  # the path does not end with the class name
+            continue
+        if outer is not False:  # outer: None for no outer class, "" for an outer class that the source lacks
+            enclosed = canon.get(prefix + enclosing) if enclosing else None
+            selves.setdefault(stem, (outer and canon.get(prefix + outer, ""), enclosed))
+        for inner, _ in links:
+            q = canon.get(prefix + inner)
+            if q is not None and q != stem and member.get(q) == member[stem]:
+                listers.setdefault(q, set()).add(stem)
 
-    def read_refs(stems: Iterable[str]) -> None:
-        todo = sorted(set(stems) - refs.keys())
-        refs.update(dict.fromkeys(todo, frozenset()))
-        for name, data in _read_classes(source, [n for s in todo for n in entries[s]]):
-            refs[_class_stem(name)] |= check.package_refs(data)
+    named_by: dict[tuple[str, str], set[str]] = {}  # (package, simple name) -> the classes that name it
+    read: set[str] = set()
+    broken: set[str] = set()  # a class file that names nothing does not parse: a class file names itself
+
+    def read_refs(stems: set[str]) -> None:
+        stems -= read
+        read.update(stems)
+        broken.update(stems)
+        for name, data in _read_classes(source, [n for s in sorted(stems) for n in entries[s]]):
+            stem = canon[_class_stem(name)]
+            for simple in check.package_refs(data):
+                broken.discard(stem)
+                named_by.setdefault((stem.rpartition("/")[0], simple), set()).add(stem)
+
+    def below(x: str, q: str) -> bool:
+        return q == x or q.startswith(x + "$")
+
+    def candidate(x: str, q: str) -> bool:
+        return member.get(q) == member[x] and not below(x, q)
+
+    def namers(x: str) -> set[str]:
+        return named_by.get(x.rpartition("/")[::2], set())
+
+    def other_broken(x: str, group: list[str]) -> bool:
+        """Has the sorted group of broken stems (of the family or of the package of x) one that is not x and not
+        below x?"""
+        lo, hi = bisect.bisect_left(group, x + "$"), bisect.bisect_left(group, x + "%")  # "%" follows "$"
+        return len(group) - (hi - lo) - (x in broken) > 0
 
     def by_name(x: str) -> str:
         cut = x.rfind("$")
@@ -799,64 +844,60 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
             cut = x.rfind("$", 0, cut)
         return x[:cut]
 
-    def choose(x: str, known: list[str], enclosing: str | None) -> str:
-        prefixes = [q for q in known if x.startswith(q + "$")]
-        return enclosing if enclosing in known else max(prefixes, key=len) if prefixes else known[0]
+    def choose(x: str, known: set[str], enclosing: str | None) -> str:
+        if enclosing in known:
+            return enclosing
+        cut = next((i for i in range(len(x) - 1, 0, -1) if x[i] == "$" and x[:i] in known), None)
+        return x[:cut] if cut is not None else min(known)
 
     out: dict[str, str | None] = {}
-    tests: dict[str, tuple[list[str], str | None]] = {}  # class -> (the classes to test with package_refs, enclosing)
-    for family, ms in members.items():
-        prefix = {s: s[: len(s) - len(links[s][0][0])] for s in ms if s in links}  # the folder above the package root
-        listers: dict[str, set[str]] = {}  # class -> the classes whose InnerClasses attribute lists it
-        for q in prefix:
-            for _, found, _ in links[q]:
-                for inner, _ in found:
-                    listers.setdefault(prefix[q] + inner, set()).add(q)
-        for x in ms:
-            if tops[x] is None:
-                continue
-            if x not in links:  # rule 1
-                out[x] = by_name(x)
-                continue
-            cands = [q for q in ms if q != x and not q.startswith(x + "$")]
-            # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
-            own = [next(((o, e) for i, o in found if i == name), None) for name, found, e in links[x]]
-            if None in own:  # rule 2: one entry that does not list itself is enough (#206)
-                out[x] = None
-                continue
-            outer, enclosing = own[0]
-            if outer is not None:  # rule 3
-                p = prefix[x] + outer
-                if p in listers.get(x, ()) and p in cands:
-                    out[x] = p
-                else:
-                    tests[x] = ([p] if p in cands else [], p)
-                continue
-            known = [q for q in cands if q in listers.get(x, ())]  # rule 4
-            e = prefix[x] + enclosing if enclosing else None
-            if known:
-                out[x] = choose(x, known, e)
-            else:
-                tests[x] = (cands, e)
-    read_refs(q for qs, _ in tests.values() for q in qs)
-    stale: list[str] = []
-    for x, (qs, e) in tests.items():
-        known = [q for q in qs if x.rpartition("/")[2] in refs[q]]
-        if known:
-            out[x] = choose(x, known, e)
-        elif any(not refs[q] for q in qs):  # no proof that it is stale
+    tests: list[str] = []
+    for x in member:
+        if tops[x] is None:
+            continue
+        if x in alone:  # rule 2: one entry that does not list itself is enough (#206)
+            out[x] = None
+        elif x not in selves:  # rule 1
             out[x] = by_name(x)
         else:
+            outer, enclosing = selves[x]
+            known = {q for q in listers.get(x, ()) if not below(x, q) and outer in (None, q)}
+            if known:  # rule 3: the outer class lists it; rule 4: classes of the family list it
+                out[x] = outer or choose(x, known, enclosing)
+            else:
+                tests.append(x)
+    rule4 = {member[x] for x in tests if selves[x][0] is None}  # these families: each class, for its package_refs
+    read_refs({selves[x][0] for x in tests if selves[x][0] and candidate(x, selves[x][0])}
+              | {s for s in member if member[s] in rule4})
+    fails: dict[str, list[str]] = {}  # family -> its broken stems, sorted
+    for s in sorted(broken):
+        fails.setdefault(member.get(s, ""), []).append(s)
+    stale: list[str] = []
+    for x in tests:
+        outer, enclosing = selves[x]
+        if outer is None:  # rule 4: the classes of the family that name it
+            known = {q for q in namers(x) if candidate(x, q)}
+            if known:
+                out[x] = choose(x, known, enclosing)
+            elif other_broken(x, fails.get(member[x], [])):  # no proof that it is stale
+                out[x] = by_name(x)
+            else:
+                stale.append(x)
+        elif outer and candidate(x, outer):  # rule 3: the outer class names it
+            out[x] = outer if outer in namers(x) else by_name(x) if outer in broken else None
+            if out[x] is None:
+                stale.append(x)
+        else:  # its outer class is no candidate
             stale.append(x)
     if stale:  # a class of the package, also of another family, can name it (#207)
-        package: dict[str, list[str]] = {}
-        for s in entries:
-            package.setdefault(s.rpartition("/")[0], []).append(s)
-        others = {x: [q for q in package[x.rpartition("/")[0]] if q != x and not q.startswith(x + "$")] for x in stale}
-        read_refs(q for qs in others.values() for q in qs)
+        packages = {x.rpartition("/")[0] for x in stale}
+        read_refs({s for s in entries if s.rpartition("/")[0] in packages})
+        cut: dict[str, list[str]] = {}  # package -> its broken stems, sorted
+        for s in sorted(broken):
+            cut.setdefault(s.rpartition("/")[0], []).append(s)
         for x in stale:
-            proof = all(refs[q] and x.rpartition("/")[2] not in refs[q] for q in others[x])
-            out[x] = None if proof else by_name(x)
+            named = any(not below(x, q) for q in namers(x))
+            out[x] = by_name(x) if named or other_broken(x, cut.get(x.rpartition("/")[0], [])) else None
     return out  # crafted class files can give a cycle of parents: _keys_above ends it
 
 

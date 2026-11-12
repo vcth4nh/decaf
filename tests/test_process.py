@@ -1001,6 +1001,17 @@ def test_class_parents_read_no_package_refs_when_each_outer_class_lists_its_inne
     assert _parents(make_jar, classes) == {"p/A$B": "p/A", "p/A$1": "p/A"}
 
 
+def test_class_parents_of_a_family_where_each_class_lists_each_class(make_jar, monkeypatch):
+    """A crafted family of 300 classes: each class lists itself and each other class. The parents are right, and the
+    rule reads no package_refs: the lists give the proof (#207)."""
+    monkeypatch.setattr(check, "package_refs", lambda data: pytest.fail("package_refs ran"))
+    names = [f"p/A$C{i}" for i in range(300)]
+    everyone = tuple((n, None) for n in names)
+    classes = {"p/A": _lister("p/A", lists=everyone)}
+    classes |= {n: _inner(n, None, lists=tuple(e for e in everyone if e[0] != n)) for n in names}
+    assert _parents(make_jar, classes) == dict.fromkeys(names, "p/A")
+
+
 def test_class_parents_of_a_class_whose_one_entry_lists_itself_two_times(make_jar):
     """One entry of Foo$ lists itself two times, and the other entry does not list itself: Foo$ is top-level (#206)."""
     twice = {"p/Foo": _lister("p/Foo", refs=("p/Foo$",)),
@@ -1088,6 +1099,41 @@ def test_class_parents_read_only_the_families_asked_for(make_jar, tmp_path):
     classes["p/A"] = _lister("p/A", lists=(("p/A$B", "p/A"),))
     (root / "target/classes/p/A.class").write_bytes(classes["p/A"])
     assert _class_parents(root)["target/classes/p/A$B"] == "target/classes/p/A"
+
+
+def _without_the_utf8_flag(jar: Path) -> Path:
+    """Clear bit 11 of the flags in each local and central header, as old jar tools write UTF-8 entry names."""
+    import struct
+
+    data = bytearray(jar.read_bytes())
+    for magic, off in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        at = data.find(magic)
+        while at != -1:
+            struct.pack_into("<H", data, at + off, struct.unpack_from("<H", data, at + off)[0] & ~0x800)
+            at = data.find(magic, at + 4)
+    jar.write_bytes(data)
+    return jar
+
+
+def test_stems_and_claims_of_class_files_whose_paths_do_not_end_with_their_names(make_jar, tmp_path: Path):
+    """A class folder below its package root, and a jar with UTF-8 entry names without the UTF-8 flag: the path of a
+    class file does not end with its class name. Foo$ does not list itself, so it is top-level, as on main (#206).
+    Before, such a class took the name rule, so CFR lost it. A class that lists itself keeps the name rule."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    from decaf.pipeline import _stems_and_claims
+
+    folder = tmp_path / "classes/p"
+    folder.mkdir(parents=True)
+    for name in ("Foo", "Foo$", "Bar"):
+        (folder / f"{name}.class").write_bytes(_class_with(f"p/{name}"))
+    (folder / "Bar$1.class").write_bytes(_class_with_inner_classes("p/Bar$1", (("p/Bar$1", None),)))
+    assert _stems_and_claims(folder) == ({"Foo", "Foo$", "Bar"}, {"Bar$1"})
+    jar = _without_the_utf8_flag(make_jar("noflag.jar", {
+        f"{n}.class": _class_with(n) for n in ("p/Größe", "p/Größe$", "p/Bar")
+    } | {"p/Größe$1.class": _class_with_inner_classes("p/Größe$1", (("p/Größe$1", None),))}))
+    g = "p/Größe".encode().decode("cp437")  # zipfile reads a name without the flag as cp437
+    assert _stems_and_claims(jar) == ({g, g + "$", "p/Bar"}, {g + "$1"})
 
 
 def test_stems_and_claims_by_name_only_read_no_class_file(make_jar, monkeypatch):

@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import zipfile
@@ -589,9 +590,10 @@ def class_links(data: bytes) -> tuple[str, tuple[tuple[str, str | None], ...], s
         n = int.from_bytes(data[at:at + 2], "big")
         if 2 + 8 * n > length:
             return None
-        for k in range(n):
-            inner = _class_at(pool, data, at + 2 + 8 * k)
-            outer = _class_at(pool, data, at + 4 + 8 * k)
+        utf8, classes, _ = pool
+        # each (inner class, outer class) pair one time, in the order of the file: a crafted file can repeat an entry
+        for i, o in dict.fromkeys(struct.iter_unpack(">HH4x", data[at + 2:at + 2 + 8 * n])):
+            inner, outer = utf8.get(classes.get(i, -1)), utf8.get(classes.get(o, -1))
             if inner is not None:
                 entries.append((inner.decode("utf-8", "replace"), outer.decode("utf-8", "replace") if outer else None))
     enclosing = None

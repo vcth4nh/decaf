@@ -811,6 +811,8 @@ def test_class_links_reads_the_inner_classes_entries_and_the_enclosing_class():
     assert check.class_links(anonymous) == ("X$$anon$1", (("X$$anon$1", None),), "X")
     outer = _class_with_inner_classes("X", (("X$$anon$1", None), ("X$B", "X")))
     assert check.class_links(outer) == ("X", (("X$$anon$1", None), ("X$B", "X")), None)
+    again = _class_with_inner_classes("X", (("X$B", "X"), ("X$$anon$1", None)) + (("X$B", "X"),) * 1000)
+    assert check.class_links(again) == ("X", (("X$B", "X"), ("X$$anon$1", None)), None)  # each pair one time
     assert check.class_links(_class_with("p/Foo$")) == ("p/Foo$", (), None)  # no attribute
     assert check.class_links(_class_with("p/A$1", utf8=("InnerClasses",))) == ("p/A$1", (), None)  # only the name
 
