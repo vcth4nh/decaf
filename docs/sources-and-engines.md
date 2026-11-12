@@ -19,9 +19,22 @@ to Maven coordinates: group, artifact, and version.
   of the artifact matches your binary. It reads that file before each
   download, also for coordinates from the Central lookup or from an earlier
   run.
-- This check proves the binary of a repository, not its sources jar. One
-  URL that joins several repositories (a group or a virtual repository) can
-  answer the checksum of one member and the sources jar of another member.
+- One URL that joins several repositories (a group or a virtual
+  repository) can answer the checksum of one member and the sources jar of
+  another member. So after each download from a repository that is not
+  Maven Central, decaf asks Maven Central for the `.sha1` file of the
+  artifact. When Maven Central holds another build of the same coordinates
+  and the downloaded jar is its sources jar, decaf drops the jar and
+  decompiles the artifact.
+- This check finds only the sources of Maven Central. A group of two private
+  repositories, or a proxy of another public repository, can still give the
+  sources of another build.
+- A team that builds the unchanged upstream sources again and deploys that
+  binary with the upstream sources jar gets a decompile, not the sources.
+- When Maven Central gives no answer, decaf decompiles the artifact, and the
+  row is a network fallback.
+- For each sources jar from another repository, decaf sends the coordinates
+  of the artifact to Maven Central.
 - A published sources jar can lack classes: generated, shaded, or bundled
   ones. decaf compares the sources with the binary, decompiles the classes
   without a source, and counts them in `sources_gap`. A file in a source-set

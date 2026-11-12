@@ -213,6 +213,19 @@
   unchecked file of CFR replaced a flagged file, and the report listed no
   flagged file. Or a clean file of Fernflower did not replace a flagged
   file. Now decaf reads the parents of all classes of the family.
+- A repository URL that joins several repositories could give the sources
+  of another build under `✓` (#189). Such a URL (a Nexus group, an
+  Artifactory virtual repository) can answer the `.jar.sha1` file of a
+  patched build from one member and the upstream `-sources.jar` from a proxy
+  of Maven Central. Now, after each download from a repository that is not
+  Maven Central, decaf asks Maven Central for the `.jar.sha1` file of the
+  coordinates. When Maven Central holds another build and the downloaded jar
+  is its sources jar, decaf drops the jar and decompiles the artifact. The
+  miss then says `is the sources jar of another build on Maven Central`.
+  When Maven Central gives no answer, the row is a network fallback. A sources
+  jar that an earlier version cached from such a repository is downloaded
+  and checked one time. The check costs one request for each sources jar
+  from another repository, and two when Maven Central holds another build.
 
 ## [1.12.0] - 2026-10-31
 
