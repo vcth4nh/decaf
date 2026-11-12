@@ -4034,10 +4034,10 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
 
 
 def test_run_warns_for_a_batch_eligible_jar_too(fake_env, tmp_path, monkeypatch):
+    """#114: a jar under 3000 classes got no estimate, but a batch JVM has one share too."""
     from decaf import pipeline
 
     monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 32 << 20)  # an engine gets the 25 MB class file
-    """#114: a jar under 3000 classes got no estimate, but a batch JVM has one share too."""
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
 
