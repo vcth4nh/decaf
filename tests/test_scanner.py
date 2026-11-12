@@ -115,6 +115,7 @@ def test_safe_extract_skips_traversal(make_jar, tmp_path: Path):
 @pytest.mark.parametrize("name", [
     "A.class", "p/A.class", "p/q/", "a//b", ".", "./A.class", "p/.x", "p/..x", "p/x..", "p/a b", "p\\A.class",
     "p/C:/A.class", "p/ .x",
+    "ab:c", "a.b:c.xml", "p/C:x", "abc:/x",  # a colon that is not a drive: a file name character
 ])
 def test_stays_inside_keeps_a_name_below_its_folder(name):
     assert scanner.stays_inside(name)
@@ -124,6 +125,7 @@ def test_stays_inside_keeps_a_name_below_its_folder(name):
     "",  # an empty name
     "/A.class", "\\A.class", "//host/A.class", "\\\\host\\A.class",  # absolute
     "C:A.class", "C:/A.class", "c:\\A.class", "p:/A.class",  # a drive
+    "C:x", "C:", "1:x", "C:\\x", "c:/x",  # the drive form: one character, then a colon, at the start (ntpath)
     "..", "../A.class", "p/../../A.class", "p\\..\\..\\A.class", "p/..",  # a .. part, also with a backslash
     "p/.../A.class", "p/.. /A.class", "p/. ./A.class", "p/ ../A.class",  # Windows drops the dots and spaces at the end
     "p/A\0.class", "\0",  # a NUL character

@@ -147,14 +147,15 @@ def scan_input(root: Path) -> list[Artifact]:
 def stays_inside(name: str) -> bool:
     """Does a path name stay below the folder that holds it, on each OS?
 
-    A backslash is a separator (on Windows). No: an absolute or empty name, a drive in the first part, a part
-    of only dots and spaces with two or more dots (Windows drops the dots and spaces at the end of a part,
-    so "..." and ".. " are ".."), and a NUL character.
+    A backslash is a separator (on Windows). No: an absolute or empty name, a drive (one character and a colon at
+    the start of the name, as ntpath.splitdrive takes it), a part of only dots and spaces with two or more dots
+    (Windows drops the dots and spaces at the end of a part, so "..." and ".. " are ".."), and a NUL character.
+    Another colon is a file name character.
     """
     if "." not in name and ":" not in name and "\\" not in name and "\0" not in name:
         return name != "" and not name.startswith("/")  # the same result, fast: most class names
     parts = name.replace("\\", "/").split("/")
-    if not parts[0] or ":" in parts[0] or "\0" in name:
+    if not parts[0] or name[1:2] == ":" or "\0" in name:
         return False
     return not any(p.count(".") >= 2 and not p.strip(". ") for p in parts)
 
