@@ -844,13 +844,24 @@ def test_stems_and_claims_keep_top_level_dollar_classes(make_jar, tmp_path):
 
 def _named_inner_classes() -> dict[str, bytes]:
     """Classes with an outer class by name. Foo$ does not list itself in its InnerClasses attribute, as the module
-    class of a Scala object: it is a top-level class for the JVM. A$1 lists itself. The file of Cut$1 is cut, and
-    Big$1 is above the size limit of a class file (the test sets the limit): decaf cannot read them."""
+    class of a Scala object: it is a top-level class for the JVM. A$1 lists itself, and A names it. S$B lists itself,
+    but S does not name it: S was compiled again without it, so it is stale and top-level (#207). E lists E$1, but
+    E$1 does not list itself, so it is top-level too. K creates the Kotlin class K$f$$inlined$g$1: it is an inner
+    class. The file of
+    Cut$1 is cut, and Big$1 is above the size limit of a class file (the test sets the limit): decaf cannot read
+    them."""
     from test_check import _class_with, _class_with_inner_classes
 
     inner = _class_with_inner_classes("com/a/A$1", (("com/a/A$1", "com/a/A"),))
+    inlined = "com/a/K$f$$inlined$g$1"
     return {
-        "com/a/A.class": _class_with("com/a/A"), "com/a/A$1.class": inner,
+        "com/a/A.class": _class_with("com/a/A", interfaces=("com/a/A$1",)), "com/a/A$1.class": inner,
+        "com/s/S.class": _class_with("com/s/S"),  # a package of its own: decaf cannot read Cut$1 and Big$1
+        "com/s/S$B.class": _class_with_inner_classes("com/s/S$B", (("com/s/S$B", "com/s/S"),)),
+        "com/a/K.class": _class_with("com/a/K", interfaces=(inlined,)),
+        f"{inlined}.class": _class_with_inner_classes(inlined, ((inlined, None),), enclosing="com/a/K"),
+        "com/a/E.class": _class_with_inner_classes("com/a/E", (("com/a/E$1", None),)),
+        "com/a/E$1.class": _class_with("com/a/E$1"),
         "com/a/Foo.class": _class_with("com/a/Foo"), "com/a/Foo$.class": _class_with("com/a/Foo$"),
         "com/a/Cut.class": _class_with("com/a/Cut"), "com/a/Cut$1.class": _class_with("com/a/Cut$1")[:12],
         "com/a/Big.class": _class_with("com/a/Big"), "com/a/Big$1.class": _class_with("com/a/Big$1") + bytes(100),
@@ -861,8 +872,9 @@ def _named_inner_classes() -> dict[str, bytes]:
 @pytest.mark.parametrize("folder", [False, True])
 def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar, tmp_path, monkeypatch, folder):
     """Foo$ does not list itself, so CFR and Procyon write it only from its own class file, and it is expected. Before,
-    it was a claim, so a lost Foo$ was never missing, retried, or counted (#206). A class that lists itself, and a
-    class file that decaf cannot read, stay claims, as module-info and package-info do."""
+    it was a claim, so a lost Foo$ was never missing, retried, or counted (#206). The same for the stale S$B (#207).
+    The classes of the family that hold a class, and a class file that decaf cannot read, keep it a claim, as
+    module-info and package-info are."""
     from decaf import pipeline
 
     entries = _named_inner_classes()
@@ -875,8 +887,287 @@ def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar,
         source = make_jar("t.jar", entries)
     monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(entries["com/a/Big$1.class"]) - 1)
     stems, claims = pipeline._stems_and_claims(source)
-    assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big"}
-    assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info"}
+    assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big", "com/s/S", "com/s/S$B",
+                     "com/a/K", "com/a/E", "com/a/E$1"}
+    assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info",
+                      "com/a/K$f$$inlined$g$1"}
+
+
+def _inner(name: str, outer: str | None, enclosing: str | None = None, lists=(), refs=()) -> bytes:
+    """A class that lists itself with this outer class (None: an anonymous or local class); lists: more entries
+    (inner class, outer class) of its InnerClasses attribute; refs: more Class entries in its constant pool."""
+    from test_check import _class_with_inner_classes
+
+    return _class_with_inner_classes(name, ((name, outer), *lists), enclosing=enclosing, refs=tuple(refs))
+
+
+def _lister(name: str, lists=(), refs=()) -> bytes:
+    """A class that does not list itself: a top-level class that lists the entries (inner class, outer class)."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    if not lists:
+        return _class_with(name, interfaces=tuple(refs))
+    return _class_with_inner_classes(name, tuple(lists), refs=tuple(refs))
+
+
+def _parents(make_jar, classes: dict[str, bytes], families=None) -> dict[str, str | None]:
+    from decaf.pipeline import _class_parents
+
+    return _class_parents(make_jar("t.jar", {f"{n}.class": data for n, data in classes.items()}), families)
+
+
+def test_class_parents_of_a_class_file_that_cannot_be_read_follow_the_name(make_jar):
+    """Rule 1: no fact from the class file, so the parent is the longest $-prefix that is a class, as before."""
+    assert _parents(make_jar, {"p/A": _lister("p/A"), "p/A$B": b"x", "p/A$B$C": b"x", "p/A$1": b"x"}) == {
+        "p/A$B": "p/A", "p/A$B$C": "p/A$B", "p/A$1": "p/A",
+    }
+
+
+def test_class_parents_of_a_class_that_does_not_list_itself(make_jar):
+    """Rule 2: top-level (#206), also when a class of the family lists it, for example an anonymous class that does
+    not list itself, while its outer class lists it. Fernflower and JD nest such a class in the file of the class
+    that lists it, and Vineflower nests a member class of this kind (it writes such an anonymous class apart), but
+    CFR and Procyon write it only from its own class file: from a class folder, the file of its outer class did not
+    hold it, and the row had no missing class."""
+    assert _parents(make_jar, {"X": _lister("X"), "X$": _lister("X$")}) == {"X$": None}
+    s8 = {"X": _lister("X", lists=(("X$$anon$1", None),)), "X$": _lister("X$"), "X$$anon$1": _lister("X$$anon$1")}
+    assert _parents(make_jar, s8)["X$$anon$1"] is None
+    by_entry = {"p/A": _lister("p/A"), "p/A$C": _inner("p/A$C", "p/A", lists=(("p/A$B", "p/A"),)),
+                "p/A$B": _lister("p/A$B")}
+    assert _parents(make_jar, by_entry)["p/A$B"] is None
+
+
+def test_class_parents_of_a_member_class(make_jar):
+    """Rule 3: the outer class of its own entry, when that class names it. Else it is stale: the outer class was
+    compiled again without it, and only Vineflower and Fernflower write it (#207)."""
+    member = _inner("p/A$B", "p/A")
+    assert _parents(make_jar, {"p/A": _lister("p/A", lists=(("p/A$B", "p/A"),)), "p/A$B": member}) == {"p/A$B": "p/A"}
+    assert _parents(make_jar, {"p/A": _lister("p/A"), "p/A$B": member}) == {"p/A$B": None}
+    other = _inner("p/A$B", "q/Other")  # its outer class is no class of the family, and no class names it
+    assert _parents(make_jar, {"p/A": _lister("p/A"), "p/A$B": other}) == {"p/A$B": None}
+    named = {"p/A": _lister("p/A", refs=("p/A$B",)), "p/A$B": _inner("p/A$B", "p/A")}
+    assert _parents(make_jar, named) == {"p/A$B": "p/A"}  # A creates it, and does not list it
+
+
+@pytest.mark.parametrize("enclosing, namers, parent", [
+    ("X", ("X", "X$"), "X"),  # X and X$ name it: the EnclosingMethod class (#208)
+    ("X$", ("X", "X$"), "X$"),
+    (None, ("X",), "X"),  # no EnclosingMethod attribute
+    (None, ("X", "X$"), "X$"),  # no EnclosingMethod attribute: the longest class that names it
+    ("X$", ("X",), "X"),  # the EnclosingMethod class does not name it
+    (None, (), None),  # stale
+])
+def test_class_parents_of_an_anonymous_class(make_jar, enclosing, namers, parent):
+    """Rule 4: of the classes that name it, the EnclosingMethod class, else the longest $-prefix, else the first."""
+    classes = {n: _lister(n, lists=(("X$$anon$1", None),) if n in namers else ()) for n in ("X", "X$")}
+    classes["X$$anon$1"] = _inner("X$$anon$1", None, enclosing=enclosing)
+    assert _parents(make_jar, classes) == {"X$": None, "X$$anon$1": parent}
+
+
+def test_class_parents_of_a_kotlin_inlined_class_and_a_class_named_only_below_it(make_jar):
+    """A Kotlin K$foo$$inlined$bar$1 lists itself, no class lists it, and K creates it: K names it. A class below
+    a class by name is no proof for it."""
+    inlined = "p/K$foo$$inlined$bar$1"
+    kotlin = {"p/K": _lister("p/K", refs=(inlined,)), inlined: _inner(inlined, None)}
+    assert _parents(make_jar, kotlin) == {inlined: "p/K"}
+    below = {"p/A": _lister("p/A"), "p/A$1": _inner("p/A$1", None),
+             "p/A$1$1": _inner("p/A$1$1", "p/A$1", refs=("p/A$1",))}
+    assert _parents(make_jar, below)["p/A$1"] is None
+    named = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A", refs=("p/A$1",)), "p/A$1": _inner("p/A$1", None)}
+    assert _parents(make_jar, named)["p/A$1"] == "p/A$B"  # A$B is no $-prefix of A$1: the first class that names it
+
+
+def test_class_parents_keep_the_name_rule_when_a_class_of_the_package_names_it(make_jar):
+    """No class of the family knows X$1, but Other, a class of another family in the same package, creates it: it is
+    not stale, so it keeps the name rule, as before. A class of another package is no proof (#207)."""
+    classes = {"p/X": _lister("p/X"), "p/X$1": _inner("p/X$1", None), "q/Far": _lister("q/Far", refs=("p/X$1",))}
+    assert _parents(make_jar, classes) == {"p/X$1": None}
+    classes["p/Other"] = _lister("p/Other", refs=("p/X$1",))
+    assert _parents(make_jar, classes) == {"p/X$1": "p/X"}
+
+
+def test_class_parents_keep_the_name_rule_when_a_class_file_of_a_test_cannot_be_read(make_jar):
+    """decaf cannot read the file of the outer class, of a candidate, or of a class of the package: no proof that
+    the class is stale, so it keeps the name rule (#207)."""
+    assert _parents(make_jar, {"p/A": b"x", "p/A$B": _inner("p/A$B", "p/A")}) == {"p/A$B": "p/A"}
+    assert _parents(make_jar, {"p/A": b"x", "p/A$1": _inner("p/A$1", None)}) == {"p/A$1": "p/A"}
+    cut = {"p/A": _lister("p/A"), "p/A$1": _inner("p/A$1", None), "p/Cut": b"x"}
+    assert _parents(make_jar, cut) == {"p/A$1": "p/A"}
+
+
+def test_class_parents_read_no_package_refs_when_each_outer_class_lists_its_inner_classes(make_jar, monkeypatch):
+    """A jar of javac: each outer class lists its inner classes, so decaf reads no package_refs (#207)."""
+    monkeypatch.setattr(check, "package_refs", lambda data: pytest.fail("package_refs ran"))
+    classes = {"p/A": _lister("p/A", lists=(("p/A$B", "p/A"), ("p/A$1", None))), "p/A$B": _inner("p/A$B", "p/A"),
+               "p/A$1": _inner("p/A$1", None, enclosing="p/A"), "p/C": _lister("p/C")}
+    assert _parents(make_jar, classes) == {"p/A$B": "p/A", "p/A$1": "p/A"}
+
+
+def test_class_parents_of_a_family_where_each_class_lists_each_class(make_jar, monkeypatch):
+    """A crafted family of 300 classes: each class lists itself and each other class. The parents are right, and the
+    rule reads no package_refs: the lists give the proof (#207)."""
+    monkeypatch.setattr(check, "package_refs", lambda data: pytest.fail("package_refs ran"))
+    names = [f"p/A$C{i}" for i in range(300)]
+    everyone = tuple((n, None) for n in names)
+    classes = {"p/A": _lister("p/A", lists=everyone)}
+    classes |= {n: _inner(n, None, lists=tuple(e for e in everyone if e[0] != n)) for n in names}
+    assert _parents(make_jar, classes) == dict.fromkeys(names, "p/A")
+
+
+def test_class_parents_of_a_class_whose_one_entry_lists_itself_two_times(make_jar):
+    """One entry of Foo$ lists itself two times, and the other entry does not list itself: Foo$ is top-level (#206)."""
+    twice = {"p/Foo": _lister("p/Foo", refs=("p/Foo$",)),
+             "p/Foo$": _inner("p/Foo$", "p/Foo", lists=(("p/Foo$", "p/Foo"),)),
+             "META-INF/versions/9/p/Foo$": _lister("p/Foo$")}
+    assert _parents(make_jar, twice) == {"p/Foo$": None}
+
+
+def test_keys_above_a_key_end_at_a_cycle_of_parents():
+    """Crafted class files can give a cycle of parents. A key whose walk meets a repeat takes only the $-prefixes
+    of its name, so no walk loops, and the tree of a plan has no cycle (#208)."""
+    from decaf.pipeline import _keys_above, _units
+
+    cycle = {"p/A$B": "p/A$C", "p/A$C": "p/A$B", "p/A$D$E": "p/A$B", "p/A$F": "p/A"}
+    assert list(_keys_above("p/A$B", cycle, {})) == ["p/A"]  # a cycle of two keys
+    assert list(_keys_above("p/A$C", cycle, {})) == ["p/A"]
+    assert list(_keys_above("p/A$D$E", cycle, {})) == ["p/A$D", "p/A"]  # its chain leads into the cycle
+    assert list(_keys_above("p/A$F", cycle, {})) == ["p/A"]
+    assert list(_keys_above("p/A$G$H", {"p/A$G$H": "p/A$F"} | cycle, {})) == ["p/A$F", "p/A"]  # a clean chain
+    units = _units({"p/A", "p/A$B", "p/A$C", "p/A$D$E", "p/A$F"}, cycle)
+    assert {k: sorted(v) for k, v in units.items()} == {"p/A": ["p/A$B", "p/A$C", "p/A$D$E", "p/A$F"]}
+
+
+def test_keys_above_two_anonymous_classes_of_an_old_javac_that_list_each_other(make_jar):
+    """An old javac (backport-util-concurrent 3.1, Executors$5 and Executors$6) writes no EnclosingMethod attribute:
+    two anonymous classes, one in the other, list themselves and each other, and A lists neither. The parents give a
+    cycle, and decaf cannot tell which class is in the other: both go below A, as on main."""
+    from decaf.pipeline import _class_parents, _keys_above, _units
+
+    jar = make_jar("t.jar", {"p/A.class": _lister("p/A"),
+                             "p/A$1.class": _inner("p/A$1", None, lists=(("p/A$2", None),)),
+                             "p/A$2.class": _inner("p/A$2", None, lists=(("p/A$1", None),))})
+    parents = _class_parents(jar)
+    assert parents == {"p/A$1": "p/A$2", "p/A$2": "p/A$1"}
+    walks: dict[str, bool] = {}
+    assert list(_keys_above("p/A$1", parents, walks)) == ["p/A"]
+    assert list(_keys_above("p/A$2", parents, walks)) == ["p/A"]
+    units = _units({"p/A", "p/A$1", "p/A$2"}, parents)
+    assert {k: sorted(v) for k, v in units.items()} == {"p/A": ["p/A$1", "p/A$2"]}
+
+
+def _linked_family() -> dict[str, bytes]:
+    """Crafted links: the parents of the stems have no cycle, A$Y$1 -> A -> nothing, A$X -> A$Y$1, A$Y and A$Z ->
+    A$X. Without a copy of A$Y$1 below a second root, the key of A$X there takes the name rule: A$Y, whose parent
+    is A$X."""
+    a = "p/A"
+    return {
+        a: _lister(a, lists=((f"{a}$Y$1", None),)),
+        f"{a}$Y$1": _inner(f"{a}$Y$1", None, enclosing=a, lists=((f"{a}$X", None),)),
+        f"{a}$X": _inner(f"{a}$X", None, enclosing=f"{a}$Y$1", lists=((f"{a}$Y", None), (f"{a}$Z", None))),
+        f"{a}$Y": _inner(f"{a}$Y", None, enclosing=f"{a}$X"),
+        f"{a}$Z": _inner(f"{a}$Z", None, enclosing=f"{a}$X"),
+    }
+
+
+@pytest.mark.parametrize("root", ["META-INF/versions/9/", "WEB-INF/classes/"])
+def test_a_family_plan_ends_when_the_keys_below_a_second_root_give_a_cycle(make_jar, tmp_path: Path, root):
+    """Before, the walks of the plan did not end (#208). The result is the result of main."""
+    family = _linked_family()
+    classes = {f"{n}.class": d for n, d in family.items()}
+    classes |= {f"{root}{n}.class": d for n, d in family.items() if n != "p/A$Y$1"}
+    jar = make_jar("app.jar", classes)
+    runner = writing_runner({"vineflower": {
+        "p/A.java": "class A { /* base */ }", f"{root}p/A.java": "class A {} // FLAG", f"{root}p/A$Z.java": "class A$Z {}",
+    }})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*.java"))
+    assert written == [f"{root}p/A$Z.java", f"{root}p/A.java", "p/A.java"]
+    assert [f["path"] for f in report.flagged] == [f"{root}p/A.java"]
+
+
+def test_read_parents_keeps_the_container_root_of_a_copy(make_jar):
+    """The war has X at the root and below WEB-INF/classes/: the key of each copy keeps its container root, and so
+    does the key of its parent (#107, #208)."""
+    from decaf.pipeline import _copied_keys, _Held, _read_parents
+
+    classes = _scala_family("X")
+    war = make_jar("app.war", {**classes, **{f"WEB-INF/classes/{n}": d for n, d in classes.items()}})
+    held = _Held(copies=_copied_keys(war))
+    families = {"com/x/X", "WEB-INF/classes/com/x/X"}
+    _read_parents(war, families, held, lambda key: key.split("$", 1)[0])
+    assert held.parents == {
+        "com/x/X": {"com/x/X$": None, "com/x/X$$anon$1": "com/x/X"},
+        "WEB-INF/classes/com/x/X": {"WEB-INF/classes/com/x/X$": None,
+                                    "WEB-INF/classes/com/x/X$$anon$1": "WEB-INF/classes/com/x/X"},
+    }
+
+
+def test_class_parents_read_only_the_families_asked_for(make_jar, monkeypatch):
+    from decaf import pipeline
+
+    classes = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A"), "q/C": _lister("q/C"), "q/C$": _lister("q/C$")}
+    jar = make_jar("t.jar", {f"{n}.class": d for n, d in classes.items()})
+    read: list[str] = []
+    read_classes = pipeline._read_classes
+    def counted(source, names):
+        read.extend(names)
+        return read_classes(source, names)
+
+    monkeypatch.setattr(pipeline, "_read_classes", counted)
+    assert pipeline._class_parents(jar, {"q/C"}) == {"q/C$": None}
+    assert sorted(read) == ["q/C$.class", "q/C.class"]
+
+
+def test_class_parents_of_a_class_folder_above_its_package_root(tmp_path):
+    """A class folder above its package root (#199): the stems keep the folder, the class files name the classes."""
+    from decaf.pipeline import _class_parents
+
+    classes = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A"), "q/C": _lister("q/C"), "q/C$": _lister("q/C$")}
+    root = tmp_path / "in"
+    for n, d in classes.items():
+        (root / "target/classes" / f"{n}.class").parent.mkdir(parents=True, exist_ok=True)
+        (root / "target/classes" / f"{n}.class").write_bytes(d)
+    assert _class_parents(root) == {"target/classes/p/A$B": None, "target/classes/q/C$": None}
+    classes["p/A"] = _lister("p/A", lists=(("p/A$B", "p/A"),))
+    (root / "target/classes/p/A.class").write_bytes(classes["p/A"])
+    assert _class_parents(root)["target/classes/p/A$B"] == "target/classes/p/A"
+
+
+def _without_the_utf8_flag(jar: Path) -> Path:
+    """Clear bit 11 of the flags in each local and central header, as old jar tools write UTF-8 entry names."""
+    import struct
+
+    data = bytearray(jar.read_bytes())
+    for magic, off in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        at = data.find(magic)
+        while at != -1:
+            struct.pack_into("<H", data, at + off, struct.unpack_from("<H", data, at + off)[0] & ~0x800)
+            at = data.find(magic, at + 4)
+    jar.write_bytes(data)
+    return jar
+
+
+def test_stems_and_claims_of_class_files_whose_paths_do_not_end_with_their_names(make_jar, tmp_path: Path):
+    """A class folder below its package root, and a jar with UTF-8 entry names without the UTF-8 flag: the path of a
+    class file does not end with its class name. Foo$ does not list itself, so it is top-level, as on main (#206).
+    Before, such a class took the name rule, so CFR lost it. A class that lists itself keeps the name rule."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    from decaf.pipeline import _stems_and_claims
+
+    folder = tmp_path / "classes/p"
+    folder.mkdir(parents=True)
+    for name in ("Foo", "Foo$", "Bar"):
+        (folder / f"{name}.class").write_bytes(_class_with(f"p/{name}"))
+    (folder / "Bar$1.class").write_bytes(_class_with_inner_classes("p/Bar$1", (("p/Bar$1", None),)))
+    assert _stems_and_claims(folder) == ({"Foo", "Foo$", "Bar"}, {"Bar$1"})
+    jar = _without_the_utf8_flag(make_jar("noflag.jar", {
+        f"{n}.class": _class_with(n) for n in ("p/Größe", "p/Größe$", "p/Bar")
+    } | {"p/Größe$1.class": _class_with_inner_classes("p/Größe$1", (("p/Größe$1", None),))}))
+    g = "p/Größe".encode().decode("cp437")  # zipfile reads a name without the flag as cp437
+    assert _stems_and_claims(jar) == ({g, g + "$", "p/Bar"}, {g + "$1"})
 
 
 def test_stems_and_claims_by_name_only_read_no_class_file(make_jar, monkeypatch):
@@ -887,7 +1178,7 @@ def test_stems_and_claims_by_name_only_read_no_class_file(make_jar, monkeypatch)
 
     jar = make_jar("t.jar", {"p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$")})
     assert _stems_and_claims(jar) == ({"p/Foo", "p/Foo$"}, set())
-    monkeypatch.setattr(check, "lists_itself", lambda data: pytest.fail("a class file was read"))
+    monkeypatch.setattr(check, "class_links", lambda data: pytest.fail("a class file was read"))
     assert _stems_and_claims(jar, read=False) == ({"p/Foo"}, {"p/Foo$"})
 
 
@@ -913,7 +1204,7 @@ def test_stems_and_claims_expect_a_multi_release_class_when_one_entry_is_top_lev
         "p/Foo.class": _class_with("p/Foo"),
         **{name: _class_with("p/Foo$") if name == top else inner
            for name in ("p/Foo$.class", "META-INF/versions/9/p/Foo$.class")},
-        "p/Bar.class": _class_with("p/Bar"),
+        "p/Bar.class": _class_with("p/Bar", interfaces=("p/Bar$1",)),  # Bar creates Bar$1 (#207)
         "META-INF/versions/9/p/Bar$1.class": _class_with_inner_classes("p/Bar$1", (("p/Bar$1", None),)),
     })
     assert _stems_and_claims(jar) == ({"p/Foo", "p/Foo$", "p/Bar"}, {"p/Bar$1"})
@@ -946,8 +1237,9 @@ def _foo_folder(tmp_path: Path) -> Path:
 
     root = tmp_path / "in"
     (root / "p").mkdir(parents=True)
-    for name in ("Foo", "Foo$", "Bar"):
+    for name in ("Foo$", "Bar"):
         (root / f"p/{name}.class").write_bytes(_class_with(f"p/{name}"))
+    (root / "p/Foo.class").write_bytes(_class_with("p/Foo", interfaces=("p/Foo$1",)))  # Foo creates Foo$1 (#207)
     (root / "p/Foo$1.class").write_bytes(_class_with_inner_classes("p/Foo$1", (("p/Foo$1", None),)))
     return root
 
@@ -1020,14 +1312,15 @@ def test_a_batch_member_counts_its_class_that_is_top_level_for_the_jvm(make_jar,
         for t in targets:
             with zipfile.ZipFile(t) as zf:
                 for entry in zf.namelist():
-                    if check.lists_itself(zf.read(entry)) or (entry == "p/Foo$.class" and not writes):
+                    links = check.class_links(zf.read(entry))
+                    if any(inner == links[0] for inner, _ in links[1]) or (entry == "p/Foo$.class" and not writes):
                         continue  # an inner class rides with its outer class
                     (Path(dest) / entry).with_suffix(".java").parent.mkdir(parents=True, exist_ok=True)
                     (Path(dest) / entry).with_suffix(".java").write_text("class X {}")
         return EngineResult(spec.name, 0, False, 0, "")
 
     m1 = _member(make_jar, "a.jar", {
-        "p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$"),
+        "p/Foo.class": _class_with("p/Foo", interfaces=("p/Foo$1",)), "p/Foo$.class": _class_with("p/Foo$"),
         "p/Foo$1.class": _class_with_inner_classes("p/Foo$1", (("p/Foo$1", None),)),
     })
     m2 = _member(make_jar, "b.jar", {"q/B.class": _class_with("q/B")})
@@ -1499,12 +1792,14 @@ _K, _KL = "com/x/K", "com/x/K$$Lambda$0"
 
 def _k_classes(class_file, lambda_file: str | None, namer: str | None) -> dict[str, bytes]:
     """K and its lambda K$$Lambda$0, a class that is top-level for the JVM. namer: the class whose constant pool has
-    a Class entry of the lambda: K, the inner class K$1, or the class K$$Lambda$0$1 below the lambda."""
+    a Class entry of the lambda: K, the inner class K$1, or the class K$$Lambda$0$1 below the lambda. K names K$1,
+    and the lambda names K$$Lambda$0$1: they are inner classes (#207)."""
     from test_check import _class_with, _class_with_inner_classes
 
     classes = {
-        f"{_K}.class": _class_with(_K, interfaces=(_KL,)) if namer == "K" else _class_with(_K),
-        f"{_KL}.class": class_file(_KL, lambda_file),
+        f"{_K}.class": _class_with(_K, interfaces={"K": (_KL,), "K$1": (f"{_K}$1",)}.get(namer, ())),
+        f"{_KL}.class": _class_with(_KL, interfaces=(f"{_KL}$1",)) if namer == "K$$Lambda$0$1"
+        else class_file(_KL, lambda_file),
     }
     if namer == "K$1":
         classes[f"{_K}$1.class"] = _class_with_inner_classes(f"{_K}$1", ((f"{_K}$1", _K), (_KL, None)))
@@ -3679,7 +3974,7 @@ def test_two_retry_files_with_the_key_of_the_outer_class_are_both_written(make_j
 def _a1_class(shape: str) -> dict[str, bytes]:
     """A class file of A$1. An inner class of the JVM lists itself in its InnerClasses attribute ("inner"). A class
     that does not is a top-level class for the JVM: it has no InnerClasses attribute ("top"), or a tool removed the
-    attribute and kept its name in the constant pool ("stripped")."""
+    attribute and kept its name in the constant pool ("stripped"). The A of "inner" names A$1 (#207)."""
     from test_check import _class_with, _class_with_inner_classes
 
     data = {
@@ -3687,7 +3982,8 @@ def _a1_class(shape: str) -> dict[str, bytes]:
         "top": _class_with("com/x/A$1"),
         "stripped": _class_with("com/x/A$1", utf8=("InnerClasses",)),
     }[shape]
-    return {"com/x/A$1.class": data}
+    outer = {"com/x/A.class": _class_with("com/x/A", interfaces=("com/x/A$1",))} if shape == "inner" else {}
+    return {"com/x/A$1.class": data, **outer}
 
 
 @pytest.mark.parametrize("shape, expected", [
@@ -3781,6 +4077,145 @@ def test_an_empty_file_counts_as_a_class_that_its_engine_wrote_apart(make_jar, t
     report, written, _ = _run_family(make_jar, tmp_path, files)
     assert written == expected
     assert report.java_files == len(expected) and report.missing_classes == 0
+
+
+def test_an_unchecked_file_does_not_replace_a_flagged_family_by_a_top_level_class_with_an_empty_file(
+    make_jar, tmp_path: Path,
+):
+    """A$1 is top-level for the JVM, and Vineflower wrote an empty file of it, so no file holds A$1. The unchecked A
+    of CFR does not hold A$1 either: it gives no file to a class, so it does not replace the flagged A (#99). Before,
+    the plan read only the classes with a held or new file, so the A of CFR held A$1, and the report had no flagged
+    file (#213)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // FLAG vf", _A1: ""}, "cfr": {_A: "class A {} // ENV cfr"},
+    }, classes=_a1_class("top"))
+    assert written == {_A: "class A {} // FLAG vf"}
+    assert [f["path"] for f in report.flagged] == [_A]
+
+
+def test_a_clean_file_replaces_a_flagged_file_by_a_top_level_class_with_an_empty_file(make_jar, tmp_path: Path):
+    """A$1 is top-level for the JVM. Fernflower wrote an empty file of it, and Vineflower wrote no file of it: no A
+    holds A$1, so the clean A of Fernflower replaces the flagged A. Before, the A of Vineflower held A$1, so the A of
+    Fernflower lost it, and the flagged file went out (#213)."""
+    report, written, _ = _run_family(make_jar, tmp_path, {
+        "vineflower": {_A: "class A {} // FLAG vf"}, "fernflower": {_A: "class A { /* ff */ }", _A1: ""},
+    }, classes=_a1_class("top"))
+    assert written == {_A: "class A { /* ff */ }"}
+    assert report.flagged == [] and report.missing_classes == 1  # A$1: no engine wrote it
+
+
+def test_a_clean_file_replaces_a_flagged_file_by_a_top_level_class_below_a_class_with_an_empty_file(
+    make_jar, tmp_path: Path,
+):
+    """A$1$X is top-level for the JVM and has no file. Fernflower wrote a flagged A and an empty file of A$1, and the
+    clean A of Vineflower nests A$1. A$1$X is a class that no file holds for both files of A, so the clean A replaces
+    the flagged A. Before, the branch of a class without a file left A$1$X out of the tree, so A$1$X was a gap for
+    one file only, and the flagged file went out (#213)."""
+    from test_check import _class_with
+
+    jar = make_jar("app.jar", {
+        "com/x/A.class": _lister("com/x/A", lists=(("com/x/A$1", None),)),
+        "com/x/A$1.class": _inner("com/x/A$1", None, enclosing="com/x/A"),
+        "com/x/A$1$X.class": _class_with("com/x/A$1$X"),
+    })
+    runner = writing_runner({
+        "fernflower": {_A: "class A {} // FLAG ff", _A1: ""}, "vineflower": {_A: "class A { /* vf + A$1 */ }"},
+    })
+    out = tmp_path / "out"
+    ctx = make_ctx(tmp_path, runner, engine="fernflower", checker=marker_checker(), writer=MirrorWriter(out))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    written = {p.relative_to(out / "app.jar").as_posix(): p.read_text() for p in out.rglob("*.java")}
+    assert written == {_A: "class A { /* vf + A$1 */ }"}
+    assert report.flagged == []
+
+
+def test_a_stub_of_a_stale_inner_class_stays_when_the_file_of_the_outer_class_does_not_hold_it(
+    make_jar, tmp_path: Path,
+):
+    """A$B lists itself, but A does not name it: A was compiled again without B, so A$B is top-level for the JVM.
+    The A of Fernflower does not hold A$B, so the Vineflower stub of A$B stays, and the report lists it. Before, the
+    A of Fernflower replaced the stub, and the class was a silent loss (#207)."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    ab, stub = "com/x/A$B.java", _VF_STUB.replace("class A", "class A$B")
+    jar = make_jar("app.jar", {  # no class file of the package that decaf cannot read: they give no proof
+        "com/x/A.class": _class_with("com/x/A"),
+        "com/x/A$B.class": _class_with_inner_classes("com/x/A$B", (("com/x/A$B", "com/x/A"),)),
+    })
+    runner = writing_runner({
+        "vineflower": {_A: "class A { /* vf */ }", ab: stub}, "fernflower": {_A: "class A { /* ff */ }"},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    written = {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
+    assert written == {_A: "class A { /* vf */ }", ab: stub}
+    assert [s["path"] for s in report.stubs] == [ab]
+
+
+_X, _XM, _XA = "com/x/X.java", "com/x/X$.java", "com/x/X$$anon$1.java"
+
+
+def _scala_family(enclosing: str) -> dict[str, bytes]:
+    """The Scala class X, its module class X$, and the anonymous class X$$anon$1 with this EnclosingMethod class
+    (#208). X lists X$$anon$1; with the EnclosingMethod class X$, X$ lists it too."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    anon = "com/x/X$$anon$1"
+    return {
+        "com/x/X.class": _class_with_inner_classes("com/x/X", ((anon, None),)),
+        "com/x/X$.class": _class_with_inner_classes("com/x/X$", ((anon, None),)) if enclosing == "X$"
+        else _class_with("com/x/X$"),
+        f"{anon}.class": _class_with_inner_classes(anon, ((anon, None),), enclosing=f"com/x/{enclosing}"),
+    }
+
+
+@pytest.mark.parametrize("enclosing", ["X", "X$"])
+@pytest.mark.parametrize("apart_first", [True, False])
+def test_a_scala_anonymous_class_has_one_file_from_the_class_that_nests_it(
+    make_jar, tmp_path: Path, enclosing, apart_first,
+):
+    """One engine writes X$$anon$1 apart, the other engine nests it in the file of its EnclosingMethod class, as each
+    engine does. The parent of X$$anon$1 comes from its class files, so the chosen files hold each class one time.
+    Before, X$$anon$1 was a child of X$ by name, so a file of X$ that does not nest it took it: the class was lost,
+    and the report did not show it (#208)."""
+    apart = {_X: "class X { /* apart */ }", _XM: "class X$ { /* apart */ }", _XA: "class X$$anon$1 {} // FLAG apart"}
+    nested = {_X: "class X { /* nested */ }", _XM: "class X$ { /* nested */ }"}
+    for holder in [_X] if enclosing == "X" else [_X, _XM]:  # each class that lists it nests it
+        nested[holder] = nested[holder].replace("*/", "+ X$$anon$1 */")
+    if not apart_first:
+        nested[_X] += " // FLAG nested"  # a flagged file of the outer class holds its family (#150)
+    first, second = (apart, nested) if apart_first else (nested, apart)
+    jar = make_jar("app.jar", _scala_family(enclosing))
+    runner = writing_runner({"vineflower": first, "cfr": second})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    written = {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
+    held = [c for text in written.values() for c in ("X$$anon$1",) if c in text]
+    assert held == ["X$$anon$1"]  # no class is lost, and no class goes out two times
+    assert set(written) == {_X, _XM}  # no file of X$$anon$1 goes out: a file of the class that nests it holds it
+    # Nested first with X: the flagged X of Vineflower nests X$$anon$1, and the files of CFR hold a flagged file of
+    # it: a flagged file replaces nothing (#99), so the flagged X stays, and the report lists it.
+    assert [f["path"] for f in report.flagged] == ([_X] if (enclosing, apart_first) == ("X", False) else [])
+    assert report.missing_classes == 0
+
+
+def test_an_unchecked_file_of_the_module_class_does_not_hold_the_anonymous_class_of_the_class(
+    make_jar, tmp_path: Path,
+):
+    """The clean X of CFR replaces the flagged X$$anon$1 of Vineflower: X holds it (#208). The unchecked X$ of CFR
+    does not, so the family is done, and its files go out after CFR. Before, X$ held it by name, so the family
+    waited for a file of X$ that passes the check, and each next engine got a retry of X."""
+    jar = make_jar("app.jar", _scala_family("X"))
+    runner = writing_runner({
+        "vineflower": {_X: "class X { /* vf */ }", _XA: "class X$$anon$1 {} // FLAG vf"},
+        "cfr": {_X: "class X { /* cfr + X$$anon$1 */ }", _XM: "class X$ {} // ENV cfr"},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+    assert sorted(p.name for p in (tmp_path / "out/app.jar/com/x").iterdir()) == ["X$.java", "X.java"]
 
 
 # --- CFR, Procyon, and JD get one package root at a time (#199, #200, #170, #171, #173) ---
@@ -3881,18 +4316,25 @@ def test_root_prefix_is_empty_when_the_name_does_not_match(tmp_path: Path, class
 
 
 def _inner_class_file(name: str) -> bytes:
-    """A class file of an inner class: it lists itself in its InnerClasses attribute, so it is no expected class
-    (#206)."""
+    """A class file of an inner class: it lists itself in its InnerClasses attribute, and its outer class names it
+    (_outer_class_file), so it is no expected class (#206, #207)."""
     from test_check import _class_with_inner_classes
 
     return _class_with_inner_classes(name, ((name, name.rsplit("$", 1)[0]),))
+
+
+def _outer_class_file(name: str, inner: str) -> bytes:
+    """A class file whose constant pool names the inner class, as the code of a class that creates it."""
+    from test_check import _class_with
+
+    return _class_with(name, interfaces=(inner,))
 
 
 def _class_folder(tmp_path: Path, class_file) -> Path:
     root = tmp_path / "in"
     _tree(root, {
         "target/classes/p/A.class": class_file("p/A"),
-        "target/classes/q/B.class": class_file("q/B"),
+        "target/classes/q/B.class": _outer_class_file("q/B", "q/B$Nested"),
         "target/classes/q/B$Nested.class": _inner_class_file("q/B$Nested"),
     })
     return root
@@ -3946,7 +4388,7 @@ def test_a_rooted_engine_gets_the_classes_of_a_war_without_their_container(make_
     """Before, CFR and Procyon wrote com/x/A.java, and JD took WEB-INF.classes.com.x as the package (#170, #173)."""
     war = make_jar("app.war", {
         "WEB-INF/web.xml": "<web-app/>",
-        "WEB-INF/classes/com/x/A.class": class_file("com/x/A"),
+        "WEB-INF/classes/com/x/A.class": _outer_class_file("com/x/A", "com/x/A$1"),
         "WEB-INF/classes/com/x/A$1.class": _inner_class_file("com/x/A$1"),
     })
     runner = by_name_runner()
@@ -3985,7 +4427,7 @@ def test_a_retry_tree_with_two_roots_gives_two_runs(make_jar, tmp_path: Path, cl
     """A Spring Boot jar has its loader classes at the root and its own classes under BOOT-INF/classes/."""
     jar = make_jar("boot.jar", {
         "BOOT-INF/classes/com/x/Done.class": class_file("com/x/Done"),
-        "BOOT-INF/classes/com/x/A.class": class_file("com/x/A"),
+        "BOOT-INF/classes/com/x/A.class": _outer_class_file("com/x/A", "com/x/A$1"),
         "BOOT-INF/classes/com/x/A$1.class": _inner_class_file("com/x/A$1"),
         "org/boot/L.class": class_file("org/boot/L"),
     })

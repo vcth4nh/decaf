@@ -695,15 +695,16 @@ def _run_per_class(
     of its group then gets a JVM of its own, in the time that is left. The timeout is for the whole
     folder (#113).
     """
-    from . import check, pipeline  # here, not at the top: both modules import this one
+    from . import pipeline  # here, not at the top: it imports this module
 
     files = {f.relative_to(root).as_posix()[: -len(".class")]: f for f in sorted(root.rglob("*.class"))}
-    # A class that does not list itself in its InnerClasses attribute, for example the module class Foo$ of a Scala
-    # object, is a top-level class for the JVM: no outer class nests it, so it needs its own argument (#206).
-    named = [stem + ".class" for stem in files if outer_stem(stem, files) is not None]
-    unnested = {n[: -len(".class")] for n, data in pipeline._read_classes(root, named)
-                if check.lists_itself(data) is False}
-    tops = [(stem, f) for stem, f in files.items() if outer_stem(stem, files) is None or stem in unnested]
+    # A class that is top-level for the JVM, for example the module class Foo$ of a Scala object (#206) or a stale
+    # class (#207): no outer class nests it, so it needs its own argument. The rule of the expected classes, on the
+    # classes of this tree: a retry tree holds only the families of its classes, so a class that only a class of
+    # another family names can look stale here, and then it gets an argument of its own.
+    parents = pipeline._class_parents(root) if any(outer_stem(stem, files) for stem in files) else {}
+    tops = [(stem, f) for stem, f in files.items()
+            if outer_stem(stem, files) is None or parents.get(pipeline._class_stem(stem + ".class"), "") is None]
     deadline = time.monotonic() + timeout
     results: list[EngineResult] = []
     final: list[EngineResult] = []  # the results that decide the exit code: a failed group JVM does not

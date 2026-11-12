@@ -1,4 +1,4 @@
-"""Real engines on a class that has the name of an inner class but is top-level for the JVM (#206)."""
+"""Real engines on a class that has the name of an inner class but is top-level for the JVM (#206, #207)."""
 
 import json
 import shutil
@@ -81,3 +81,45 @@ def test_the_default_chain_on_a_class_folder_has_no_missing_class(classes: Path,
     row = _run(shutil.copytree(classes, tmp_path / "in"), out)
     assert "Foo$.java" in _sources(out)
     assert (row["outcome"], row["classes"], row["missing_classes"]) == ("ok", 3, 0)
+
+
+STALE = {
+    "with": "package p;\n\nclass A {\n    static class B {\n        String s = \"member body\";\n    }\n}\n",
+    "without": "package p;\n\nclass A {\n}\n",
+}
+
+
+@pytest.fixture(scope="module")
+def stale(tmp_path_factory) -> Path:
+    """A class folder with a stale A$B: A was compiled with B, then again without it, and A$B.class stayed. A$B lists
+    itself, but A does not name it (#207)."""
+    javac = shutil.which("javac")
+    if javac is None:
+        pytest.skip("javac not available")
+    out = tmp_path_factory.mktemp("stale")
+    for step in ("with", "without"):
+        src = tmp_path_factory.mktemp(step) / "p/A.java"
+        src.parent.mkdir()
+        src.write_text(STALE[step])
+        subprocess.run([javac, "--release", "11", "-d", str(out), str(src)], check=True)
+    assert sorted(p.name for p in (out / "p").iterdir()) == ["A$B.class", "A.class"]
+    return out
+
+
+def test_cfr_reports_a_stale_class_that_it_does_not_write(stale: Path, tmp_path: Path):
+    """CFR writes no file of the stale A$B. Before, the row had 1 class and no missing class (#207)."""
+    out = tmp_path / "out"
+    runner.invoke(app, ["run", str(shutil.copytree(stale, tmp_path / "in")), "-o", str(out), "--no-maven",
+                        "--engine", "cfr", "--no-fallback"])
+    (row,) = json.loads((out / "decaf-report.json").read_text())["artifacts"]
+    assert sorted(_sources(out)) == ["A.java"]
+    assert (row["classes"], row["java_files"], row["missing_classes"]) == (2, 1, 1)
+
+
+def test_the_next_engine_writes_a_stale_class(stale: Path, tmp_path: Path):
+    out = tmp_path / "out"
+    row = _run(shutil.copytree(stale, tmp_path / "in"), out, "--engine", "cfr")
+    files = _sources(out)
+    assert sorted(files) == ["A$B.java", "A.java"]
+    assert "member body" in files["A$B.java"]
+    assert (row["outcome"], row["classes"], row["missing_classes"]) == ("ok", 2, 0)

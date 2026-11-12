@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import os
@@ -13,7 +14,7 @@ import time
 import traceback
 import zipfile
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -514,10 +515,10 @@ def _stems_and_claims(source: Path, read: bool = True) -> tuple[set[str], set[st
     from sharing a batch, but never join expectations (#75): such a file is
     copied when an engine emits it, exactly like a solo run — never retried.
 
-    A class with an outer class by name that does not list itself in its InnerClasses attribute, for example the
-    module class Foo$ of a Scala object, is a top-level class for the JVM: no file of another class holds it, so it
-    is expected (#206). A class file that decaf cannot read stays an inner class, as in _read_unnested. With
-    read=False, the rule is by name only: no class file is read, and the union of the sets is the same.
+    A class with an outer class by name that is top-level for the JVM (_class_parents) is expected: no file of
+    another class holds it. For example the module class Foo$ of a Scala object (#206), or a stale class whose outer
+    class was compiled again without it (#207). With read=False, the rule is by name only: no class file is read,
+    and the union of the sets is the same.
     """
     if source.is_dir():
         entries = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
@@ -536,9 +537,8 @@ def _stems_and_claims(source: Path, read: bool = True) -> tuple[set[str], set[st
         else:
             stems.add(_class_stem(e))
     inner = {s for s in stems if outer_stem(s, stems) is not None}
-    names = [e for e in entries if _class_stem(e) in inner] if read else []
-    tops = {_class_stem(name) for name, data in _read_classes(source, names)
-            if check.lists_itself(data) is False}  # a multi-release class: one entry is enough
+    parents = _class_parents(source, names=entries) if read and inner else {}  # the name list of this pass
+    tops = {s for s, parent in parents.items() if parent is None} & inner
     return (stems - inner) | tops, claims | (inner - tops)
 
 
@@ -744,6 +744,165 @@ def _family_entries(source: Path) -> dict[str, list[str]]:
     return out
 
 
+def _class_parents(
+    source: Path, families: Collection[str] | None = None, names: Iterable[str] | None = None,
+) -> dict[str, str | None]:
+    """The parent of each class with an outer class by name, from the class files of its family: the stem of the
+    class whose file holds it, or None for a class that is top-level for the JVM (#206, #207, #208).
+
+    The family of a class: the classes with the same top-level class by name. A candidate is a class of the family
+    that is not the class and is not below it by name. Q knows X when the InnerClasses attribute of Q lists X, or
+    when the simple name of X is in the package_refs of Q. decaf tests the lists first, and reads package_refs only
+    when no class lists X, so for most jars it reads none.
+    1. The class file cannot be read or does not parse: the longest $-prefix that is a class, as before. The same
+       when the path of the class file does not end with its class name, and the class file lists itself.
+    2. It does not list itself: top-level (#206), also when a class of the family lists it, and also when its path
+       does not end with its class name. Fernflower and JD nest such a class in the class that lists it, and
+       Vineflower nests a member class of this kind, but CFR and Procyon write it only from its own class file.
+    3. It lists itself with an outer class P, a member class: P when P is a candidate and knows it.
+    4. It lists itself with no outer class, an anonymous or local class: of the candidates that know it, the class
+       of its EnclosingMethod attribute, else the longest $-prefix, else the first.
+    Else it can be stale (its outer class was compiled again without it): top-level, when no other class of its
+    package names it, for example a Kotlin class of another family that creates it. A class file that a test needs
+    and that decaf cannot read or parse gives no proof: then the class keeps the longest $-prefix that is a class.
+    A stem with several entries (a multi-release class, a copy below a container root): one entry is enough for a
+    fact. families: the top-level classes by name to read; None reads each family with such a class. names: the
+    class entries of the source, when the caller has them. No step makes a list for each class, so the work stays
+    about linear in the size of the class files, also for a crafted family.
+    """
+    if names is None:
+        if source.is_dir():
+            names = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
+        else:
+            try:
+                with zipfile.ZipFile(source) as zf:
+                    names = [n for n in zf.namelist() if n.endswith(".class")]
+            except ZIP_ERRORS:
+                return {}
+    entries: dict[str, list[str]] = {}
+    for name in sorted(names):
+        entries.setdefault(_class_stem(name), []).append(name)
+    canon = {s: s for s in entries}  # one string for each stem: the facts keep no new string for each entry
+    tops = {s: outer_stem(s, entries) for s in entries}
+    wanted = {o for o in tops.values() if o is not None and (families is None or o in families)}
+    member = {s: tops[s] or s for s in entries if (tops[s] or s) in wanted}  # stem -> its family
+    selves: dict[str, tuple[str | None, str | None]] = {}  # stem -> (its outer class, its EnclosingMethod class)
+    alone: set[str] = set()  # the stems with an entry that does not list itself
+    listers: dict[str, set[str]] = {}  # stem -> the classes of its family that list it
+    for name, data in _read_classes(source, [n for s in member for n in entries[s]]):
+        found = check.class_links(data)
+        if found is None:
+            continue
+        stem, (own, links, enclosing) = canon[_class_stem(name)], found
+        # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
+        outer = next((o for i, o in links if i == own), False)
+        if outer is False:
+            alone.add(stem)
+        prefix = stem[: len(stem) - len(own)]  # the folder above the package root
+        if not stem.endswith(own) or prefix[-1:] not in ("", "/"):  # the path does not end with the class name
+            continue
+        if outer is not False:  # outer: None for no outer class, "" for an outer class that the source lacks
+            enclosed = canon.get(prefix + enclosing) if enclosing else None
+            selves.setdefault(stem, (outer and canon.get(prefix + outer, ""), enclosed))
+        for inner, _ in links:
+            q = canon.get(prefix + inner)
+            if q is not None and q != stem and member.get(q) == member[stem]:
+                listers.setdefault(q, set()).add(stem)
+
+    named_by: dict[tuple[str, str], set[str]] = {}  # (package, simple name) -> the classes that name it
+    read: set[str] = set()
+    broken: set[str] = set()  # a class file that names nothing does not parse: a class file names itself
+
+    def read_refs(stems: set[str]) -> None:
+        stems -= read
+        read.update(stems)
+        broken.update(stems)
+        for name, data in _read_classes(source, [n for s in sorted(stems) for n in entries[s]]):
+            stem = canon[_class_stem(name)]
+            for simple in check.package_refs(data):
+                broken.discard(stem)
+                named_by.setdefault((stem.rpartition("/")[0], simple), set()).add(stem)
+
+    def below(x: str, q: str) -> bool:
+        return q == x or q.startswith(x + "$")
+
+    def candidate(x: str, q: str) -> bool:
+        return member.get(q) == member[x] and not below(x, q)
+
+    def namers(x: str) -> set[str]:
+        return named_by.get(x.rpartition("/")[::2], set())
+
+    def other_broken(x: str, group: list[str]) -> bool:
+        """Has the sorted group of broken stems (of the family or of the package of x) one that is not x and not
+        below x?"""
+        lo, hi = bisect.bisect_left(group, x + "$"), bisect.bisect_left(group, x + "%")  # "%" follows "$"
+        return len(group) - (hi - lo) - (x in broken) > 0
+
+    def by_name(x: str) -> str:
+        cut = x.rfind("$")
+        while x[:cut] not in entries:
+            cut = x.rfind("$", 0, cut)
+        return x[:cut]
+
+    def choose(x: str, known: set[str], enclosing: str | None) -> str:
+        if enclosing in known:
+            return enclosing
+        cut = next((i for i in range(len(x) - 1, 0, -1) if x[i] == "$" and x[:i] in known), None)
+        return x[:cut] if cut is not None else min(known)
+
+    out: dict[str, str | None] = {}
+    tests: list[str] = []
+    for x in member:
+        if tops[x] is None:
+            continue
+        if x in alone:  # rule 2: one entry that does not list itself is enough (#206)
+            out[x] = None
+        elif x not in selves:  # rule 1
+            out[x] = by_name(x)
+        else:
+            outer, enclosing = selves[x]
+            known = {q for q in listers.get(x, ()) if not below(x, q) and outer in (None, q)}
+            if known:  # rule 3: the outer class lists it; rule 4: classes of the family list it
+                out[x] = outer or choose(x, known, enclosing)
+            else:
+                tests.append(x)
+    rule4 = {member[x] for x in tests if selves[x][0] is None}  # these families: each class, for its package_refs
+    read_refs({selves[x][0] for x in tests if selves[x][0] and candidate(x, selves[x][0])}
+              | {s for s in member if member[s] in rule4})
+    fails: dict[str, list[str]] = {}  # family -> its broken stems, sorted
+    for s in sorted(broken):
+        fails.setdefault(member.get(s, ""), []).append(s)
+    stale: list[str] = []
+    for x in tests:
+        outer, enclosing = selves[x]
+        if outer is None:  # rule 4: the classes of the family that name it
+            known = {q for q in namers(x) if candidate(x, q)}
+            if known:
+                out[x] = choose(x, known, enclosing)
+            elif other_broken(x, fails.get(member[x], [])):  # no proof that it is stale
+                out[x] = by_name(x)
+            else:
+                stale.append(x)
+        elif outer and candidate(x, outer):  # rule 3: the outer class names it
+            out[x] = outer if outer in namers(x) else by_name(x) if outer in broken else None
+            if out[x] is None:
+                stale.append(x)
+        else:  # its outer class is no candidate
+            stale.append(x)
+    if stale:  # a class of the package, also of another family, can name it (#207)
+        packages = {x.rpartition("/")[0] for x in stale}
+        read_refs({s for s in entries if s.rpartition("/")[0] in packages})
+        cut: dict[str, list[str]] = {}  # package -> its broken stems, sorted
+        for s in sorted(broken):
+            cut.setdefault(s.rpartition("/")[0], []).append(s)
+        for x in stale:
+            named = any(not below(x, q) for q in namers(x))
+            out[x] = by_name(x) if named or other_broken(x, cut.get(x.rpartition("/")[0], [])) else None
+    # a cycle of parents comes from crafted class files, or from two anonymous classes of an old javac (no
+    # EnclosingMethod attribute) that list each other: _keys_above ends it
+    return out
+
+
 def _read_classes(source: Path, names: Collection[str]) -> Iterator[tuple[str, bytes]]:
     """(name, bytes) of some class entries of a source, with one open of an archive.
 
@@ -896,7 +1055,7 @@ class _Held:
     nests: dict[str, set[str]] = field(default_factory=dict)  # outer class -> its spares: a chosen file nests them (#159)
     tops: dict[str, str] = field(default_factory=dict)  # key -> the key of its outer class, a cache for _apply_hold
     names: dict[str, str] | None = None  # key -> its class entry in the source, read once (#159)
-    unnested: dict[str, bool] = field(default_factory=dict)  # key -> no file of another class nests it (#159)
+    parents: dict[str, dict[str, str | None]] = field(default_factory=dict)  # family -> _read_parents of its keys
 
     def stems(self, settled: bool = True) -> set[str]:
         """The class stems of the held files: a copy's key loses its container root (#107).
@@ -1019,38 +1178,73 @@ def _twice(own: list[Path], others: list[Path], ctx: Ctx) -> Callable[[str], boo
     return twice
 
 
-def _units(keys: Collection[str]) -> dict[str, list[str]]:
-    """Each key -> the keys of inner classes one level down: no other key of keys is between them (#159)."""
+def _parent_key(key: str, parents: Mapping[str, str | None]) -> str | None:
+    """The key above a key in the tree of a family plan: its parent (_read_parents), else its name without the last
+    $ part. A class that is top-level for the JVM stays below its outer class by name, so the plan reaches it (#208).
+    None: the key has no $ part."""
+    parent = parents.get(key)
+    if parent is not None:
+        return parent
+    cut = key.rfind("$")
+    return key[:cut] if cut > 0 else None
+
+
+def _keys_above(key: str, parents: Mapping[str, str | None], memo: dict[str, bool]) -> Iterator[str]:
+    """The keys above a key in the tree of a family plan, nearest first: _parent_key again and again. The parents can
+    give a cycle, also through a key below a second root: crafted class files, or two anonymous classes of an old
+    javac (no EnclosingMethod attribute) that list each other. A key whose walk meets a repeat takes only the
+    $-prefixes of its name, from long to short. Each step of such a chain is shorter, and no clean chain reaches such
+    a key, so no walk loops. memo: key -> its walk meets a repeat, for the walks of one plan."""
+    if key not in memo:
+        path: list[str] = []
+        seen: set[str] = set()
+        k: str | None = key
+        while k is not None and k not in memo and k not in seen:
+            seen.add(k)
+            path.append(k)
+            k = _parent_key(k, parents)
+        memo.update(dict.fromkeys(path, k is not None and (k in seen or memo[k])))
+    if memo[key]:
+        yield from (key[:i] for i in range(len(key) - 1, 0, -1) if key[i] == "$")
+        return
+    k = _parent_key(key, parents)
+    while k is not None:
+        yield k
+        k = _parent_key(k, parents)
+
+
+def _units(
+    keys: Collection[str], parents: Mapping[str, str | None], memo: dict[str, bool] | None = None,
+) -> dict[str, list[str]]:
+    """Each key -> the keys of inner classes one level down: no other key of keys is between them (#159, #208)."""
+    memo = {} if memo is None else memo
     out: dict[str, list[str]] = {}
     for k in keys:
-        cut = k.rfind("$")
-        while cut > 0 and k[:cut] not in keys:
-            cut = k.rfind("$", 0, cut)
-        if cut > 0:
-            out.setdefault(k[:cut], []).append(k)
+        up = next((a for a in _keys_above(k, parents, memo) if a in keys), None)
+        if up is not None:
+            out.setdefault(up, []).append(k)
     return out
 
 
-def _between(key: str, family: str) -> list[str]:
-    """The keys between a key and the key of its outer class, by name: p/A$1 for p/A$1$1 in the family p/A."""
-    return [key[:i] for i in range(len(family) + 1, len(key)) if key[i] == "$"]
-
-
-def _read_unnested(source: Path, keys: set[str], held: _Held) -> None:
-    """Note for each key whether its class file lists itself in its InnerClasses attribute. A class that does not
-    is a top-level class for the JVM, for example the module class Foo$ of a Scala object, so decaf takes no file
-    of another class to hold it (#159). CFR and Procyon get its class file as an argument of its own, so they write
-    a file of it (#206)."""
+def _read_parents(source: Path, families: set[str], held: _Held, top: Callable[[str], str]) -> None:
+    """Note the parent of each class of the families in the source (_class_parents), with all classes, also the
+    classes without a file: the key of the class whose file holds it, or None for a class that is top-level for the
+    JVM. For example the module class Foo$ of a Scala object, or a stale class (#159, #206, #207, #213). No file of
+    another class holds a top-level class. A key of a copy keeps its container root, and so does the key of its
+    parent (#107). top: the family of a key."""
     if held.names is None:
         held.names = {}
         for names in _family_entries(source).values():
             for name in names:
                 key = _held_key(name)
                 held.names.setdefault(name[: -len(".class")] if key in (held.copies or ()) else key, name)
-    entries = {held.names[k]: k for k in keys if k in held.names}
-    held.unnested.update(dict.fromkeys(keys, False))  # no class file, or no parse: as for any inner class
-    for name, data in _read_classes(source, entries):
-        held.unnested[entries[name]] = check.lists_itself(data) is False
+    parents = _class_parents(source, {_class_stem(family + ".class") for family in families})
+    for family in families:
+        held.parents[family] = {}
+    for key, name in held.names.items():
+        if top(key) in families and (stem := _class_stem(name)) in parents:
+            parent = parents[stem]
+            held.parents[top(key)][key] = None if parent is None else key[: len(key) - len(stem)] + parent
 
 
 def _is_flagged(f: _HeldFile) -> bool:
@@ -1088,13 +1282,14 @@ class _FamilyPlan:
 
 
 def _plan_family(
-    family: str, olds: dict[str, _HeldFile], new: dict[str, _HeldFile], written: set[str], unnested: set[str],
-    replace: bool = True,
+    family: str, olds: dict[str, _HeldFile], new: dict[str, _HeldFile], written: set[str],
+    parents: Mapping[str, str | None], replace: bool = True,
 ) -> _FamilyPlan:
     """Choose the files of a family that waits, from its held files (olds) and the files of this output (#159).
 
-    A file holds its class and each inner class that its engine did not write apart; an empty file counts as
-    written apart. No file of another class holds a class of unnested: that class is top-level for the JVM. From
+    A file holds its class and each inner class below it that its engine did not write apart; an empty file counts
+    as written apart. parents: the parent of each class (_read_parents), so a file of a class holds the classes that
+    its engine nests in it (#208). No file of another class holds a class that is top-level for the JVM. From
     the outer class down, the file of the earlier engine holds a class, unless the file of this output and the
     files that it needs replace the files that go, as for one file (_replaces): a class that no file holds is a
     loss, as a stub is. With replace=False, nothing replaces a held file. A class without a held file takes the
@@ -1104,12 +1299,14 @@ def _plan_family(
     memo: dict[str, dict[str, _HeldFile]] = {}
     lost: dict[str, frozenset[str]] = {}  # key -> the classes at or below key that no file of memo[key] holds
     units: dict[int, dict[str, list[str]]] = {}  # id of a peers set -> its units, made once
+    unnested = {k for k, parent in parents.items() if parent is None}
+    walks: dict[str, bool] = {}  # the memo of _keys_above
 
     def holding(key: str, f: _HeldFile) -> tuple[dict[str, _HeldFile], frozenset[str]]:
         """f holds key and the inner classes that it nests; the best files hold the inner classes of its peers.
         Also the classes that no file holds."""
         if id(f.peers) not in units:
-            units[id(f.peers)] = _units((f.peers | unnested) - written)
+            units[id(f.peers)] = _units((f.peers | unnested) - written, parents, walks)
         out, gaps = {key: f}, frozenset()
         for k in units[id(f.peers)].get(key, ()):
             out |= best(k)
@@ -1123,7 +1320,7 @@ def _plan_family(
             if old is None and now is None:  # no file of this class: its inner classes take their own files
                 out: dict[str, _HeldFile] = {}
                 gaps = frozenset({key})
-                for k in _units(olds.keys() | new.keys() | {key}).get(key, ()):
+                for k in _units((olds.keys() | new.keys() | unnested | {key}) - written, parents, walks).get(key, ()):
                     out |= best(k)
                     gaps |= lost[k]
             elif old is None or now is None:
@@ -1143,11 +1340,7 @@ def _plan_family(
 
     def holder(k: str) -> str | None:
         """The chosen key whose file holds the class k: the nearest chosen key at k or above it."""
-        while k not in chosen:
-            if "$" not in k:
-                return None
-            k = k.rsplit("$", 1)[0]
-        return k
+        return next((a for a in (k, *_keys_above(k, parents, walks)) if a in chosen), None)
 
     drop: set[str] = set()
     spares: set[str] = set()
@@ -1199,14 +1392,13 @@ def _apply_hold(
     family too, from any output: the next engine can nest the inner classes in its file of the
     outer class, so no file of an inner class goes out alone (#150). Then the outer class gets a
     retry. In a family that waits, each class has one file: _plan_family chooses it, as for one
-    file, from the held files and the files of the output (#159). A class whose class file does not
-    list itself in its InnerClasses attribute is top-level for the JVM, so no file of another class
-    holds it. The held files that a chosen file nests wait as spares, unless a file of the output
-    replaced the file of their class or of an outer class. The family is done when the outer class
-    has a file, no chosen file has a stub or a flag, and no unchecked chosen file nests a flagged
-    spare without a stub. Then the chosen files go out, the spares go, and the outer class gets no
-    more retries. Only a held file of an inner class whose family does not wait still follows the
-    rule of one file.
+    file, from the held files and the files of the output (#159). A class that is top-level for the
+    JVM (_read_parents) has no file of another class that holds it. The held files that a chosen
+    file nests wait as spares, unless a file of the output replaced the file of their class or of
+    an outer class. The family is done when the outer class has a file, no chosen file has a stub
+    or a flag, and no unchecked chosen file nests a flagged spare without a stub. Then the chosen
+    files go out, the spares go, and the outer class gets no more retries. Only a held file of an
+    inner class whose family does not wait still follows the rule of one file.
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
@@ -1260,23 +1452,16 @@ def _apply_hold(
         for k, f in held.files.items():
             if top(k) in olds:
                 olds[top(k)][k] = f
-        unknown = {  # also the classes between: a class without a file can be top-level for the JVM too
-            a for family in planned for k in olds[family].keys() | members[family] if top(k) != k
-            for a in (k, *_between(k, family))
-        }
-        if unknown - held.unnested.keys():
-            _read_unnested(source, unknown - held.unnested.keys(), held)
+        if planned - held.parents.keys():  # all classes of the family, also the classes without a file (#213)
+            _read_parents(source, planned - held.parents.keys(), held, top)
     plans: dict[str, _FamilyPlan] = {}
     for family in planned:
         new: dict[str, _HeldFile] = {}
         for rel, key, stub, r in by_family[family]:  # a file of a class that an earlier output wrote goes (#107)
             if key not in held.written:
                 new.setdefault(key, _HeldFile(engine, rel, stub, r, peers[family]))
-        unnested = {
-            a for k in olds[family].keys() | new.keys() for a in (k, *_between(k, family)) if held.unnested.get(a)
-        }
         plans[family] = plan = _plan_family(  # after Ctrl-C the check did not run or end, so replace=False (#112)
-            family, olds[family], new, held.written, unnested, replace=not engines.PROCESSES.closed,
+            family, olds[family], new, held.written, held.parents[family], replace=not engines.PROCESSES.closed,
         )
         for k in plan.drop | (plan.spares if plan.done else set()):
             (held.root / held.files.pop(k).path).unlink(missing_ok=True)
