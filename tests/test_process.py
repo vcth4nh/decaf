@@ -1001,16 +1001,59 @@ def test_class_parents_read_no_package_refs_when_each_outer_class_lists_its_inne
     assert _parents(make_jar, classes) == {"p/A$B": "p/A", "p/A$1": "p/A"}
 
 
-def test_class_parents_of_crafted_class_files_have_no_cycle(make_jar):
-    """A$B names A$C as its outer class, and A$C names A$B: the name rule breaks the cycle, so the tree of a family
-    plan has an end (#208)."""
-    crafted = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A$C", refs=("p/A$C",)),
-               "p/A$C": _inner("p/A$C", "p/A$B", refs=("p/A$B",))}
-    assert _parents(make_jar, crafted) == {"p/A$B": "p/A", "p/A$C": "p/A$B"}
-    twice = {"p/Foo": _lister("p/Foo", refs=("p/Foo$",)),  # one entry lists itself two times, the other not
+def test_class_parents_of_a_class_whose_one_entry_lists_itself_two_times(make_jar):
+    """One entry of Foo$ lists itself two times, and the other entry does not list itself: Foo$ is top-level (#206)."""
+    twice = {"p/Foo": _lister("p/Foo", refs=("p/Foo$",)),
              "p/Foo$": _inner("p/Foo$", "p/Foo", lists=(("p/Foo$", "p/Foo"),)),
              "META-INF/versions/9/p/Foo$": _lister("p/Foo$")}
     assert _parents(make_jar, twice) == {"p/Foo$": None}
+
+
+def test_keys_above_a_key_end_at_a_cycle_of_parents():
+    """Crafted class files can give a cycle of parents. A key whose walk meets a repeat takes only the $-prefixes
+    of its name, so no walk loops, and the tree of a plan has no cycle (#208)."""
+    from decaf.pipeline import _keys_above, _units
+
+    cycle = {"p/A$B": "p/A$C", "p/A$C": "p/A$B", "p/A$D$E": "p/A$B", "p/A$F": "p/A"}
+    assert list(_keys_above("p/A$B", cycle, {})) == ["p/A"]  # a cycle of two keys
+    assert list(_keys_above("p/A$C", cycle, {})) == ["p/A"]
+    assert list(_keys_above("p/A$D$E", cycle, {})) == ["p/A$D", "p/A"]  # its chain leads into the cycle
+    assert list(_keys_above("p/A$F", cycle, {})) == ["p/A"]
+    assert list(_keys_above("p/A$G$H", {"p/A$G$H": "p/A$F"} | cycle, {})) == ["p/A$F", "p/A"]  # a clean chain
+    units = _units({"p/A", "p/A$B", "p/A$C", "p/A$D$E", "p/A$F"}, cycle)
+    assert {k: sorted(v) for k, v in units.items()} == {"p/A": ["p/A$B", "p/A$C", "p/A$D$E", "p/A$F"]}
+
+
+def _linked_family() -> dict[str, bytes]:
+    """Crafted links: the parents of the stems have no cycle, A$Y$1 -> A -> nothing, A$X -> A$Y$1, A$Y and A$Z ->
+    A$X. Without a copy of A$Y$1 below a second root, the key of A$X there takes the name rule: A$Y, whose parent
+    is A$X."""
+    a = "p/A"
+    return {
+        a: _lister(a, lists=((f"{a}$Y$1", None),)),
+        f"{a}$Y$1": _inner(f"{a}$Y$1", None, enclosing=a, lists=((f"{a}$X", None),)),
+        f"{a}$X": _inner(f"{a}$X", None, enclosing=f"{a}$Y$1", lists=((f"{a}$Y", None), (f"{a}$Z", None))),
+        f"{a}$Y": _inner(f"{a}$Y", None, enclosing=f"{a}$X"),
+        f"{a}$Z": _inner(f"{a}$Z", None, enclosing=f"{a}$X"),
+    }
+
+
+@pytest.mark.parametrize("root", ["META-INF/versions/9/", "WEB-INF/classes/"])
+def test_a_family_plan_ends_when_the_keys_below_a_second_root_give_a_cycle(make_jar, tmp_path: Path, root):
+    """Before, the walks of the plan did not end (#208). The result is the result of main."""
+    family = _linked_family()
+    classes = {f"{n}.class": d for n, d in family.items()}
+    classes |= {f"{root}{n}.class": d for n, d in family.items() if n != "p/A$Y$1"}
+    jar = make_jar("app.jar", classes)
+    runner = writing_runner({"vineflower": {
+        "p/A.java": "class A { /* base */ }", f"{root}p/A.java": "class A {} // FLAG", f"{root}p/A$Z.java": "class A$Z {}",
+    }})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*.java"))
+    assert written == [f"{root}p/A$Z.java", f"{root}p/A.java", "p/A.java"]
+    assert [f["path"] for f in report.flagged] == [f"{root}p/A.java"]
 
 
 def test_read_parents_keeps_the_container_root_of_a_copy(make_jar):

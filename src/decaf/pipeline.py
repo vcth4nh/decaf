@@ -857,18 +857,7 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
         for x in stale:
             proof = all(refs[q] and x.rpartition("/")[2] not in refs[q] for q in others[x])
             out[x] = None if proof else by_name(x)
-    for family, ms in members.items():  # crafted class files can give a cycle of parents: the name rule breaks it
-        for x in ms:
-            path, q = [x], out.get(x) or by_name(x) if tops[x] is not None else None
-            while q is not None:
-                if q in path:
-                    cut = next(c for c in path[path.index(q):] if out.get(c) not in (None, by_name(c)))
-                    out[cut] = by_name(cut)
-                    path, q = [x], out.get(x) or by_name(x)
-                    continue
-                path.append(q)
-                q = out.get(q) or by_name(q) if tops[q] is not None else None
-    return out
+    return out  # crafted class files can give a cycle of parents: _keys_above ends it
 
 
 def _read_classes(source: Path, names: Collection[str]) -> Iterator[tuple[str, bytes]]:
@@ -1157,13 +1146,37 @@ def _parent_key(key: str, parents: Mapping[str, str | None]) -> str | None:
     return key[:cut] if cut > 0 else None
 
 
-def _units(keys: Collection[str], parents: Mapping[str, str | None]) -> dict[str, list[str]]:
+def _keys_above(key: str, parents: Mapping[str, str | None], memo: dict[str, bool]) -> Iterator[str]:
+    """The keys above a key in the tree of a family plan, nearest first: _parent_key again and again. Crafted class
+    files can give a cycle, also through a key below a second root: a key whose walk meets a repeat takes only the
+    $-prefixes of its name, from long to short. Each step of such a chain is shorter, and no clean chain reaches such
+    a key, so no walk loops. memo: key -> its walk meets a repeat, for the walks of one plan."""
+    if key not in memo:
+        path: list[str] = []
+        seen: set[str] = set()
+        k: str | None = key
+        while k is not None and k not in memo and k not in seen:
+            seen.add(k)
+            path.append(k)
+            k = _parent_key(k, parents)
+        memo.update(dict.fromkeys(path, k is not None and (k in seen or memo[k])))
+    if memo[key]:
+        yield from (key[:i] for i in range(len(key) - 1, 0, -1) if key[i] == "$")
+        return
+    k = _parent_key(key, parents)
+    while k is not None:
+        yield k
+        k = _parent_key(k, parents)
+
+
+def _units(
+    keys: Collection[str], parents: Mapping[str, str | None], memo: dict[str, bool] | None = None,
+) -> dict[str, list[str]]:
     """Each key -> the keys of inner classes one level down: no other key of keys is between them (#159, #208)."""
+    memo = {} if memo is None else memo
     out: dict[str, list[str]] = {}
     for k in keys:
-        up = _parent_key(k, parents)
-        while up is not None and up not in keys:
-            up = _parent_key(up, parents)
+        up = next((a for a in _keys_above(k, parents, memo) if a in keys), None)
         if up is not None:
             out.setdefault(up, []).append(k)
     return out
@@ -1243,12 +1256,13 @@ def _plan_family(
     lost: dict[str, frozenset[str]] = {}  # key -> the classes at or below key that no file of memo[key] holds
     units: dict[int, dict[str, list[str]]] = {}  # id of a peers set -> its units, made once
     unnested = {k for k, parent in parents.items() if parent is None}
+    walks: dict[str, bool] = {}  # the memo of _keys_above
 
     def holding(key: str, f: _HeldFile) -> tuple[dict[str, _HeldFile], frozenset[str]]:
         """f holds key and the inner classes that it nests; the best files hold the inner classes of its peers.
         Also the classes that no file holds."""
         if id(f.peers) not in units:
-            units[id(f.peers)] = _units((f.peers | unnested) - written, parents)
+            units[id(f.peers)] = _units((f.peers | unnested) - written, parents, walks)
         out, gaps = {key: f}, frozenset()
         for k in units[id(f.peers)].get(key, ()):
             out |= best(k)
@@ -1262,7 +1276,7 @@ def _plan_family(
             if old is None and now is None:  # no file of this class: its inner classes take their own files
                 out: dict[str, _HeldFile] = {}
                 gaps = frozenset({key})
-                for k in _units(olds.keys() | new.keys() | {key}, parents).get(key, ()):
+                for k in _units(olds.keys() | new.keys() | {key}, parents, walks).get(key, ()):
                     out |= best(k)
                     gaps |= lost[k]
             elif old is None or now is None:
@@ -1282,9 +1296,7 @@ def _plan_family(
 
     def holder(k: str) -> str | None:
         """The chosen key whose file holds the class k: the nearest chosen key at k or above it."""
-        while k is not None and k not in chosen:
-            k = _parent_key(k, parents)
-        return k
+        return next((a for a in (k, *_keys_above(k, parents, walks)) if a in chosen), None)
 
     drop: set[str] = set()
     spares: set[str] = set()
