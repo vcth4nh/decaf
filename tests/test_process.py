@@ -1482,25 +1482,44 @@ def test_sources_gap_takes_no_package_from_a_cut_head(make_jar, tmp_path: Path):
     assert _sources_gap(jar, expected_class_stems(jar), tree) == {"Buffer", "okio/Buffer"}
 
 
-@pytest.mark.parametrize("sources, lambda_file, gap", [
-    ({"com/x/K.kt": "class K"}, None, set()),  # the file of the outer class K holds the lambda
-    ({}, None, {"com/x/K", "com/x/K$$Lambda$0"}),  # the outer class is a gap: the lambda too
-    ({"com/x/K.kt": "class K"}, "Other.kt", {"com/x/K$$Lambda$0"}),  # its attribute names an absent file: a gap
-    ({"com/x/K.kt": "class K", "com/x/Other.kt": "fun o() {}"}, "Other.kt", set()),
+_K, _KL = "com/x/K", "com/x/K$$Lambda$0"
+
+
+def _k_classes(class_file, lambda_file: str | None, namer: str | None) -> dict[str, bytes]:
+    """K and its lambda K$$Lambda$0, a class that is top-level for the JVM. namer: the class whose constant pool has
+    a Class entry of the lambda: K, the inner class K$1, or the class K$$Lambda$0$1 below the lambda."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    classes = {
+        f"{_K}.class": _class_with(_K, interfaces=(_KL,)) if namer == "K" else _class_with(_K),
+        f"{_KL}.class": class_file(_KL, lambda_file),
+    }
+    if namer == "K$1":
+        classes[f"{_K}$1.class"] = _class_with_inner_classes(f"{_K}$1", ((f"{_K}$1", _K), (_KL, None)))
+    if namer == "K$$Lambda$0$1":
+        classes[f"{_KL}$1.class"] = _class_with_inner_classes(f"{_KL}$1", ((f"{_KL}$1", _KL),))
+    return classes
+
+
+@pytest.mark.parametrize("sources, lambda_file, namer, gap", [
+    ({"com/x/K.kt": "class K"}, None, "K", set()),  # the file of the outer class K holds the lambda
+    ({"com/x/K.kt": "class K"}, None, "K$1", set()),  # an inner class of K names it
+    ({"com/x/K.kt": "class K"}, None, None, {_KL}),  # no class of the family of K names it, for example generated code
+    ({"com/x/K.kt": "class K"}, None, "K$$Lambda$0$1", {_KL}),  # a class below the lambda is no proof
+    ({}, None, "K", {_K, _KL}),  # the outer class is a gap: the lambda too
+    ({"com/x/K.kt": "class K"}, "Other.kt", "K", {_KL}),  # its attribute names an absent file: a gap
+    ({"com/x/K.kt": "class K", "com/x/Other.kt": "fun o() {}"}, "Other.kt", None, set()),
 ])
 def test_sources_gap_covers_a_class_without_a_source_file_attribute_by_its_outer_class(
-    make_jar, class_file, tmp_path: Path, sources, lambda_file, gap,
+    make_jar, class_file, tmp_path: Path, sources, lambda_file, namer, gap,
 ):
     """The class K$$Lambda$0 is top-level for the JVM, so it is expected (#206). Its class file names no source file,
-    so the file of its outer class by name covers it, when the sources have that file. A class with a SourceFile
-    attribute keeps the rules of #180."""
-    jar = make_jar("lib.jar", {
-        "com/x/K.class": class_file("com/x/K", "K.kt"),
-        "com/x/K$$Lambda$0.class": class_file("com/x/K$$Lambda$0", lambda_file),
-    })
+    so the file of its outer class by name covers it, when the sources have that file and a class of the family of
+    K names the lambda. A class with a SourceFile attribute keeps the rules of #180."""
+    jar = make_jar("lib.jar", _k_classes(class_file, lambda_file, namer))
     tree = _files(tmp_path / "tree", sources)
     expected = expected_class_stems(jar)
-    assert expected == {"com/x/K", "com/x/K$$Lambda$0"}
+    assert expected == {_K, _KL}
     assert _sources_gap(jar, expected, tree) == gap
 
 

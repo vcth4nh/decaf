@@ -591,9 +591,8 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
     try:
         with zipfile.ZipFile(binary) as zf:
             entry: dict[str, str] = {}  # stem -> the entry to read: the base entry, else a META-INF/versions/N entry
-            for name in zf.namelist():
-                if not name.endswith(".class"):
-                    continue
+            names = [n for n in zf.namelist() if n.endswith(".class")]
+            for name in names:
                 stem = _class_stem(name)
                 if stem in rest and (stem not in entry or not _strip_container(name).startswith("META-INF/versions/")):
                     entry[stem] = name
@@ -611,12 +610,34 @@ def _sources_gap(binary: Path, expected: set[str], tree: Path) -> set[str]:
                     covered.add(stem)
                 elif source is None and data is not None and outer_stem(stem, expected) is not None:
                     unnamed.add(stem)
+            gap = rest - covered
+            # A class that is top-level for the JVM, such as a Kotlin X$$Lambda$N, often names no source file. Its
+            # source is then in the file of its outer class by name, when a class of that family names it. Generated
+            # code that no class names, such as undertow's HttpRequestParser$$generated, stays a gap (#206).
+            outer = {s: outer_stem(s, expected) for s in unnamed}
+            wanted = {o for o in outer.values() if o not in gap}
+            refs: dict[str, dict[str, set[str]]] = {}  # family -> stem of a class of it -> the classes that it names
+            for name in names:
+                stem = _class_stem(name)
+                family = outer_stem(stem, expected) or stem
+                if family not in wanted:
+                    continue
+                try:
+                    with zf.open(name) as f:
+                        data = _bounded(f)
+                except ZIP_ERRORS:
+                    continue
+                if data is not None:
+                    refs.setdefault(family, {}).setdefault(stem, set()).update(check.package_refs(data))
     except ZIP_ERRORS:
         return rest
-    gap = rest - covered
-    # A class that is top-level for the JVM, such as a Kotlin X$$Lambda$N, often names no source file. Its source is
-    # then in the file of its outer class by name, so it is a gap only when that class is one (#206).
-    return {s for s in gap if s not in unnamed or outer_stem(s, expected) in gap}
+    named = {  # the class itself and the classes below it are no proof
+        s for s, o in outer.items() if o in wanted and any(
+            s.rpartition("/")[2] in found
+            for m, found in refs.get(o, {}).items() if m != s and not m.startswith(s + "$")
+        )
+    }
+    return gap - named
 
 
 def _strip_container(rel: str) -> str:
