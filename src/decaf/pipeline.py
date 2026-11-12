@@ -715,7 +715,7 @@ def _refused_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:
     or whose class name decaf cannot prove to stay inside. A disk error raises."""
     if not stays_inside(info.orig_filename):  # the name before zipfile cuts it at a NUL
         return True
-    if info.is_dir() or not info.filename.endswith(".class"):
+    if info.is_dir() or not info.filename.lower().endswith(".class"):  # a reader can ignore the case
         return False
     try:
         with zf.open(info) as f:  # by its ZipInfo: an engine can read each entry of a name

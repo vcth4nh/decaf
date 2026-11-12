@@ -5270,3 +5270,10 @@ def test_the_row_line_shows_the_refused_count(tmp_path: Path):
                        refused=2)
     assert r.partial and "1 missing[/], [yellow]2 refused" in _status_line(r)
     assert ArtifactReport(rel="a.jar", kind="archive", outcome="ok", refused=1).partial
+
+
+def test_refused_reads_a_class_entry_whose_suffix_has_other_case(tmp_path: Path, class_file):
+    from decaf.pipeline import _refused
+
+    jar = _zip(tmp_path / "a.jar", [("p/A.CLASS", class_file("../A")), ("p/B.Class", class_file("p/B"))])
+    assert [i.filename for i in _refused(jar)] == ["p/A.CLASS"]
