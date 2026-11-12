@@ -829,7 +829,7 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
                     if out is not None:
                         _put(out, entry, b"")
                     continue
-                is_class = _is_class_entry(raw) or _is_class_entry(info.filename)
+                is_class = _is_class_entry(raw) or _is_class_entry(info.filename) or _is_class_entry(name)
                 if out is None and not is_class:
                     continue
                 data = _read_entry(zf, info, None if is_class else part)

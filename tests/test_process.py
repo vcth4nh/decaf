@@ -5490,6 +5490,18 @@ def test_the_copy_keeps_the_name_bytes_of_a_utf8_name_without_the_utf8_flag(tmp_
 
 
 @pytest.mark.class_names
+def test_an_entry_is_a_class_entry_by_its_name_in_the_copy(tmp_path: Path, class_file):
+    """With no UTF-8 flag, zipfile reads the bytes of the long s as cp437 text; the copy writes them as UTF-8, and
+    p/A.clas + long s ends with .CLASS under upper()."""
+    raw = b"p/A.clas\xc5\xbf"
+    jar = _raw_zip(tmp_path / "a.jar", [(raw, class_file("../A")), (b"p/B.class", class_file("p/B"))])
+    with zipfile.ZipFile(jar) as zf:
+        assert zf.namelist()[0] == raw.decode("cp437") and not zf.namelist()[0].upper().endswith(".CLASS")
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [raw.decode("cp437")] and _entries(copy) == [("p/B.class", class_file("p/B"))]
+
+
+@pytest.mark.class_names
 def test_a_retry_tree_with_no_class_file_left_goes_at_once(tmp_path: Path, class_file):
     from decaf.pipeline import _extract_failed_classes
 
