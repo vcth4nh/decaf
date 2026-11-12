@@ -729,15 +729,19 @@ def _refused(source: Path) -> list[str]:
 
 
 def _copy_name(info: zipfile.ZipInfo) -> str:
-    """The name of an entry in a copy, with the bytes of the input where zipfile can write them: a name with no UTF-8
-    flag that zipfile read as cp437, and whose bytes are valid UTF-8, keeps its bytes (zipfile writes it as UTF-8)."""
+    """The name of an entry in a copy, as zipfile writes it: the tests take this name, because the engines read it.
+
+    It keeps the bytes of the input where zipfile can write them: a name with no UTF-8 flag that zipfile read as
+    cp437, and whose bytes are valid UTF-8, keeps its bytes (zipfile writes it as UTF-8). Then zipfile.ZipInfo
+    changes each os.sep to / (on Windows, each backslash) and cuts the name at a NUL.
+    """
     name = info.orig_filename
-    if info.flag_bits & 0x800 or name.isascii():
-        return name
-    try:
-        return name.encode("cp437").decode("utf-8")
-    except UnicodeError:
-        return name  # other bytes: zipfile writes the cp437 text as UTF-8
+    if not (info.flag_bits & 0x800 or name.isascii()):
+        try:
+            name = name.encode("cp437").decode("utf-8")
+        except UnicodeError:
+            pass  # other bytes: zipfile writes the cp437 text as UTF-8
+    return zipfile.ZipInfo(name).filename
 
 
 def _names_stay(info: zipfile.ZipInfo) -> bool:
@@ -803,7 +807,7 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
     decides, as in Java: an earlier entry is not read. The entries keep the order of the first entry of each name.
     An entry is refused when its raw name, its zipfile name, or its name in the copy does not stay inside, or when it
     is a class entry by one of its names and decaf cannot read it or its data fails _safe_class. A folder entry (by
-    its raw name) goes in as a folder. Another entry that decaf cannot read stays out with no count, and a large one
+    its raw name or its name in the copy) goes in as a folder, with no data. Another entry that decaf cannot read stays out with no count, and a large one
     goes through a part file, so a read error leaves no part of it in the copy. The copy is stored, with no extra
     field: each of its entries has one name.
     """
@@ -825,7 +829,7 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
                     continue
                 entry = zipfile.ZipInfo(name, info.date_time)
                 entry.external_attr, entry.create_system = info.external_attr, info.create_system
-                if raw.endswith("/"):
+                if raw.endswith("/") or name.endswith("/"):  # a folder in the input or in the copy: no data
                     if out is not None:
                         _put(out, entry, b"")
                     continue

@@ -5049,6 +5049,33 @@ def test_two_raw_names_with_the_same_bytes_give_the_copy_one_entry(tmp_path: Pat
 
 
 @pytest.mark.class_names
+def test_the_copy_tests_the_name_that_zipfile_writes_with_the_separator_of_windows(tmp_path: Path, class_file,
+                                                                                   monkeypatch):
+    """zipfile changes each os.sep of a name to /: on Windows, two raw names give one name in the copy, and a raw
+    name that ends with a backslash gives a folder name. The patch of os.sep covers only the copy."""
+    import os
+
+    from decaf.pipeline import _engine_copy
+
+    second = class_file("p/A") + b"2"
+    jar = _raw_zip(tmp_path / "a.jar", [
+        (b"p/A.class", class_file("p/A")),
+        (b"p\\A.class", second),  # the same name in the copy on Windows: the last entry decides
+        (b"p/F.class\\", class_file("../F")),  # a folder name in the copy on Windows: no data
+        (b"p/G.class/", class_file("../G")),  # a folder by its raw name
+    ])
+    folder = tmp_path / "copy"
+    folder.mkdir()
+    with monkeypatch.context() as m, warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "Duplicate name" warning of zipfile
+        m.setattr(os, "sep", "\\")
+        copy, refused = _engine_copy(jar, folder)
+        tested = _engine_copy(jar, None)
+    assert refused == [] and tested == (None, [])
+    assert _entries(copy) == [("p/A.class", second), ("p/F.class/", b""), ("p/G.class/", b"")]
+
+
+@pytest.mark.class_names
 def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, class_file, monkeypatch):
     import decaf.pipeline as pipeline
 
