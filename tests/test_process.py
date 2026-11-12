@@ -3856,6 +3856,56 @@ def test_the_temp_jar_leaves_out_an_entry_that_leaves_its_root(tmp_path: Path, c
     assert [sorted(c["data"]) for c in runner.calls] == [["org/x/R.class"], ["com/x/A.class"]]
 
 
+def _jar_entries_runner():
+    """Fake CFR that records the entry names and the manifest of each jar that it gets."""
+    seen: list[tuple[list[str], bytes | None]] = []
+
+    def _run(spec, jar_path, target, dest, timeout, **kw):
+        with zipfile.ZipFile(target) as zf:
+            names = zf.namelist()
+            seen.append((names, zf.read("META-INF/MANIFEST.MF") if "META-INF/MANIFEST.MF" in names else None))
+        return EngineResult(spec.name, 0, False, 0, "")
+
+    _run.seen = seen
+    return _run
+
+
+def test_each_temp_jar_starts_with_the_manifest_of_the_archive(tmp_path: Path, class_file):
+    """Without the Multi-Release line, CFR wrote the body of META-INF/versions/9/p/A.class as p/A.java."""
+    from decaf.pipeline import _run_engine
+
+    manifest = b"Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"
+    jar = _zip(tmp_path / "boot.jar", [
+        ("p/A.class", class_file("p/A")),
+        ("META-INF/MANIFEST.MF", manifest),
+        ("META-INF/versions/9/p/A.class", class_file("p/A")),
+        ("BOOT-INF/classes/com/x/A.class", class_file("com/x/A")),
+    ])
+    runner = _jar_entries_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), jar, tmp_path / "dest", 100, java="java")
+    assert runner.seen == [
+        (["META-INF/MANIFEST.MF", "p/A.class", "META-INF/versions/9/p/A.class"], manifest),
+        (["META-INF/MANIFEST.MF", "com/x/A.class"], manifest),
+    ]
+    runner.seen.clear()
+    war = _zip(tmp_path / "app.war", [("WEB-INF/classes/com/x/A.class", class_file("com/x/A"))])
+    _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "dest2", 100, java="java")
+    assert runner.seen == [(["com/x/A.class"], None)]  # no manifest in the archive, none in the jar
+
+
+def test_the_temp_jar_leaves_out_a_manifest_that_cannot_be_read(make_damaged_jar, tmp_path: Path, class_file):
+    from decaf.pipeline import _run_engine
+
+    war = make_damaged_jar("app.war", {
+        "META-INF/MANIFEST.MF": "Manifest-Version: 1.0\r\n\r\n", "WEB-INF/classes/com/x/A.class": class_file("com/x/A"),
+    }, damaged=("META-INF/MANIFEST.MF",))
+    runner = _jar_entries_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "dest", 100, java="java")
+    assert runner.seen == [(["com/x/A.class"], None)]
+
+
 def _files_outside(base: Path, dest: Path, inputs: set[Path]) -> list[Path]:
     return [p for p in base.rglob("*") if p.is_file() and not p.is_relative_to(dest) and p not in inputs]
 

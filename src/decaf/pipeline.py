@@ -1514,9 +1514,15 @@ def _root_jar(archive: Path, prefix: str, jar: Path) -> None:
     An engine gets the same entries as from a plain jar, so it writes the same text. Of two entries with one name,
     the last one goes in, and an entry that cannot be read stays out, as in safe_extract_zip. An entry whose path
     below the prefix leaves the jar root stays out too. Each entry goes through a file, not through memory.
+    The META-INF/MANIFEST.MF of the archive is the first entry: CFR reads its Multi-Release line to keep the
+    META-INF/versions/ copy of a class apart from the base class.
     """
     with zipfile.ZipFile(archive) as zf:
         chosen: dict[str, zipfile.ZipInfo] = {}
+        try:
+            chosen["META-INF/MANIFEST.MF"] = zf.getinfo("META-INF/MANIFEST.MF")
+        except KeyError:
+            pass
         for info in zf.infolist():
             name = info.filename
             if info.is_dir() or not name.endswith(".class") or _container_prefix(name) != prefix:
