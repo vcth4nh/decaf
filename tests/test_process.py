@@ -4967,6 +4967,8 @@ def test_a_folder_entry_is_a_folder_by_its_raw_name(tmp_path: Path, class_file):
     jar = _raw_zip(tmp_path / "a.jar", [(b"d/", b"x"), (b"p/A.class", class_file("p/A"))])
     copy, refused = _engine_copy(jar, tmp_path)
     assert refused == [] and _entries(copy) == [("d/", b""), ("p/A.class", class_file("p/A"))]
+    with zipfile.ZipFile(copy) as zf:
+        assert [i.external_attr for i in zf.infolist()] == [0, 0]  # as in the input: zipfile writes 0o600 for a 0
 
 
 @pytest.mark.class_names

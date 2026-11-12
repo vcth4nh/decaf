@@ -4261,10 +4261,10 @@ def _other_folders(dest, target) -> set[str]:
     """The folders of the temp root that are not the output folder or the input folder of this engine call (#97),
     and not the copy of an archive for the engines: it goes when its row is final. A fetch thread can have made the
     folder of a copy and not its file yet."""
-    root = Path(dest).parent
-    copies = {p.name for p in root.iterdir()
+    found = list(Path(dest).parent.iterdir())  # one listing: a fetch thread can make a folder at any time
+    copies = {p.name for p in found
               if p.is_dir() and all(c.is_file() and c.suffix in (".jar", ".part") for c in p.iterdir())}
-    return {p.name for p in root.iterdir()} - {Path(dest).name, Path(target).name} - copies
+    return {p.name for p in found} - {Path(dest).name, Path(target).name} - copies
 
 
 def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_path):

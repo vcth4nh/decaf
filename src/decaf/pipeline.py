@@ -781,6 +781,19 @@ def _read_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo, part: Path | None) -
         return None
 
 
+def _put(out: zipfile.ZipFile, entry: zipfile.ZipInfo, data: bytes | Path) -> None:
+    """Write an entry of the copy from bytes or from a part file, with the external attributes of the input: zipfile
+    writes 0o600 for a 0, and the central directory takes the value of the entry at the close."""
+    attr = entry.external_attr
+    if isinstance(data, bytes):
+        out.writestr(entry, data)
+    else:
+        entry.file_size = data.stat().st_size
+        with open(data, "rb") as f, out.open(entry, "w") as dst:
+            shutil.copyfileobj(f, dst, 1 << 20)
+    entry.external_attr = attr
+
+
 def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[str]]:
     """One pass over an archive that tests each entry and writes the copy that the engines get: (the copy in folder,
     with the file name of the archive, the raw names of the refused entries). With folder None, the same tests run
@@ -814,7 +827,7 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
                 entry.external_attr, entry.create_system = info.external_attr, info.create_system
                 if raw.endswith("/"):
                     if out is not None:
-                        out.writestr(entry, b"")
+                        _put(out, entry, b"")
                     continue
                 is_class = _is_class_entry(raw) or _is_class_entry(info.filename)
                 if out is None and not is_class:
@@ -824,12 +837,8 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
                     refused.append(raw)
                 elif out is None or data is None:
                     continue
-                elif isinstance(data, bytes):
-                    out.writestr(entry, data)
                 else:
-                    entry.file_size = data.stat().st_size
-                    with open(data, "rb") as f, out.open(entry, "w") as dst:
-                        shutil.copyfileobj(f, dst, 1 << 20)
+                    _put(out, entry, data)
         finally:
             if part is not None:
                 part.unlink(missing_ok=True)
