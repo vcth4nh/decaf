@@ -190,7 +190,8 @@ def _resource_members(archive: Path, include_sources: bool) -> list[str]:
 class MergeWriter:
     """Merges source files (.java/.kt by default) from many trees into one package tree.
 
-    Collisions are deterministic: the tree with the lowest sort_key wins,
+    Collisions are deterministic: the tree with the lowest sort_key wins, and of one sort_key a base class before
+    its versions twin, then the lowest engine path,
     regardless of the order in which worker threads deliver results. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
@@ -203,7 +204,7 @@ class MergeWriter:
         self.root = src_root
         self._lock = threading.Lock()
         self._case_insensitive = case_insensitive
-        self._index: dict[str, tuple[tuple[str, bool], str, str]] = {}  # key -> (rank, sha256, rel)
+        self._index: dict[str, tuple[tuple[str, bool, str], str, str]] = {}  # key -> (rank, sha256, rel)
         # artifact rel -> {the path of a class file without .class: its root prefix}, only non-empty prefixes
         self._roots = roots or {}
 
@@ -231,7 +232,8 @@ class MergeWriter:
             java += 1
             raw = p.relative_to(tree).as_posix()
             # A held or retried base class can come in a later tree than its twin: of one sort key, the base wins.
-            rank = (sort_key, self._twin(sort_key, raw))
+            # Of two files of one sort key, the first engine path wins, in any order of the trees.
+            rank = (sort_key, self._twin(sort_key, raw), raw)
             rel = self.out_path(sort_key, raw)
             key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
@@ -250,6 +252,8 @@ class MergeWriter:
                     if existing[2] != rel:
                         entry["dropped_path"] = existing[2]
                         (self.root / existing[2]).unlink(missing_ok=True)
+                    if sort_key == existing[0][0] and raw != existing[0][2]:
+                        entry |= {"kept_file": raw, "dropped_file": existing[0][2]}
                     collisions.append(entry)
                     self._index[key] = (rank, digest, rel)
                     target = self.root / rel
@@ -259,6 +263,8 @@ class MergeWriter:
                     entry = {"path": existing[2], "kept": existing[0][0], "dropped": sort_key}
                     if existing[2] != rel:
                         entry["dropped_path"] = rel
+                    if sort_key == existing[0][0] and raw != existing[0][2]:
+                        entry |= {"kept_file": existing[0][2], "dropped_file": raw}
                     collisions.append(entry)
         return java, collisions
 

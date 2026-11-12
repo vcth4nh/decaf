@@ -61,7 +61,8 @@ def test_merge_keeps_the_base_version_of_a_multi_release_class(tmp_path: Path):
     t = tree(tmp_path / "t", {"META-INF/versions/11/com/x/A.java": "// v11", "com/x/A.java": "// base"})
     java, collisions = w.add_tree(t, "mr.jar")
     assert (tmp_path / "src/com/x/A.java").read_text() == "// base"
-    assert java == 2 and [c["path"] for c in collisions] == ["com/x/A.java"]
+    assert java == 2 and collisions == [{"path": "com/x/A.java", "kept": "mr.jar", "dropped": "mr.jar",
+                                         "kept_file": "com/x/A.java", "dropped_file": "META-INF/versions/11/com/x/A.java"}]
 
 
 @pytest.mark.parametrize("twin_first", [True, False], ids=["twin-first", "base-first"])
@@ -72,7 +73,8 @@ def test_merge_keeps_the_base_version_from_another_tree_of_the_artifact(tmp_path
     base = tree(tmp_path / "t2", {"com/x/A.java": "// base"})
     collisions = [c for t in ((twin, base) if twin_first else (base, twin)) for c in w.add_tree(t, "mr.jar")[1]]
     assert (tmp_path / "src/com/x/A.java").read_text() == "// base"
-    assert collisions == [{"path": "com/x/A.java", "kept": "mr.jar", "dropped": "mr.jar"}]  # as for one tree
+    assert collisions == [{"path": "com/x/A.java", "kept": "mr.jar", "dropped": "mr.jar",  # as for one tree
+                           "kept_file": "com/x/A.java", "dropped_file": "META-INF/versions/11/com/x/A.java"}]
 
 
 def test_merge_lowest_key_wins_also_over_a_base_version(tmp_path: Path):
@@ -354,10 +356,24 @@ def test_merge_sees_a_versions_twin_after_the_root_prefix_cut(tmp_path: Path):
     base = tree(tmp_path / "t2", {"mr/p/A.java": "// base"})
     collisions = [c for t in (twin, base) for c in w.add_tree(t, "_classes")[1]]
     assert (tmp_path / "src/p/A.java").read_text() == "// base"
-    assert collisions == [{"path": "p/A.java", "kept": "_classes", "dropped": "_classes"}]
+    assert collisions == [{"path": "p/A.java", "kept": "_classes", "dropped": "_classes",
+                           "kept_file": "mr/p/A.java", "dropped_file": "mr/META-INF/versions/11/p/A.java"}]
     both = tree(tmp_path / "t3", {"mr/META-INF/versions/11/q/B.java": "// v11", "mr/q/B.java": "// base"})
     w.add_tree(both, "_classes")
     assert (tmp_path / "src/q/B.java").read_text() == "// base"
+
+
+@pytest.mark.parametrize("order", [("alice", "bob"), ("bob", "alice")])
+def test_merge_keeps_the_first_engine_path_of_two_classes_with_one_name(tmp_path: Path, order):
+    """alice/Top.class and bob/Top.class are two classes Top of one class folder. Before, the file of the engine run
+    that came first stayed, and the entry did not name the two files."""
+    w = MergeWriter(tmp_path / "src", roots={"_classes": {"alice/Top": "alice/", "bob/Top": "bob/"}})
+    collisions = []
+    for name in order:
+        collisions += w.add_tree(tree(tmp_path / name, {f"{name}/Top.java": f"// {name}"}), "_classes")[1]
+    assert (tmp_path / "src/Top.java").read_text() == "// alice"
+    assert collisions == [{"path": "Top.java", "kept": "_classes", "dropped": "_classes",
+                           "kept_file": "alice/Top.java", "dropped_file": "bob/Top.java"}]
 
 
 def test_merge_keeps_the_path_of_an_artifact_without_root_prefixes(tmp_path: Path):
