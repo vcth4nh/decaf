@@ -856,8 +856,8 @@ def _named_inner_classes() -> dict[str, bytes]:
     inlined = "com/a/K$f$$inlined$g$1"
     return {
         "com/a/A.class": _class_with("com/a/A", interfaces=("com/a/A$1",)), "com/a/A$1.class": inner,
-        "com/a/S.class": _class_with("com/a/S"),
-        "com/a/S$B.class": _class_with_inner_classes("com/a/S$B", (("com/a/S$B", "com/a/S"),)),
+        "com/s/S.class": _class_with("com/s/S"),  # a package of its own: decaf cannot read Cut$1 and Big$1
+        "com/s/S$B.class": _class_with_inner_classes("com/s/S$B", (("com/s/S$B", "com/s/S"),)),
         "com/a/K.class": _class_with("com/a/K", interfaces=(inlined,)),
         f"{inlined}.class": _class_with_inner_classes(inlined, ((inlined, None),), enclosing="com/a/K"),
         "com/a/E.class": _class_with_inner_classes("com/a/E", (("com/a/E$1", None),)),
@@ -887,7 +887,7 @@ def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar,
         source = make_jar("t.jar", entries)
     monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(entries["com/a/Big$1.class"]) - 1)
     stems, claims = pipeline._stems_and_claims(source)
-    assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big", "com/a/S", "com/a/S$B",
+    assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big", "com/s/S", "com/s/S$B",
                      "com/a/K", "com/a/E", "com/a/E$1"}
     assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info",
                       "com/a/K$f$$inlined$g$1"}
@@ -941,8 +941,10 @@ def test_class_parents_of_a_member_class(make_jar):
     member = _inner("p/A$B", "p/A")
     assert _parents(make_jar, {"p/A": _lister("p/A", lists=(("p/A$B", "p/A"),)), "p/A$B": member}) == {"p/A$B": "p/A"}
     assert _parents(make_jar, {"p/A": _lister("p/A"), "p/A$B": member}) == {"p/A$B": None}
-    other = _inner("p/A$B", "q/Other")  # its outer class is no class of the family
-    assert _parents(make_jar, {"p/A": _lister("p/A", refs=("p/A$B",)), "p/A$B": other}) == {"p/A$B": None}
+    other = _inner("p/A$B", "q/Other")  # its outer class is no class of the family, and no class names it
+    assert _parents(make_jar, {"p/A": _lister("p/A"), "p/A$B": other}) == {"p/A$B": None}
+    named = {"p/A": _lister("p/A", refs=("p/A$B",)), "p/A$B": _inner("p/A$B", "p/A")}
+    assert _parents(make_jar, named) == {"p/A$B": "p/A"}  # A creates it, and does not list it
 
 
 @pytest.mark.parametrize("enclosing, namers, parent", [
@@ -971,6 +973,32 @@ def test_class_parents_of_a_kotlin_inlined_class_and_a_class_named_only_below_it
     assert _parents(make_jar, below)["p/A$1"] is None
     named = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A", refs=("p/A$1",)), "p/A$1": _inner("p/A$1", None)}
     assert _parents(make_jar, named)["p/A$1"] == "p/A$B"  # A$B is no $-prefix of A$1: the first class that names it
+
+
+def test_class_parents_keep_the_name_rule_when_a_class_of_the_package_names_it(make_jar):
+    """No class of the family knows X$1, but Other, a class of another family in the same package, creates it: it is
+    not stale, so it keeps the name rule, as before. A class of another package is no proof (#207)."""
+    classes = {"p/X": _lister("p/X"), "p/X$1": _inner("p/X$1", None), "q/Far": _lister("q/Far", refs=("p/X$1",))}
+    assert _parents(make_jar, classes) == {"p/X$1": None}
+    classes["p/Other"] = _lister("p/Other", refs=("p/X$1",))
+    assert _parents(make_jar, classes) == {"p/X$1": "p/X"}
+
+
+def test_class_parents_keep_the_name_rule_when_a_class_file_of_a_test_cannot_be_read(make_jar):
+    """decaf cannot read the file of the outer class, of a candidate, or of a class of the package: no proof that
+    the class is stale, so it keeps the name rule (#207)."""
+    assert _parents(make_jar, {"p/A": b"x", "p/A$B": _inner("p/A$B", "p/A")}) == {"p/A$B": "p/A"}
+    assert _parents(make_jar, {"p/A": b"x", "p/A$1": _inner("p/A$1", None)}) == {"p/A$1": "p/A"}
+    cut = {"p/A": _lister("p/A"), "p/A$1": _inner("p/A$1", None), "p/Cut": b"x"}
+    assert _parents(make_jar, cut) == {"p/A$1": "p/A"}
+
+
+def test_class_parents_read_no_package_refs_when_each_outer_class_lists_its_inner_classes(make_jar, monkeypatch):
+    """A jar of javac: each outer class lists its inner classes, so decaf reads no package_refs (#207)."""
+    monkeypatch.setattr(check, "package_refs", lambda data: pytest.fail("package_refs ran"))
+    classes = {"p/A": _lister("p/A", lists=(("p/A$B", "p/A"), ("p/A$1", None))), "p/A$B": _inner("p/A$B", "p/A"),
+               "p/A$1": _inner("p/A$1", None, enclosing="p/A"), "p/C": _lister("p/C")}
+    assert _parents(make_jar, classes) == {"p/A$B": "p/A", "p/A$1": "p/A"}
 
 
 def test_class_parents_of_crafted_class_files_have_no_cycle(make_jar):
@@ -3957,12 +3985,17 @@ def test_a_stub_of_a_stale_inner_class_stays_when_the_file_of_the_outer_class_do
     from test_check import _class_with, _class_with_inner_classes
 
     ab, stub = "com/x/A$B.java", _VF_STUB.replace("class A", "class A$B")
-    report, written, _ = _run_family(make_jar, tmp_path, {
-        "vineflower": {_A: "class A { /* vf */ }", ab: stub}, "fernflower": {_A: "class A { /* ff */ }"},
-    }, classes={
+    jar = make_jar("app.jar", {  # no class file of the package that decaf cannot read: they give no proof
         "com/x/A.class": _class_with("com/x/A"),
         "com/x/A$B.class": _class_with_inner_classes("com/x/A$B", (("com/x/A$B", "com/x/A"),)),
     })
+    runner = writing_runner({
+        "vineflower": {_A: "class A { /* vf */ }", ab: stub}, "fernflower": {_A: "class A { /* ff */ }"},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    written = {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
     assert written == {_A: "class A { /* vf */ }", ab: stub}
     assert [s["path"] for s in report.stubs] == [ab]
 

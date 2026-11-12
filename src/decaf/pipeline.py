@@ -747,15 +747,18 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
     class whose file holds it, or None for a class that is top-level for the JVM (#206, #207, #208).
 
     The family of a class: the classes with the same top-level class by name. A candidate is a class of the family
-    that is not the class and is not below it by name. Q names X when the simple name of X is in the package_refs
-    of Q.
+    that is not the class and is not below it by name. Q knows X when the InnerClasses attribute of Q lists X, or
+    when the simple name of X is in the package_refs of Q. decaf tests the lists first, and reads package_refs only
+    when no class lists X, so for most jars it reads none.
     1. The class file cannot be read or does not parse: the longest $-prefix that is a class, as before.
     2. It does not list itself: top-level (#206). Also when a class of the family lists it: Vineflower, Fernflower,
        and JD then nest it, but CFR and Procyon write it only from its own class file, so it must be expected.
-    3. It lists itself with an outer class P, a member class: P when P is a candidate and names it. Else it is
-       stale (P was compiled again without it): top-level.
-    4. It lists itself with no outer class, an anonymous or local class: of the candidates that name it, the class
-       of its EnclosingMethod attribute, else the longest $-prefix, else the first. No candidate: stale.
+    3. It lists itself with an outer class P, a member class: P when P is a candidate and knows it.
+    4. It lists itself with no outer class, an anonymous or local class: of the candidates that know it, the class
+       of its EnclosingMethod attribute, else the longest $-prefix, else the first.
+    Else it can be stale (its outer class was compiled again without it): top-level, when no other class of its
+    package names it, for example a Kotlin class of another family that creates it. A class file that a test needs
+    and that decaf cannot read or parse gives no proof: then the class keeps the longest $-prefix that is a class.
     A stem with several entries (a multi-release class, a copy below a container root): one entry is enough for a
     fact. families: the top-level classes by name to read; None reads each family with such a class.
     """
@@ -777,13 +780,18 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
         if (tops[s] or s) in wanted:
             members.setdefault(tops[s] or s, []).append(s)
     links: dict[str, list[tuple[str, tuple[tuple[str, str | None], ...], str | None]]] = {}
-    refs: dict[str, set[str]] = {}
     for name, data in _read_classes(source, [n for ms in members.values() for s in ms for n in entries[s]]):
         stem = _class_stem(name)
         found = check.class_links(data)
         if found is not None and stem.endswith(found[0]) and stem[: len(stem) - len(found[0])][-1:] in ("", "/"):
             links.setdefault(stem, []).append(found)  # the class name is the end of the path, as for a package root
-        refs.setdefault(stem, set()).update(check.package_refs(data))
+    refs: dict[str, frozenset[str]] = {}  # stem -> package_refs; empty: no entry parses (a class names itself)
+
+    def read_refs(stems: Iterable[str]) -> None:
+        todo = sorted(set(stems) - refs.keys())
+        refs.update(dict.fromkeys(todo, frozenset()))
+        for name, data in _read_classes(source, [n for s in todo for n in entries[s]]):
+            refs[_class_stem(name)] |= check.package_refs(data)
 
     def by_name(x: str) -> str:
         cut = x.rfind("$")
@@ -791,16 +799,25 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
             cut = x.rfind("$", 0, cut)
         return x[:cut]
 
+    def choose(x: str, known: list[str], enclosing: str | None) -> str:
+        prefixes = [q for q in known if x.startswith(q + "$")]
+        return enclosing if enclosing in known else max(prefixes, key=len) if prefixes else known[0]
+
     out: dict[str, str | None] = {}
+    tests: dict[str, tuple[list[str], str | None]] = {}  # class -> (the classes to test with package_refs, enclosing)
     for family, ms in members.items():
         prefix = {s: s[: len(s) - len(links[s][0][0])] for s in ms if s in links}  # the folder above the package root
+        listers: dict[str, set[str]] = {}  # class -> the classes whose InnerClasses attribute lists it
+        for q in prefix:
+            for _, found, _ in links[q]:
+                for inner, _ in found:
+                    listers.setdefault(prefix[q] + inner, set()).add(q)
         for x in ms:
             if tops[x] is None:
                 continue
             if x not in links:  # rule 1
                 out[x] = by_name(x)
                 continue
-            simple = x.rpartition("/")[2]
             cands = [q for q in ms if q != x and not q.startswith(x + "$")]
             own = [(outer, enclosing) for name, found, enclosing in links[x] for inner, outer in found if inner == name]
             if len(own) < len(links[x]):  # rule 2: one entry that does not list itself is enough (#206)
@@ -809,13 +826,38 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
             outer, enclosing = own[0]
             if outer is not None:  # rule 3
                 p = prefix[x] + outer
-                out[x] = p if p in cands and simple in refs.get(p, ()) else None
+                if p in listers.get(x, ()) and p in cands:
+                    out[x] = p
+                else:
+                    tests[x] = ([p] if p in cands else [], p)
                 continue
-            namers = [q for q in cands if simple in refs.get(q, ())]  # rule 4
-            prefixes = [q for q in namers if x.startswith(q + "$")]
+            known = [q for q in cands if q in listers.get(x, ())]  # rule 4
             e = prefix[x] + enclosing if enclosing else None
-            out[x] = e if e in namers else max(prefixes, key=len) if prefixes else namers[0] if namers else None
-        for x in ms:  # crafted class files can give a cycle of parents: the name rule breaks it
+            if known:
+                out[x] = choose(x, known, e)
+            else:
+                tests[x] = (cands, e)
+    read_refs(q for qs, _ in tests.values() for q in qs)
+    stale: list[str] = []
+    for x, (qs, e) in tests.items():
+        known = [q for q in qs if x.rpartition("/")[2] in refs[q]]
+        if known:
+            out[x] = choose(x, known, e)
+        elif any(not refs[q] for q in qs):  # no proof that it is stale
+            out[x] = by_name(x)
+        else:
+            stale.append(x)
+    if stale:  # a class of the package, also of another family, can name it (#207)
+        package: dict[str, list[str]] = {}
+        for s in entries:
+            package.setdefault(s.rpartition("/")[0], []).append(s)
+        others = {x: [q for q in package[x.rpartition("/")[0]] if q != x and not q.startswith(x + "$")] for x in stale}
+        read_refs(q for qs in others.values() for q in qs)
+        for x in stale:
+            proof = all(refs[q] and x.rpartition("/")[2] not in refs[q] for q in others[x])
+            out[x] = None if proof else by_name(x)
+    for family, ms in members.items():  # crafted class files can give a cycle of parents: the name rule breaks it
+        for x in ms:
             path, q = [x], out.get(x) or by_name(x) if tops[x] is not None else None
             while q is not None:
                 if q in path:

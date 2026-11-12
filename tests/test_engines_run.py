@@ -298,11 +298,13 @@ def test_run_per_class_runs_a_class_that_is_top_level_for_the_jvm(tmp_path: Path
 
     tree = tmp_path / "classes"
     (tree / "p").mkdir(parents=True)
-    for name in ("Foo", "Foo$", "Cut", "Big", "S", "E$1"):
+    (tree / "s").mkdir()  # a package of its own: decaf cannot read Cut$1 and Big$1, so they give no proof
+    for name in ("Foo", "Foo$", "Cut", "Big", "E$1"):
         (tree / f"p/{name}.class").write_bytes(_class_with(f"p/{name}"))
+    (tree / "s/S.class").write_bytes(_class_with("s/S"))
     (tree / "p/A.class").write_bytes(_class_with("p/A", interfaces=("p/A$1",)))
     (tree / "p/A$1.class").write_bytes(_class_with_inner_classes("p/A$1", (("p/A$1", "p/A"),)))
-    (tree / "p/S$B.class").write_bytes(_class_with_inner_classes("p/S$B", (("p/S$B", "p/S"),)))
+    (tree / "s/S$B.class").write_bytes(_class_with_inner_classes("s/S$B", (("s/S$B", "s/S"),)))
     (tree / "p/E.class").write_bytes(_class_with_inner_classes("p/E", (("p/E$1", None),)))
     (tree / "p/Cut$1.class").write_bytes(_class_with("p/Cut$1")[:12])
     big = _class_with("p/Big$1") + bytes(100)
