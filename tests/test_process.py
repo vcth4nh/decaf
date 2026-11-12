@@ -5362,3 +5362,32 @@ def test_a_retry_tree_with_no_class_file_left_goes_at_once(tmp_path: Path, class
     ctx = make_ctx(tmp_path, _names_runner())
     assert _extract_failed_classes(jar, {"p/A"}, ctx) is None
     assert list(ctx.tmp_root.iterdir()) == []
+
+
+@pytest.mark.class_names
+def test_a_nested_archive_works_by_its_zipfile_name_and_is_refused_by_either_name(tmp_path: Path, class_file,
+                                                                                    monkeypatch):
+    """On Windows, zipfile gives a raw name with backslashes as a name with /: the nested archive keeps its row. A
+    raw name with a NUL is refused, though zipfile cuts it."""
+    from decaf.pipeline import _discover_nested
+
+    dep = _zip(tmp_path / "dep.jar", [("q/B.class", class_file("q/B"))]).read_bytes()
+    war = _raw_zip(tmp_path / "app.war", [(b"lib/dep.jar", dep), (b"lib/x.jar\0y", dep), (b"p/A.class", class_file("p/A"))])
+    infolist = zipfile.ZipFile.infolist
+    calls = []
+
+    def windows_names(self):
+        """The first call is the one of _discover_nested: a later open compares the local name with orig_filename."""
+        infos = infolist(self)
+        calls.append(1)
+        for info in infos if len(calls) == 1 else ():
+            if info.filename == "lib/dep.jar":
+                info.orig_filename = "lib\\dep.jar"  # what zipfile on Windows keeps of a raw name with a backslash
+        return infos
+
+    monkeypatch.setattr(zipfile.ZipFile, "infolist", windows_names)
+    ctx = make_ctx(tmp_path, _names_runner())
+    refused: list[str] = []
+    nested = _discover_nested(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx, refused)
+    assert [(a.rel, a.kind) for a in nested] == [("app.war!/lib/dep.jar", ArtifactKind.ARCHIVE)]
+    assert refused == ["lib/x.jar\0y"]

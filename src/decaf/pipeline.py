@@ -2151,10 +2151,16 @@ def _discover_nested(artifact: Artifact, ctx: Ctx, refused: list[str] | None = N
             infos = zf.infolist()
     except (zipfile.BadZipFile, OSError):
         return []
-    found = find_nested_archives(i.orig_filename for i in infos)  # the name before zipfile cuts it at a NUL
-    if refused is not None:
-        refused += [n for n in found if not stays_inside(n)]
-    found = [n for n in found if stays_inside(n)]
+    # The work takes the zipfile name, as safe_extract_zip does; the test also takes the raw name (zipfile cuts a
+    # name at a NUL, and on Windows it changes a backslash to /).
+    found = []
+    for info in infos:
+        if not find_nested_archives([info.filename]):
+            continue
+        if stays_inside(info.orig_filename) and stays_inside(info.filename):
+            found.append(info.filename)
+        elif refused is not None:
+            refused.append(info.orig_filename)
     names = list(dict.fromkeys(found))  # two entries of one name: one row, and the last one wins, as in Java
     if not names:
         return []
