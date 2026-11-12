@@ -155,7 +155,7 @@ class ArtifactReport:
     missing_classes: int = 0
     sources_gap: int = 0  # top-level classes that the Maven sources jar lacks; the engines write them (#180)
     # entries (class files of a class folder, names of nested archives) that decaf kept from the engines or did not
-    # use because their name or class name can leave the output folder
+    # use because their name or class name can leave the output folder, or decaf cannot read the class name
     refused: int = 0
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)

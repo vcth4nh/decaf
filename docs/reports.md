@@ -21,12 +21,14 @@ decaf report out --memory            # ten JVMs with the largest memory peaks
 
 ## Complete, partial, and failed
 
-- **Complete:** the artifact finished without missing classes, stubs,
-  flagged source files, or a network failure that forced decompilation.
+- **Complete:** the artifact finished without missing classes, refused
+  entries, stubs, flagged source files, or a network failure that forced
+  decompilation.
 - **Partial:** the artifact produced output but still has missing classes,
   refused entries (`refused`: entries that decaf did not use because a name or
-  a class name can leave the output folder), stubbed methods, flagged files, or
-  a network failure that forced decompilation.
+  a class name can leave the output folder, or decaf cannot read the class
+  name), stubbed methods, flagged files, or a network failure that forced
+  decompilation.
   It gets a yellow `!` in terminal output. The row of a network failure ends
   with `network fallback`.
 - **Failed:** the artifact could not be processed. The report groups failures
@@ -34,8 +36,8 @@ decaf report out --memory            # ten JVMs with the largest memory peaks
 - A Maven artifact follows the same rules. The classes that its sources jar
   lacks are decompiled, and the ones that no engine wrote count as missing.
 - Skipped archives and merge collisions are recorded separately. Check
-  `totals.partial`, `totals.skipped`, and `totals.collisions` when completeness
-  matters.
+  `totals.partial`, `totals.skipped`, `totals.collisions`, and
+  `totals.refused_entries` when completeness matters.
 
 ## Exit codes
 

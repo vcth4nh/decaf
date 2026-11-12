@@ -230,22 +230,24 @@
 
 ### Security
 
-- A name from an untrusted input could put a file outside the output
-  folder. decaf made an output path from the name of a nested archive entry
-  with no test, and a file outside the extraction folder could become a row.
-  An engine could also make an output path from the name of an archive entry
-  or from a class name inside a class file: an engine reads an archive
+- A name from an untrusted input could put a file outside the output folder.
+  decaf made an output path from the name of a nested archive entry with no
+  test, and a file outside the extraction folder could become a row. An
+  engine could also make an output path from the name of an archive entry or
+  from a class name inside a class file: an engine read the input archive
   itself, and no code looked at the class names inside a class file. Now
-  decaf uses no nested archive name that can leave its folder, and an engine
-  gets only the archive entries and class files whose names (the entry name
-  and each class name of the class file) stay inside the archive and the
-  output folder, also in a retry. An engine gets the input archive itself
-  only when its layout is plain, else a copy. The row counts each entry or
-  name that decaf did not use in the new field `refused`, a row with
+  decaf uses no nested archive name that can leave its folder. An engine
+  never reads the input archive: it reads a copy that decaf wrote from the
+  entries that it tested, with one entry for each name. The copy, and each
+  retry, hold only the archive entries and class files whose names (each
+  name of the entry and each class name of the class file) stay inside the
+  archive and the output folder, and whose class file decaf can read. The
+  row counts each entry or name that decaf did not use in the new field
+  `refused`, and the totals count them in `refused_entries`. A row with
   `refused` > 0 is partial, a refused class that is an expected class also
   counts as a missing class, and the run prints one warning for the
-  artifact. In mirror mode, an artifact folder that is not below the output
-  folder fails the row.
+  artifact. In mirror mode, an artifact folder whose name has a root, a
+  drive, or a parent part fails the row.
 
 ## [1.12.0] - 2026-10-31
 
