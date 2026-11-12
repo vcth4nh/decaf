@@ -161,6 +161,24 @@
   merge did not write, because the base class has that path, keeps its
   versions folder in the path. In the mirror layout, the path stays the path
   below the folder of the artifact.
+- A class with the name of an inner class that is top-level for the JVM was
+  lost without a sign (#206). Examples are the module class `Foo$` of each
+  Scala object, the Scala `$sp` classes, and the Kotlin `X$$Lambda$N`
+  classes. Such a class does not list itself in its InnerClasses attribute,
+  so no file of its outer class holds it. From a class folder and in a class
+  retry, CFR and Procyon wrote no file of it: scala-xml as a class folder with
+  `--engine cfr --no-fallback` lost 61 classes, and its row said
+  `108 classes`, no missing class. decaf did not count such a class, so it
+  was never missing and got no retry. Now CFR and Procyon get its class file,
+  and decaf counts it as a class of its own. Thus `classes` of a Scala or
+  Kotlin jar goes up. A row can now show missing classes that before were
+  lost without a sign, for example JD on the Kotlin `X$$Lambda$N` classes,
+  and the next engine of the chain gets a retry of them.
+- An inner class could count as top-level for the JVM, and its code could go
+  out two times (#209). This happened when its class file names itself in a
+  second constant-pool entry, which a class writer other than javac can do.
+  decaf compared the entries, not the class names. Now decaf compares the
+  names.
 
 ## [1.12.0] - 2026-10-31
 
