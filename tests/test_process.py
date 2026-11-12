@@ -924,10 +924,11 @@ def test_class_parents_of_a_class_file_that_cannot_be_read_follow_the_name(make_
 
 
 def test_class_parents_of_a_class_that_does_not_list_itself(make_jar):
-    """Rule 2: top-level (#206), also when a class of the family lists it (S8). Fernflower and JD nest such a class
-    in the file of the class that lists it, and Vineflower nests a member class of this kind (it writes the S8
-    anonymous class apart), but CFR and Procyon write it only from its own class file: from a class folder, the
-    file of its outer class did not hold it, and the row had no missing class."""
+    """Rule 2: top-level (#206), also when a class of the family lists it, for example an anonymous class that does
+    not list itself, while its outer class lists it. Fernflower and JD nest such a class in the file of the class
+    that lists it, and Vineflower nests a member class of this kind (it writes such an anonymous class apart), but
+    CFR and Procyon write it only from its own class file: from a class folder, the file of its outer class did not
+    hold it, and the row had no missing class."""
     assert _parents(make_jar, {"X": _lister("X"), "X$": _lister("X$")}) == {"X$": None}
     s8 = {"X": _lister("X", lists=(("X$$anon$1", None),)), "X$": _lister("X$"), "X$$anon$1": _lister("X$$anon$1")}
     assert _parents(make_jar, s8)["X$$anon$1"] is None
@@ -949,10 +950,10 @@ def test_class_parents_of_a_member_class(make_jar):
 
 
 @pytest.mark.parametrize("enclosing, namers, parent", [
-    ("X", ("X", "X$"), "X"),  # S4 and S5 with the EnclosingMethod class (#208)
+    ("X", ("X", "X$"), "X"),  # X and X$ name it: the EnclosingMethod class (#208)
     ("X$", ("X", "X$"), "X$"),
-    (None, ("X",), "X"),  # S6: no EnclosingMethod attribute
-    (None, ("X", "X$"), "X$"),  # S7: the longest class that names it
+    (None, ("X",), "X"),  # no EnclosingMethod attribute
+    (None, ("X", "X$"), "X$"),  # no EnclosingMethod attribute: the longest class that names it
     ("X$", ("X",), "X"),  # the EnclosingMethod class does not name it
     (None, (), None),  # stale
 ])
@@ -4157,7 +4158,7 @@ _X, _XM, _XA = "com/x/X.java", "com/x/X$.java", "com/x/X$$anon$1.java"
 
 def _scala_family(enclosing: str) -> dict[str, bytes]:
     """The Scala class X, its module class X$, and the anonymous class X$$anon$1 with this EnclosingMethod class
-    (S4, S5 of #208). X lists X$$anon$1; with the EnclosingMethod class X$, X$ lists it too."""
+    (#208). X lists X$$anon$1; with the EnclosingMethod class X$, X$ lists it too."""
     from test_check import _class_with, _class_with_inner_classes
 
     anon = "com/x/X$$anon$1"
@@ -4180,7 +4181,7 @@ def test_a_scala_anonymous_class_has_one_file_from_the_class_that_nests_it(
     and the report did not show it (#208)."""
     apart = {_X: "class X { /* apart */ }", _XM: "class X$ { /* apart */ }", _XA: "class X$$anon$1 {} // FLAG apart"}
     nested = {_X: "class X { /* nested */ }", _XM: "class X$ { /* nested */ }"}
-    for holder in [_X] if enclosing == "X" else [_X, _XM]:  # S5: each class that lists it nests it
+    for holder in [_X] if enclosing == "X" else [_X, _XM]:  # each class that lists it nests it
         nested[holder] = nested[holder].replace("*/", "+ X$$anon$1 */")
     if not apart_first:
         nested[_X] += " // FLAG nested"  # a flagged file of the outer class holds its family (#150)
