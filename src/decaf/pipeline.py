@@ -756,7 +756,9 @@ def _outside_names(archive: Path) -> list[str]:
 
 
 def _is_class_entry(name: str) -> bool:
-    """Does a name end with .class for a reader that ignores the case?"""
+    """Does a name end with .class for a reader that ignores the case, and for Windows, which drops the dots and
+    spaces at the end of a file name?"""
+    name = name.rstrip(". ")
     return name.lower().endswith(".class") or name.upper().endswith(".CLASS") or name.casefold().endswith(".class")
 
 

@@ -5796,3 +5796,13 @@ def test_the_warning_cuts_a_long_name(tmp_path: Path):
     assert warns[0].endswith(f"; the first is {shown}...") and report.refused == 1
     _note_refused(Artifact(tmp_path / "a.jar", "a.jar", ArtifactKind.ARCHIVE), ctx, report, ["../x"], "entries")
     assert warns[1].endswith("; the first is '../x'")
+
+
+@pytest.mark.class_names
+def test_the_class_test_ignores_the_dots_and_spaces_at_the_end_of_a_name(tmp_path: Path, class_file):
+    """Windows drops the dots and spaces at the end of a file name: such an entry is a class entry."""
+    jar = _zip(tmp_path / "a.jar", [("p/A.class.", class_file("../A")), ("p/B.class . ", class_file("../B")),
+                                    ("p/C.class", class_file("p/C")), ("p/D.txt.", b"d")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class.", "p/B.class . "]
+    assert _entries(copy) == [("p/C.class", class_file("p/C")), ("p/D.txt.", b"d")]
