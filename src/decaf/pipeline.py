@@ -1545,9 +1545,12 @@ def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, des
     target stays as it is. An archive with WEB-INF/classes/ or BOOT-INF/classes/ gives a temporary jar for each
     root: from a folder, CFR writes other text than from a jar. In a folder, a root is its own folder when each
     class file below it has its prefix, else a copy. The timeout is for the whole target, as in _run_per_class.
+    A root whose folder below dest is not inside dest (an entry name that leaves the output folder) gets no run, so
+    its classes are missing, as safe_extract_zip skips such an entry.
     """
     if spec.name not in _ROOTED_ENGINES:
         return ctx.runner(spec, jar, target, dest, timeout, **kw)
+    resolved_dest = dest.resolve()
     temps: list[Path] = []
     try:
         if target.is_dir():
@@ -1564,6 +1567,12 @@ def _run_engine(ctx: Ctx, spec: engines.EngineSpec, jar: Path, target: Path, des
         results: list[engines.EngineResult] = []
         timed_out = False
         for prefix in sorted(set(prefixes.values())):
+            try:
+                inside = (dest / prefix).resolve().is_relative_to(resolved_dest)
+            except OSError:
+                inside = False
+            if not inside:
+                continue
             if results and engines.PROCESSES.closed:
                 break
             left = deadline - time.monotonic()

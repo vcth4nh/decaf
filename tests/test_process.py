@@ -3856,6 +3856,42 @@ def test_the_temp_jar_leaves_out_an_entry_that_leaves_its_root(tmp_path: Path, c
     assert [sorted(c["data"]) for c in runner.calls] == [["org/x/R.class"], ["com/x/A.class"]]
 
 
+def _files_outside(base: Path, dest: Path, inputs: set[Path]) -> list[Path]:
+    return [p for p in base.rglob("*") if p.is_file() and not p.is_relative_to(dest) and p not in inputs]
+
+
+@pytest.mark.parametrize("name", ["relative", "absolute"])
+def test_a_root_whose_entry_name_leaves_the_output_folder_gets_no_run(tmp_path: Path, class_file, name):
+    from decaf.pipeline import _run_engine
+
+    above = "../../elsewhere/" if name == "relative" else (tmp_path / "elsewhere").as_posix() + "/"
+    war = _zip(tmp_path / "app.war", [
+        ("WEB-INF/classes/q/B.class", class_file("q/B")),
+        (above + "WEB-INF/classes/p/A.class", class_file("p/A")),
+        ("org/x/R.class", class_file("org/x/R")),
+    ])
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr")
+    dest = tmp_path / "out/d"
+    res = _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, dest, 100, java="java")
+    assert [sorted(c["data"]) for c in runner.calls] == [["org/x/R.class"], ["q/B.class"]]
+    assert _sources(dest) == ["WEB-INF/classes/q/B.java", "org/x/R.java"] and res.java_files == 2
+    assert _files_outside(tmp_path, dest, {war}) == []
+
+
+def test_the_row_counts_a_class_whose_entry_name_leaves_the_output_folder_as_missing(tmp_path: Path, class_file):
+    war = _zip(tmp_path / "app.war", [
+        ("WEB-INF/classes/q/B.class", class_file("q/B")),
+        ("../../elsewhere/WEB-INF/classes/p/A.class", class_file("p/A")),
+    ])
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, engine="cfr", fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 2, 1, 1)
+    assert _sources(tmp_path / "out") == ["app.war/WEB-INF/classes/q/B.java"]
+    assert _files_outside(tmp_path, tmp_path / "out", {war}) == []
+
+
 def test_the_temp_jar_goes_when_the_engine_raises(tmp_path: Path, class_file):
     from decaf.pipeline import _run_engine
 
