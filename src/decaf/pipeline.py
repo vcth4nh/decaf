@@ -755,7 +755,7 @@ def _copy_without_refused(archive: Path, folder: Path) -> Path:
             out.NameToInfo.pop(info.filename, None)  # a second entry of a name stays, with no "Duplicate name" warning
             with open(part, "rb") as f, out.open(entry, "w") as dst:
                 shutil.copyfileobj(f, dst)
-    part.unlink()
+    part.unlink(missing_ok=True)  # no part when each entry is refused
     return jar
 
 

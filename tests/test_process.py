@@ -5017,3 +5017,12 @@ def test_the_root_jar_leaves_out_a_path_with_a_drive_or_a_backslash_parent(tmp_p
     _root_jar(war, "WEB-INF/classes/", jar)
     with zipfile.ZipFile(jar) as zf:
         assert zf.namelist() == ["com/x/A.class"]
+
+
+def test_an_archive_with_only_refused_entries_gives_the_engines_an_empty_copy(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("../A")), ("../r.txt", b"r")])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [names for _, names in runner.calls] == [[]]
+    assert (report.outcome, report.failure, report.classes, report.missing_classes) == ("failed", "all engines failed", 1, 0)
