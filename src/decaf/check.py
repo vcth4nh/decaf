@@ -480,7 +480,11 @@ def safe_class_name(data: bytes) -> str | None:
     None also when the class file does not parse or has no name. A reader can decode bytes that are not valid
     UTF-8 in another way than decaf.
     """
-    pool = _pool(data)
+    return _safe_name(_pool(data), data)
+
+
+def _safe_name(pool: tuple[dict[int, bytes], dict[int, int], int] | None, data: bytes) -> str | None:
+    """safe_class_name with the parsed pool of the class file."""
     name = _class_at(pool, data, pool[2] + 2) if pool is not None else None
     text = _strict_name(name) if name else None
     return None if text is None or any(c in text for c in ".;[") else text
@@ -490,7 +494,7 @@ def class_names_stay_inside(data: bytes) -> bool:
     """Does each class name of a class file stay inside a folder: its safe_class_name, and the name of each Class
     entry of its constant pool (an array name such as [Ljava/lang/String; as it is)?"""
     pool = _pool(data)
-    name = safe_class_name(data) if pool is not None else None
+    name = _safe_name(pool, data)
     if name is None or not stays_inside(name):
         return False
     utf8, classes, _ = pool

@@ -953,3 +953,16 @@ def test_class_names_stay_inside_tests_each_class_entry_of_the_pool():
     assert not check.class_names_stay_inside(_class_with("../A"))
     assert not check.class_names_stay_inside(_class_with("p/A.B"))
     assert not check.class_names_stay_inside(b"not a class")
+
+
+def test_class_names_stay_inside_parses_the_constant_pool_one_time(monkeypatch):
+    real, calls = check._pool, []
+
+    def counting_pool(data):
+        calls.append(1)
+        return real(data)
+
+    monkeypatch.setattr(check, "_pool", counting_pool)
+    assert check.class_names_stay_inside(_class_with("p/A", interfaces=("java/io/Serializable",)))
+    assert len(calls) == 1
+    assert check.safe_class_name(_class_with("p/A")) == "p/A"
