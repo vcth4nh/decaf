@@ -5131,3 +5131,98 @@ def test_the_mirror_writer_refuses_a_folder_that_is_not_below_its_root(tmp_path:
         writer.add_blob(jar, "r.txt", "a.jar!/../../x.jar")
     assert writer.dest_for("a.jar") == tmp_path / "out/a.jar"
     assert [p for p in tmp_path.rglob("*") if p.is_file()] == [jar]
+
+
+# --- the layout of an archive: the entry list of zipfile is not the only view ---
+
+
+def _raw_zip(path: Path, entries: list[tuple[bytes, bytes]], *, prefix: bytes = b"", junk_after: int | None = None,
+             local_names: dict[int, bytes] | None = None, offsets: dict[int, int] | None = None) -> Path:
+    """A stored zip, built by hand: junk_after inserts 4 bytes after that entry, local_names gives an entry another
+    name in its local header, and offsets gives the central directory another offset of a local header."""
+    import struct
+    import zlib
+
+    body, central = bytearray(prefix), bytearray()
+    starts = []
+    for i, (name, data) in enumerate(entries):
+        starts.append(len(body))
+        local = (local_names or {}).get(i, name)
+        crc = zlib.crc32(data)
+        body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, 0, 0, 0, 0, crc, len(data), len(data), len(local), 0)
+        body += local + data
+        if junk_after == i:
+            body += b"junk"
+    cd_start = len(body)
+    for i, (name, data) in enumerate(entries):
+        offset = (offsets or {}).get(i, starts[i])
+        central += struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, 0, 0, 0, 0, zlib.crc32(data), len(data),
+                               len(data), len(name), 0, 0, 0, 0, 0, offset) + name
+    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(central), cd_start, 0)
+    path.write_bytes(bytes(body + central + eocd))
+    return path
+
+
+def _plain(path: Path) -> bool:
+    from decaf.pipeline import _plain_layout
+
+    with zipfile.ZipFile(path) as zf:
+        return _plain_layout(zf)
+
+
+def test_plain_layout_accepts_a_normal_archive_and_data_descriptors(tmp_path: Path, class_file, make_jar):
+    import io
+
+    assert _plain(make_jar("a.jar", {"p/A.class": class_file("p/A"), "p/": b"", "r.txt": b"r"}))
+    assert _plain(_raw_zip(tmp_path / "raw.jar", [(b"p/A.class", class_file("p/A")), (b"r.txt", b"r")]))
+
+    class Stream(io.RawIOBase):  # not seekable: zipfile writes a data descriptor after each entry
+        def __init__(self):
+            self.data = bytearray()
+
+        def writable(self):
+            return True
+
+        def write(self, b):
+            self.data += b
+            return len(b)
+
+    stream = Stream()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("p/A.class", class_file("p/A"))
+        zf.writestr("r.txt", b"r" * 100)
+    (tmp_path / "dd.jar").write_bytes(bytes(stream.data))
+    with zipfile.ZipFile(tmp_path / "dd.jar") as zf:
+        assert all(i.flag_bits & 0x08 for i in zf.infolist())
+    assert _plain(tmp_path / "dd.jar")
+
+
+@pytest.mark.parametrize("shape", ["prefix", "gap", "local name", "overlap"])
+def test_plain_layout_refuses_bytes_that_the_entry_list_does_not_show(tmp_path: Path, class_file, shape):
+    entries = [(b"p/A.class", class_file("p/A")), (b"p/B.class", class_file("p/B"))]
+    kw = {"prefix": {"prefix": b"#!/bin/sh\n"}, "gap": {"junk_after": 0}, "local name": {"local_names": {1: b"p/C.class"}},
+          "overlap": {"offsets": {1: 0}}}[shape]
+    if shape == "overlap":
+        entries[1] = (b"p/A.class", class_file("p/A"))  # a second central entry of the first local header
+    assert not _plain(_raw_zip(tmp_path / "x.jar", entries, **kw))
+
+
+def test_a_name_with_a_nul_is_refused_by_its_name_before_the_cut(tmp_path: Path, class_file):
+    from decaf.pipeline import _refused
+
+    jar = _raw_zip(tmp_path / "a.jar", [(b"p/A.class\0x", class_file("p/A")), (b"p/B.class", class_file("p/B"))])
+    with zipfile.ZipFile(jar) as zf:
+        assert zf.namelist()[0] == "p/A.class"  # zipfile cuts the name at the NUL
+    assert [i.orig_filename for i in _refused(jar)] == ["p/A.class\0x"]
+
+
+def test_an_archive_whose_layout_is_not_plain_goes_to_the_engines_as_a_copy(tmp_path: Path, class_file):
+    jar = _raw_zip(tmp_path / "app.jar", [(b"p/A.class", class_file("p/A"))], prefix=b"#!/bin/sh\n")
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    ((target, names),) = runner.calls
+    assert target != jar and target.name == "app.jar" and names == ["p/A.class"] and _plain(target)
+    assert (warns, report.refused, report.classes, report.missing_classes) == ([], 0, 1, 0)

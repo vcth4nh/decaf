@@ -712,7 +712,7 @@ def _safe_class(data: bytes | None) -> bool:
 def _refused_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bool:
     """Does no engine get this entry? Its name does not stay inside, or it is a class entry that decaf cannot read
     or whose class name decaf cannot prove to stay inside. A disk error raises."""
-    if not stays_inside(info.filename):
+    if not stays_inside(info.orig_filename):  # the name before zipfile cuts it at a NUL
         return True
     if info.is_dir() or not info.filename.endswith(".class"):
         return False
@@ -744,6 +744,43 @@ def _refused(source: Path) -> list[zipfile.ZipInfo] | list[str]:
         if not _safe_class(data):
             out.append(p.relative_to(source).as_posix())
     return out
+
+
+_DESCRIPTOR_SIZES = (12, 16, 20, 24)  # a data descriptor: with or without its signature, 32-bit or 64-bit sizes
+
+
+def _plain_layout(zf: zipfile.ZipFile) -> bool:
+    """Do the entries of the central directory, in the order of their local headers, cover the file from offset 0
+    to the central directory, with no gap and no overlap, each with the same name in its local header?
+
+    Then a reader of the local headers and a reader of the central directory see the same entries. Each doubt (a
+    short read, a wrong signature, an error) gives False, which costs only a copy of the archive.
+    """
+    try:
+        infos = sorted(zf.infolist(), key=lambda i: i.header_offset)
+        pos, descriptor = 0, False
+
+        def follows(start: int) -> bool:
+            """Does start follow the end of the entry before it: at once, or after its data descriptor?"""
+            return start - pos in _DESCRIPTOR_SIZES if descriptor else start == pos
+
+        with open(zf.filename, "rb") as f:
+            for info in infos:
+                if not follows(info.header_offset):
+                    return False
+                f.seek(info.header_offset)
+                head = f.read(30)
+                if len(head) != 30 or head[:4] != b"PK\x03\x04":
+                    return False
+                name_len, extra_len = int.from_bytes(head[26:28], "little"), int.from_bytes(head[28:30], "little")
+                encoding = "utf-8" if info.flag_bits & 0x800 else "cp437"
+                if f.read(name_len) != info.orig_filename.encode(encoding):
+                    return False
+                pos = info.header_offset + 30 + name_len + extra_len + info.compress_size
+                descriptor = bool(info.flag_bits & 0x08)
+        return follows(zf.start_dir)
+    except (*ZIP_ERRORS, AttributeError, TypeError):
+        return False
 
 
 def _copy_without_refused(archive: Path, folder: Path) -> Path:
@@ -2343,8 +2380,13 @@ def _fetch_stage(
                 return report, nested, None
             refused = _refused(artifact.path)
             _note_refused(artifact, ctx, report, [info.orig_filename for info in refused], "entries")
-            if gap or not refused:  # a gap: the engines get only the retry trees of the gap classes
+            if gap:  # the engines get only the retry trees of the gap classes
                 return report, nested, artifact.path
+            if not refused:
+                with zipfile.ZipFile(artifact.path) as zf:
+                    plain = _plain_layout(zf)
+                if plain:  # else the engines get a copy, as for a refused entry, with no warning
+                    return report, nested, artifact.path
             folder = _tmp_dir(ctx)
             with ctx.family_lock:
                 ctx.family_dirs.setdefault(artifact.rel, []).append(folder)  # it goes when the row is final
