@@ -505,7 +505,7 @@ def _class_stem(entry: str) -> str:
     return normalize_java_rel(entry)[: -len(".class")]
 
 
-def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
+def _stems_and_claims(source: Path, read: bool = True) -> tuple[set[str], set[str]]:
     """One pass over the class entries: (top-level class stems, claims).
 
     Claims are the other source rels this archive could yield: module-info/package-info,
@@ -516,7 +516,8 @@ def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
 
     A class with an outer class by name that does not list itself in its InnerClasses attribute, for example the
     module class Foo$ of a Scala object, is a top-level class for the JVM: no file of another class holds it, so it
-    is expected (#206). A class file that decaf cannot read stays an inner class, as in _read_unnested.
+    is expected (#206). A class file that decaf cannot read stays an inner class, as in _read_unnested. With
+    read=False, the rule is by name only: no class file is read, and the union of the sets is the same.
     """
     if source.is_dir():
         entries = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
@@ -535,7 +536,8 @@ def _stems_and_claims(source: Path) -> tuple[set[str], set[str]]:
         else:
             stems.add(_class_stem(e))
     inner = {s for s in stems if outer_stem(s, stems) is not None}
-    tops = {_class_stem(name) for name, data in _read_classes(source, [e for e in entries if _class_stem(e) in inner])
+    names = [e for e in entries if _class_stem(e) in inner] if read else []
+    tops = {_class_stem(name) for name, data in _read_classes(source, names)
             if check.lists_itself(data) is False}  # a multi-release class: one entry is enough
     return (stems - inner) | tops, claims | (inner - tops)
 
@@ -1738,7 +1740,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         # The retry tree of a gap class has the family of its outer class by name (#206), so an engine can also
         # write a class that the sources jar wrote. Such a file goes, as a file of a class that an earlier output
         # wrote (#107): only the gap classes and the classes below them by name get engine files.
-        stems, claims = _stems_and_claims(artifact.path)
+        stems, claims = _stems_and_claims(artifact.path, read=False)  # the union is the same without the reads
         published = {s for s in stems | claims
                      if s not in gap and not any(s[:i] in gap for i in range(len(s)) if s[i] == "$")}
         _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held(written=published))
@@ -2125,6 +2127,8 @@ def _decompile_batch(
     """
     if engines.PROCESSES.closed:
         return [], [(a, t, r) for a, t, r, _, _ in members]
+    # The scheduler formed the batch by name only; the union of the sets is the same with the class files (#206)
+    members = [(a, t, r, *_stems_and_claims(t)) for a, t, r, _, _ in members]
     name = ctx.chain[0]
     heap = ctx.memory_plan.heap_mb(1)  # a batch JVM takes one slot
     batch_id = next(ctx.batch_ids)
@@ -2632,8 +2636,9 @@ def run(
                                         # CFR, Procyon, and JD get the classes of WEB-INF/classes/ apart (#170, #173)
                                         and not (chain[0] in _ROOTED_ENGINES and _container_classes(target) is not None)
                                     ):
+                                        # by name only: no class file is read in this thread (#206)
                                         ready_small.append(
-                                            (a, target, report, *_stems_and_claims(target))
+                                            (a, target, report, *_stems_and_claims(target, read=False))
                                         )
                                     else:
                                         heappush(ready, (-a.classes, next(seq), a, target, report))

@@ -879,6 +879,18 @@ def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar,
     assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info"}
 
 
+def test_stems_and_claims_by_name_only_read_no_class_file(make_jar, monkeypatch):
+    """The scheduler forms batches with the rule by name only; the union of the sets is the same (#206)."""
+    from test_check import _class_with
+
+    from decaf.pipeline import _stems_and_claims
+
+    jar = make_jar("t.jar", {"p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$")})
+    assert _stems_and_claims(jar) == ({"p/Foo", "p/Foo$"}, set())
+    monkeypatch.setattr(check, "lists_itself", lambda data: pytest.fail("a class file was read"))
+    assert _stems_and_claims(jar, read=False) == ({"p/Foo"}, {"p/Foo$"})
+
+
 def test_stems_and_claims_keep_an_inner_class_whose_entry_is_damaged(make_damaged_jar):
     from test_check import _class_with
 
