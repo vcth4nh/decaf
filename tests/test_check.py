@@ -771,24 +771,24 @@ def _class_with_inner_classes(
     return b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + u2(count) + pool + body
 
 
-def test_lists_itself_tells_an_inner_class_from_a_top_level_class_with_a_dollar():
+def test_class_links_tell_an_inner_class_from_a_top_level_class_with_a_dollar():
     """An inner class of the JVM lists itself in its InnerClasses attribute. The module class Foo$ of a Scala object
     does not, and a class whose attribute a tool removed does not either (#159)."""
-    assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),)))
-    assert check.lists_itself(_class_with_inner_classes("p/A$B", (("p/A$B", "p/A"),)))
-    assert check.lists_itself(_class_with_inner_classes("p/A", (("p/A$1", "p/A"),))) is False  # its inner class only
-    assert check.lists_itself(_class_with("p/Foo$")) is False  # no InnerClasses attribute
-    assert check.lists_itself(_class_with("p/A$1", utf8=("InnerClasses",))) is False  # a tool kept only the name
-    assert check.lists_itself(b"not a class") is None
-    assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-6]) is None  # a cut file
-    assert check.lists_itself(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-18]) is None  # no attributes
+    anonymous = (("p/A$1", None),)
+    assert check.class_links(_class_with_inner_classes("p/A$1", anonymous)) == ("p/A$1", anonymous, None)
+    outer = (("p/A$1", "p/A"),)  # its inner class only
+    assert check.class_links(_class_with_inner_classes("p/A", outer)) == ("p/A", outer, None)
+    assert check.class_links(_class_with("p/Foo$")) == ("p/Foo$", (), None)  # no InnerClasses attribute
+    assert check.class_links(_class_with("p/A$1", utf8=("InnerClasses",))) == ("p/A$1", (), None)  # only the name
+    assert check.class_links(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-6]) is None  # a cut file
+    assert check.class_links(_class_with_inner_classes("p/A$1", (("p/A$1", None),))[:-18]) is None  # no attributes
     full = _class_with_inner_classes("p/A$1", (("p/A$1", None),))
-    assert check.lists_itself(full[:full.index(b"InnerClasses") + 6]) is None  # cut in the constant pool
+    assert check.class_links(full[:full.index(b"InnerClasses") + 6]) is None  # cut in the constant pool
 
 
 def test_a_class_file_with_more_members_than_the_walk_limit_counts_as_cut(monkeypatch):
     """A crafted class file can hold millions of members and attributes, and the walk in Python takes seconds for each
-    file. Above the limit, the file counts as a cut file: lists_itself gives None, and source_file gives None."""
+    file. Above the limit, the file counts as a cut file: class_links gives None, and source_file gives None."""
     u2 = lambda v: v.to_bytes(2, "big")  # noqa: E731
     pool = b"\x01" + u2(5) + b"p/A$1" + b"\x07" + u2(1)  # 1: Utf8, 2: Class -> 1
     pool += b"\x01" + u2(12) + b"InnerClasses" + b"\x01" + u2(10) + b"SourceFile" + b"\x01" + u2(6) + b"A.java"  # 3-5
@@ -797,9 +797,9 @@ def test_a_class_file_with_more_members_than_the_walk_limit_counts_as_cut(monkey
     body += u2(1) + u2(4) + (2).to_bytes(4, "big") + u2(5)  # SourceFile: A.java
     data = b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + u2(6) + pool + body
     links = ("p/A$1", (), None)
-    assert (check.lists_itself(data), check.source_file(data), check.class_links(data)) == (False, "A.java", links)
+    assert (check.source_file(data), check.class_links(data)) == ("A.java", links)
     monkeypatch.setattr(check, "_WALK_MAX", 3)  # two fields and two attributes: four steps
-    assert (check.lists_itself(data), check.source_file(data), check.class_links(data)) == (None, None, None)
+    assert (check.source_file(data), check.class_links(data)) == (None, None)
 
 
 def test_class_links_reads_the_inner_classes_entries_and_the_enclosing_class():
@@ -825,7 +825,7 @@ def test_class_links_gives_none_for_a_file_that_does_not_parse():
     assert check.class_links(member[:count] + b"\x00\x09" + member[count + 2:]) is None  # more entries than bytes
 
 
-def test_lists_itself_compares_the_class_names_not_the_pool_entries():
+def test_class_links_give_the_class_names_not_the_pool_entries():
     """A class writer can give the self entry of the InnerClasses attribute a second Class entry of the same name.
     The JVM compares the names, so the class is an inner class. Before, it counted as top-level (#209)."""
     u2 = lambda v: v.to_bytes(2, "big")  # noqa: E731
@@ -835,7 +835,7 @@ def test_lists_itself_compares_the_class_names_not_the_pool_entries():
     body = b"\x00\x21" + u2(2) + u2(0) + u2(0) + u2(0) + u2(0)  # this_class 2; no interfaces, fields, or methods
     body += u2(1) + u2(4) + len(info).to_bytes(4, "big") + info
     data = b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + u2(5) + pool + body
-    assert check.lists_itself(data) is True
+    assert check.class_links(data) == ("p/A$1", (("p/A$1", None),), None)  # the self entry: the same name
 
 
 def test_non_java_reads_the_markers_of_kotlin_groovy_and_scala():

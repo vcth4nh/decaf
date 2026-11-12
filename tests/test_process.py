@@ -1007,6 +1007,10 @@ def test_class_parents_of_crafted_class_files_have_no_cycle(make_jar):
     crafted = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A$C", refs=("p/A$C",)),
                "p/A$C": _inner("p/A$C", "p/A$B", refs=("p/A$B",))}
     assert _parents(make_jar, crafted) == {"p/A$B": "p/A", "p/A$C": "p/A$B"}
+    twice = {"p/Foo": _lister("p/Foo", refs=("p/Foo$",)),  # one entry lists itself two times, the other not
+             "p/Foo$": _inner("p/Foo$", "p/Foo", lists=(("p/Foo$", "p/Foo"),)),
+             "META-INF/versions/9/p/Foo$": _lister("p/Foo$")}
+    assert _parents(make_jar, twice) == {"p/Foo$": None}
 
 
 def test_read_parents_keeps_the_container_root_of_a_copy(make_jar):
@@ -1051,7 +1055,7 @@ def test_stems_and_claims_by_name_only_read_no_class_file(make_jar, monkeypatch)
 
     jar = make_jar("t.jar", {"p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$")})
     assert _stems_and_claims(jar) == ({"p/Foo", "p/Foo$"}, set())
-    monkeypatch.setattr(check, "lists_itself", lambda data: pytest.fail("a class file was read"))
+    monkeypatch.setattr(check, "class_links", lambda data: pytest.fail("a class file was read"))
     assert _stems_and_claims(jar, read=False) == ({"p/Foo"}, {"p/Foo$"})
 
 
@@ -1185,7 +1189,8 @@ def test_a_batch_member_counts_its_class_that_is_top_level_for_the_jvm(make_jar,
         for t in targets:
             with zipfile.ZipFile(t) as zf:
                 for entry in zf.namelist():
-                    if check.lists_itself(zf.read(entry)) or (entry == "p/Foo$.class" and not writes):
+                    links = check.class_links(zf.read(entry))
+                    if any(inner == links[0] for inner, _ in links[1]) or (entry == "p/Foo$.class" and not writes):
                         continue  # an inner class rides with its outer class
                     (Path(dest) / entry).with_suffix(".java").parent.mkdir(parents=True, exist_ok=True)
                     (Path(dest) / entry).with_suffix(".java").write_text("class X {}")

@@ -564,15 +564,6 @@ def _class_attributes(
     return found
 
 
-def lists_itself(data: bytes) -> bool | None:
-    """Does a class file list itself in its InnerClasses attribute? True for an inner class of the JVM. False for a
-    top-level class, also one with a $ in its name, for example the module class Foo$ of a Scala object (#159).
-    None when the file is cut or does not parse."""
-    links = class_links(data)
-    # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
-    return None if links is None else any(inner == links[0] for inner, _ in links[1])
-
-
 def class_links(data: bytes) -> tuple[str, tuple[tuple[str, str | None], ...], str | None] | None:
     """The name of a class file, the entries of its InnerClasses attribute as (inner class, outer class or None),
     and the class of its EnclosingMethod attribute, or None. A class takes its parent from these (#207, #208).

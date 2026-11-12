@@ -819,8 +819,9 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
                 out[x] = by_name(x)
                 continue
             cands = [q for q in ms if q != x and not q.startswith(x + "$")]
-            own = [(outer, enclosing) for name, found, enclosing in links[x] for inner, outer in found if inner == name]
-            if len(own) < len(links[x]):  # rule 2: one entry that does not list itself is enough (#206)
+            # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
+            own = [next(((o, e) for i, o in found if i == name), None) for name, found, e in links[x]]
+            if None in own:  # rule 2: one entry that does not list itself is enough (#206)
                 out[x] = None
                 continue
             outer, enclosing = own[0]
