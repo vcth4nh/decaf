@@ -5001,3 +5001,19 @@ def test_a_retry_tree_lacks_the_refused_class_files_of_a_family(tmp_path: Path, 
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     assert [name for name, _ in runner.calls][:2] == ["vineflower", "cfr"]
     assert runner.sent[1] == ["p/A.class"]
+
+
+def test_the_root_jar_leaves_out_a_path_with_a_drive_or_a_backslash_parent(tmp_path: Path, class_file):
+    from decaf.pipeline import _root_jar
+
+    war = _zip(tmp_path / "app.war", [
+        ("WEB-INF/classes/com/x/A.class", class_file("com/x/A")),
+        ("WEB-INF/classes/C:/x/D.class", class_file("x/D")),
+        ("WEB-INF/classes/q\\..\\..\\B.class", class_file("B")),
+        ("WEB-INF/classes/q/.../E.class", class_file("q/E")),
+    ])
+    jar = tmp_path / "root/classes.jar"
+    jar.parent.mkdir()
+    _root_jar(war, "WEB-INF/classes/", jar)
+    with zipfile.ZipFile(jar) as zf:
+        assert zf.namelist() == ["com/x/A.class"]

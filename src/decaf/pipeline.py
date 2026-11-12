@@ -1848,7 +1848,7 @@ def _root_jar(archive: Path, prefix: str, jar: Path) -> None:
             if info.is_dir() or not name.endswith(".class") or _container_prefix(name) != prefix:
                 continue
             below = name[len(prefix) :]
-            if not below.startswith("/") and ".." not in below.split("/"):
+            if stays_inside(below):
                 chosen[below] = info
         part = jar.with_name("entry.part")
         with zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) as out:
