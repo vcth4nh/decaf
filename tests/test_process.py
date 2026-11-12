@@ -845,8 +845,9 @@ def test_stems_and_claims_keep_top_level_dollar_classes(make_jar, tmp_path):
 def _named_inner_classes() -> dict[str, bytes]:
     """Classes with an outer class by name. Foo$ does not list itself in its InnerClasses attribute, as the module
     class of a Scala object: it is a top-level class for the JVM. A$1 lists itself, and A names it. S$B lists itself,
-    but S does not name it: S was compiled again without it, so it is stale and top-level (#207). K creates the
-    Kotlin class K$f$$inlined$g$1, and E lists E$1, which does not list itself: they are inner classes. The file of
+    but S does not name it: S was compiled again without it, so it is stale and top-level (#207). E lists E$1, but
+    E$1 does not list itself, so it is top-level too. K creates the Kotlin class K$f$$inlined$g$1: it is an inner
+    class. The file of
     Cut$1 is cut, and Big$1 is above the size limit of a class file (the test sets the limit): decaf cannot read
     them."""
     from test_check import _class_with, _class_with_inner_classes
@@ -887,9 +888,9 @@ def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar,
     monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(entries["com/a/Big$1.class"]) - 1)
     stems, claims = pipeline._stems_and_claims(source)
     assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big", "com/a/S", "com/a/S$B",
-                     "com/a/K", "com/a/E"}
+                     "com/a/K", "com/a/E", "com/a/E$1"}
     assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info",
-                      "com/a/K$f$$inlined$g$1", "com/a/E$1"}
+                      "com/a/K$f$$inlined$g$1"}
 
 
 def _inner(name: str, outer: str | None, enclosing: str | None = None, lists=(), refs=()) -> bytes:
@@ -923,17 +924,15 @@ def test_class_parents_of_a_class_file_that_cannot_be_read_follow_the_name(make_
 
 
 def test_class_parents_of_a_class_that_does_not_list_itself(make_jar):
-    """Rule 2: no class of the family lists it: top-level (#206). A class that lists it is its parent (S8), and the
-    outer class of that entry comes first; else the longest lister that is a $-prefix, else the first lister."""
+    """Rule 2: top-level (#206), also when a class of the family lists it (S8). Vineflower, Fernflower, and JD nest
+    such a class in the file of the class that lists it, but CFR and Procyon write it only from its own class file:
+    from a class folder, the file of its outer class did not hold it, and the row had no missing class."""
     assert _parents(make_jar, {"X": _lister("X"), "X$": _lister("X$")}) == {"X$": None}
     s8 = {"X": _lister("X", lists=(("X$$anon$1", None),)), "X$": _lister("X$"), "X$$anon$1": _lister("X$$anon$1")}
-    assert _parents(make_jar, s8)["X$$anon$1"] == "X"
+    assert _parents(make_jar, s8)["X$$anon$1"] is None
     by_entry = {"p/A": _lister("p/A"), "p/A$C": _inner("p/A$C", "p/A", lists=(("p/A$B", "p/A"),)),
                 "p/A$B": _lister("p/A$B")}
-    assert _parents(make_jar, by_entry)["p/A$B"] == "p/A"  # the entry in A$C names A as its outer class
-    first = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A", lists=(("p/A$1", None),)),
-             "p/A$1": _lister("p/A$1")}
-    assert _parents(make_jar, first)["p/A$1"] == "p/A$B"  # A$B is no $-prefix of A$1: the first lister
+    assert _parents(make_jar, by_entry)["p/A$B"] is None
 
 
 def test_class_parents_of_a_member_class(make_jar):
@@ -1647,8 +1646,7 @@ def _k_classes(class_file, lambda_file: str | None, namer: str | None) -> dict[s
         else class_file(_KL, lambda_file),
     }
     if namer == "K$1":
-        # a Class entry, no entry in its InnerClasses attribute: a class that lists the lambda nests it (#207)
-        classes[f"{_K}$1.class"] = _class_with_inner_classes(f"{_K}$1", ((f"{_K}$1", _K),), refs=(_KL,))
+        classes[f"{_K}$1.class"] = _class_with_inner_classes(f"{_K}$1", ((f"{_K}$1", _K), (_KL, None)))
     if namer == "K$$Lambda$0$1":
         classes[f"{_KL}$1.class"] = _class_with_inner_classes(f"{_KL}$1", ((f"{_KL}$1", _KL),))
     return classes

@@ -748,10 +748,10 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
 
     The family of a class: the classes with the same top-level class by name. A candidate is a class of the family
     that is not the class and is not below it by name. Q names X when the simple name of X is in the package_refs
-    of Q, and Q lists X when the InnerClasses attribute of Q has an entry of X.
+    of Q.
     1. The class file cannot be read or does not parse: the longest $-prefix that is a class, as before.
-    2. It does not list itself: no candidate lists it, so it is top-level. Else the outer class of such an entry
-       when it is a candidate, else the longest lister that is a $-prefix, else the first lister.
+    2. It does not list itself: top-level (#206). Also when a class of the family lists it: Vineflower, Fernflower,
+       and JD then nest it, but CFR and Procyon write it only from its own class file, so it must be expected.
     3. It lists itself with an outer class P, a member class: P when P is a candidate and names it. Else it is
        stale (P was compiled again without it): top-level.
     4. It lists itself with no outer class, an anonymous or local class: of the candidates that name it, the class
@@ -794,11 +794,6 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
     out: dict[str, str | None] = {}
     for family, ms in members.items():
         prefix = {s: s[: len(s) - len(links[s][0][0])] for s in ms if s in links}  # the folder above the package root
-        listed: dict[str, list[tuple[str, str | None]]] = {}  # class -> (lister, outer class of the entry)
-        for q in ms:
-            for _, found, _ in links.get(q, ()):
-                for inner, outer in found:
-                    listed.setdefault(prefix[q] + inner, []).append((q, prefix[q] + outer if outer else None))
         for x in ms:
             if tops[x] is None:
                 continue
@@ -809,11 +804,7 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
             cands = [q for q in ms if q != x and not q.startswith(x + "$")]
             own = [(outer, enclosing) for name, found, enclosing in links[x] for inner, outer in found if inner == name]
             if len(own) < len(links[x]):  # rule 2: one entry that does not list itself is enough (#206)
-                listers = [(q, o) for q, o in listed.get(x, ()) if q in cands]
-                outers = sorted(o for _, o in listers if o in cands)
-                lists = sorted({q for q, _ in listers})
-                prefixes = [q for q in lists if x.startswith(q + "$")]
-                out[x] = outers[0] if outers else max(prefixes, key=len) if prefixes else lists[0] if lists else None
+                out[x] = None
                 continue
             outer, enclosing = own[0]
             if outer is not None:  # rule 3
