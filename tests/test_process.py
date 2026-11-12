@@ -484,6 +484,69 @@ def test_decompile_batch_splits_and_attributes(make_jar, tmp_path):
     assert (out / "com/a/A.java").is_file() and (out / "com/b/B.java").is_file()
 
 
+def _recording_batch(targets: list[Path]):
+    def _run(spec, jar_path, ts, dest, timeout, java="java", cpu_budget=None, **kw):
+        targets.extend(Path(t) for t in ts)
+        return merged_batch_engine(spec, jar_path, ts, dest, timeout, java=java)
+
+    return _run
+
+
+@pytest.mark.class_names
+def test_a_batch_runs_on_the_copies_and_sends_a_member_with_a_refused_entry_back_for_a_solo_run(make_jar, tmp_path,
+                                                                                               class_file):
+    """The solo run of the member prints the warning and counts refused one time; the batch notes nothing."""
+    from decaf.pipeline import _decompile_batch
+
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": class_file("com/a/A")})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": class_file("com/b/B"), "com/b/C.class": class_file("../C")})
+    m3 = _member(make_jar, "c.jar", {"com/c/D.class": class_file("com/c/D")})
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    done, requeue = _decompile_batch([m1, m2, m3], ctx)
+    assert [r.rel for r in done] == ["a.jar", "c.jar"] and all(r.attempts[0].level == "batch" for r in done)
+    assert [(a.rel, t) for a, t, _ in requeue] == [("b.jar", m2[1])]  # the input: its solo run makes its own copy
+    assert (requeue[0][2].attempts, requeue[0][2].refused, warns) == ([], 0, [])
+    assert [t.name for t in targets] == ["a.jar", "c.jar"] and not {m1[1], m3[1]} & set(targets)  # the copies
+    assert list(ctx.tmp_root.iterdir()) == []  # the copy folders went with the batch
+
+
+@pytest.mark.class_names
+def test_a_batch_of_members_with_refused_entries_runs_no_engine(make_jar, tmp_path, class_file):
+    from decaf.pipeline import _decompile_batch
+
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": class_file("../A")})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": class_file("../B")})
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert (done, [t for _, t, _ in requeue], targets) == ([], [m1[1], m2[1]], [])
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_a_batch_whose_copy_fails_sends_each_member_back_and_drops_its_copy_folders(make_jar, tmp_path,
+                                                                                   monkeypatch):
+    import decaf.pipeline as pipeline
+
+    real = pipeline._engine_copy
+
+    def copy_then_fail(archive, folder):
+        if Path(archive).name == "b.jar":
+            raise OSError(28, "No space left on device")
+        return real(archive, folder)
+
+    monkeypatch.setattr(pipeline, "_engine_copy", copy_then_fail)
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    done, requeue = pipeline._decompile_batch([m1, m2], ctx)
+    assert (done, [t for _, t, _ in requeue], targets) == ([], [m1[1], m2[1]], [])
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
 def test_decompile_batch_failure_requeues_members(make_jar, tmp_path):
     from decaf.engines import EngineResult
     from decaf.pipeline import _decompile_batch
@@ -497,6 +560,7 @@ def test_decompile_batch_failure_requeues_members(make_jar, tmp_path):
     done, requeue = _decompile_batch([m1, m2], ctx)
     assert done == []
     assert [a.rel for a, _, _ in requeue] == ["a.jar", "b.jar"]
+    assert [t for _, t, _ in requeue] == [m1[1], m2[1]]  # the inputs, not the copies of the batch
     for _, _, report in requeue:
         assert report.attempts[0].level == "batch" and report.attempts[0].returncode == 1
 
@@ -4415,7 +4479,7 @@ def test_vineflower_and_fernflower_get_the_target_unchanged(make_jar, tmp_path: 
     process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
     process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
     assert runner.sent[0] == ["target/classes/p/A.class", "target/classes/q/B$Nested.class", "target/classes/q/B.class"]
-    assert runner.calls[1] == (engine, ctx.family_dirs["app.war"][-1] / "app.war")  # the copy of the engines, as it is
+    assert [(n, t.name, t == war) for n, t in runner.calls[1:]] == [(engine, "app.war", False)]  # the copy, as it is
 
 
 @pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
@@ -4424,7 +4488,7 @@ def test_a_rooted_engine_gets_an_archive_without_a_container_entry_unchanged(mak
     runner = writing_runner({engine: {"com/x/A.java": "class A {}"}})
     ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False)
     process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
-    assert runner.calls == [(engine, ctx.family_dirs["app.jar"][-1] / "app.jar")]  # the copy of the engines, as it is
+    assert [(n, t.name, t == jar) for n, t in runner.calls] == [(engine, "app.jar", False)]  # the copy, as it is
 
 
 @pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
@@ -5006,12 +5070,18 @@ def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, cla
 
 
 def _names_runner():
-    """Fake engine: records the target and its entry names, and writes one file for each top-level class entry."""
+    """Fake engine: records the target and its entry names (data: the bytes of each name; heads: the first bytes of
+    the file), and writes one file for each top-level class entry. The copy of the engines goes after the row, so the
+    call reads it."""
     calls: list[tuple[Path, list[str]]] = []
+    data: list[dict[str, bytes]] = []
+    heads: list[bytes] = []
 
     def _run(spec, jar_path, target, dest, timeout, **kw):
+        heads.append(Path(target).read_bytes()[:4])
         with zipfile.ZipFile(target) as zf:
             names = zf.namelist()
+            data.append({n: zf.read(n) for n in names})
         calls.append((Path(target), names))
         n = 0
         for name in dict.fromkeys(names):
@@ -5023,6 +5093,8 @@ def _names_runner():
         return EngineResult(spec.name, 0, False, n, "")
 
     _run.calls = calls
+    _run.data = data
+    _run.heads = heads
     return _run
 
 
@@ -5052,11 +5124,12 @@ def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, 
         report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     ((target, names),) = runner.calls
     assert names == ["META-INF/MANIFEST.MF", "p/", "p/D.class", "p/A.class", "p/E.class", "p/r.txt"]
-    with zipfile.ZipFile(target) as zf:
-        assert zf.read("p/D.class") == class_file("p/D") and zf.getinfo("p/").is_dir()
-        assert zf.read("p/E.class") == class_file("p/E") + b"2"
-    assert target.name == "app.jar" and target != jar and target.parent in ctx.family_dirs["app.jar"]
-    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 6, 3, 3)
+    ((data),) = runner.data
+    assert data["p/D.class"] == class_file("p/D") and data["p/E.class"] == class_file("p/E") + b"2"
+    assert target.name == "app.jar" and target != jar and not target.parent.exists()  # the copy went with the row
+    # the same counts as with the copy of the fetch stage: the expected classes come from the input
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files, report.refused) == (
+        "ok", 6, 3, 3, 3)
     assert warns == ["app.jar: decaf does not use 3 of its entries, because a name or a class name can leave the output"
                      " folder, or decaf cannot read the class name; the first is 'p/B.class'"]
     assert jar.read_bytes() == before
@@ -5076,8 +5149,7 @@ def test_the_last_entry_of_a_name_decides_what_the_copy_gets(tmp_path: Path, cla
     ((target, names),) = runner.calls
     assert names == (["p/A.class", "p/B.class"] if first_bad else ["p/B.class"])
     if first_bad:
-        with zipfile.ZipFile(target) as zf:
-            assert zf.read("p/A.class") == good
+        assert runner.data[0]["p/A.class"] == good
     assert (report.classes, report.missing_classes) == (2, 0 if first_bad else 1)
 
 
@@ -5090,9 +5162,9 @@ def test_an_engine_gets_a_copy_of_a_normal_archive(tmp_path: Path, class_file):
     ctx.on_warn = warns.append
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     ((target, names),) = runner.calls
-    assert target != jar and target.name == "app.jar" and target.parent in ctx.family_dirs["app.jar"]
-    assert _entries(target) == _entries(jar) and warns == []
+    assert target != jar and target.name == "app.jar" and names == ["p/A.class", "p/r.txt"] and warns == []
     assert (report.classes, report.missing_classes, report.refused) == (1, 0, 0)
+    assert not target.parent.exists() and list(ctx.tmp_root.iterdir()) == []  # the copy went with the row
 
 
 @pytest.mark.class_names
@@ -5260,16 +5332,21 @@ def test_the_readers_of_a_target_see_the_same_in_the_copy_of_a_normal_archive(tm
 
 @pytest.mark.class_names
 @pytest.mark.parametrize("refused", [False, True])
-def test_the_fetch_stage_stores_the_expected_classes_only_for_a_row_with_refused_entries(tmp_path: Path, class_file,
-                                                                                        refused):
-    from decaf.pipeline import _fetch_stage
+def test_the_fetch_stage_gives_stage_2_the_input_archive_with_no_test(tmp_path: Path, class_file, refused,
+                                                                      monkeypatch):
+    """The fetch stage does the same work as before the fix: the order in which the jars get ready makes the batches.
+    Stage 2 makes the copy and counts the refused entries."""
+    import decaf.pipeline as pipeline
 
     jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")),
                                       ("p/B.class", class_file("../B" if refused else "p/B"))])
     ctx = make_ctx(tmp_path, _names_runner(), fallback=False)
-    report, _, target = _fetch_stage(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
-    assert target != jar and report.refused == refused
-    assert ctx.expected_before_refusal == ({"app.jar": {"p/A", "p/B"}} if refused else {})
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    monkeypatch.setattr(pipeline, "_engine_copy", lambda *a: pytest.fail("a copy in the fetch stage"))
+    report, _, target = pipeline._fetch_stage(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (target, report.refused, warns, ctx.expected_before_refusal) == (jar, 0, [], {})
+    assert "app.jar" not in ctx.family_dirs and list(ctx.tmp_root.iterdir()) == []
 
 
 # --- decaf's own use of a nested archive name ---
@@ -5420,7 +5497,7 @@ def test_an_archive_with_bytes_before_its_first_entry_goes_to_the_engines_as_a_c
     report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     ((target, names),) = runner.calls
     assert target != jar and target.name == "app.jar" and names == ["p/A.class"]
-    assert target.read_bytes().startswith(b"PK\x03\x04")
+    assert runner.heads == [b"PK\x03\x04"]
     assert (warns, report.refused, report.classes, report.missing_classes) == ([], 0, 1, 0)
 
 

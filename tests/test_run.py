@@ -1999,8 +1999,9 @@ def test_a_batch_member_reads_its_class_files_in_a_worker(fake_env, make_jar, tm
 
 @pytest.mark.class_names
 @pytest.mark.parametrize("refused", [False, True])
-def test_an_archive_with_a_refused_entry_is_no_batch_target(fake_env, make_jar, tmp_path, class_file, refused):
-    """A batch takes the expected classes from its target, and the copy without the refused entries lacks them."""
+def test_a_batch_member_with_a_refused_entry_runs_alone(fake_env, make_jar, tmp_path, class_file, refused):
+    """A batch takes the expected classes from its target, and the copy without the refused entries lacks them: such
+    a member goes back for a solo run, which counts it one time. The other member stays in the batch."""
     s0 = make_jar("s0.jar", {"com/s0/A.class": class_file("com/s0/A")})
     s1 = make_jar("s1.jar", {"com/s1/B.class": class_file("com/s1/B"),
                              "com/s1/C.class": class_file("../C" if refused else "com/s1/C")})
@@ -2016,7 +2017,10 @@ def test_an_archive_with_a_refused_entry_is_no_batch_target(fake_env, make_jar, 
             if queued[0] == 3:
                 all_queued.set()
 
+    solo: list[str] = []
+
     def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        solo.append(Path(target).name)
         if Path(target).name == "big.jar":
             all_queued.wait(timeout=30)
         return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
@@ -2031,9 +2035,11 @@ def test_an_archive_with_a_refused_entry_is_no_batch_target(fake_env, make_jar, 
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, fallback=False, jobs=1,
                           cpus=1),
                  runner=gated_solo, batch_runner=recording_batch, on_event=on_event, on_warn=warns.append)
-    assert batches == ([] if refused else [["s0.jar", "s1.jar"]])
+    assert batches == ([["s0.jar"]] if refused else [["s0.jar", "s1.jar"]])
+    assert solo == (["big.jar", "s1.jar"] if refused else ["big.jar"])
     row = next(r for r in report.artifacts if r.rel.endswith("s1.jar"))
-    assert (row.classes, row.missing_classes) == ((2, 1) if refused else (2, 0))
+    assert (row.classes, row.missing_classes, row.refused) == ((2, 1, 1) if refused else (2, 0, 0))
+    assert [a.level for a in row.attempts] == (["archive"] if refused else ["batch"])
     assert len([w for w in warns if "decaf does not use" in w]) == refused
 
 
@@ -4259,9 +4265,9 @@ def _watch_final_delete(monkeypatch) -> list[list[str]]:
 
 def _other_folders(dest, target) -> set[str]:
     """The folders of the temp root that are not the output folder or the input folder of this engine call (#97),
-    and not the copy of an archive for the engines: it goes when its row is final. A fetch thread can have made the
-    folder of a copy and not its file yet."""
-    found = list(Path(dest).parent.iterdir())  # one listing: a fetch thread can make a folder at any time
+    and not the copy of an archive for the engines: it goes when its decompile step ends. Another worker can have
+    made the folder of a copy and not its file yet."""
+    found = list(Path(dest).parent.iterdir())  # one listing: another worker can make a folder at any time
     copies = {p.name for p in found
               if p.is_dir() and all(c.is_file() and c.suffix in (".jar", ".part") for c in p.iterdir())}
     return {p.name for p in found} - {Path(dest).name, Path(target).name} - copies

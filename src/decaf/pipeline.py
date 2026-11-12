@@ -486,8 +486,8 @@ class Ctx:
     family_lock: threading.Lock = field(default_factory=threading.Lock)
     # rel -> the top-level classes that its Maven sources lack; stage 2 decompiles them (#180)
     maven_gaps: dict[str, set[str]] = field(default_factory=dict)
-    # rel -> the expected classes of a row with refused items, with them: of the input of an archive, of the copy of
-    # a class folder before the removal. Stage 2 takes the set, so a refused class counts as missing.
+    # rel -> the expected classes of a class folder with refused class files: of its copy before the removal. Stage 2
+    # takes the set, so a refused class counts as missing.
     expected_before_refusal: dict[str, set[str]] = field(default_factory=dict)
 
 
@@ -2101,15 +2101,33 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         # The retry tree of a gap class has the family of its outer class by name (#206), so an engine can also
         # write a class that the sources jar wrote. Such a file goes, as a file of a class that an earlier output
         # wrote (#107): only the gap classes and the classes below them by name get engine files.
+        _, refused = _engine_copy(artifact.path, None)  # the tests of the copy, with no write
+        _note_refused(artifact, ctx, report, refused, "entries")
         stems, claims = _stems_and_claims(artifact.path, read=False)  # the union is the same without the reads
         published = {s for s in stems | claims
                      if s not in gap and not any(s[:i] in gap for i in range(len(s)) if s[i] == "$")}
         _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held(written=published))
         return
-    source = target  # the copy: the hold step and the class retries read only what the engines get
-    expected = ctx.expected_before_refusal.pop(artifact.rel, None)
-    if expected is None:
-        expected = expected_class_stems(source)
+    if target.is_dir():  # the copy of a class folder, from the fetch stage
+        expected = ctx.expected_before_refusal.pop(artifact.rel, None)
+        _decompile_source(artifact, target, expected_class_stems(target) if expected is None else expected, ctx,
+                          report)
+        return
+    # An engine never reads the input archive: it reads a copy that decaf wrote from the entries that it tested.
+    folder = _tmp_dir(ctx)
+    try:
+        copy, refused = _engine_copy(target, folder)
+        _note_refused(artifact, ctx, report, refused, "entries")
+        # with refused entries, the expected classes of the input: a refused class counts as missing
+        _decompile_source(artifact, copy, expected_class_stems(target if refused else copy), ctx, report)
+    finally:
+        _drop(folder)
+
+
+def _decompile_source(artifact: Artifact, source: Path, expected: set[str], ctx: Ctx, report: ArtifactReport) -> None:
+    """The engine chain and the class retries on a source that decaf made: the copy of an archive or of a class
+    folder. The engines, the hold step, and the retries read only this source."""
+    target = source
     report.classes = len(expected)
     produced: set[str] = set()
     held = _Held()
@@ -2161,7 +2179,7 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
 def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
     """The nested archives of an archive. An entry whose names do not stay inside (_names_stay) gives no artifact,
     and neither does another entry with its zipfile name: the name test comes before each other use, so no path is
-    made from such a name, and the bytes of such an entry never become a row. The row counts them (_outside_names)."""
+    made from such a name, and the bytes of such an entry never become a row. The row of the archive counts them."""
     try:
         with zipfile.ZipFile(artifact.path) as zf:
             infos = zf.infolist()
@@ -2406,19 +2424,9 @@ def _fetch_stage(
             if hit and not gap:  # no engine runs: only the names count
                 _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
                 return report, nested, None
-            if gap:  # the engines get only the retry trees of the gap classes: the same tests, no copy
-                _, refused = _engine_copy(artifact.path, None)
-                _note_refused(artifact, ctx, report, refused, "entries")
-                return report, nested, artifact.path
-            # An engine never reads the input archive: it reads a copy that decaf wrote from the entries it tested.
-            folder = _tmp_dir(ctx)
-            with ctx.family_lock:
-                ctx.family_dirs.setdefault(artifact.rel, []).append(folder)  # it goes when the row is final
-            copy, refused = _engine_copy(artifact.path, folder)
-            if refused:
-                ctx.expected_before_refusal[artifact.rel] = expected_class_stems(artifact.path)
-            _note_refused(artifact, ctx, report, refused, "entries")
-            return report, nested, copy
+            # Stage 2 makes the copy that the engines get and counts the refused entries: the fetch stage does no
+            # more work, because the order in which the archives get ready makes the batches.
+            return report, nested, artifact.path
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
@@ -2509,6 +2517,41 @@ def _watch_batch(
 
 
 def _decompile_batch(
+    members: list[tuple[Artifact, Path, ArtifactReport, set[str], set[str]]], ctx: Ctx
+) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
+    """Stage 2 for a batch on the copies that the engines get (_engine_copy), one for each member.
+
+    A batch takes the expected classes from its targets, so a member whose copy has refused entries goes back for a
+    solo run with its input, which counts and prints them one time. A requeued member gets its input back. The copy
+    folders go when the batch ends, also after an error.
+    """
+    if engines.PROCESSES.closed:
+        return [], [(a, t, r) for a, t, r, _, _ in members]
+    folders: list[Path] = []
+    try:
+        inputs: dict[Path, Path] = {}  # copy -> input
+        kept, requeue = [], []
+        try:
+            for a, t, r, stems, claims in members:
+                folders.append(_tmp_dir(ctx))
+                copy, refused = _engine_copy(t, folders[-1])
+                if refused:
+                    requeue.append((a, t, r))
+                else:
+                    inputs[copy] = t
+                    kept.append((a, copy, r, stems, claims))
+        except Exception:  # e.g. a full disk: each member gets its own try, and its own failure (#112)
+            return [], [(a, t, r) for a, t, r, _, _ in members]
+        if not kept:
+            return [], requeue
+        done, back = _decompile_batch_copies(kept, ctx)
+        return done, [(a, inputs[t], r) for a, t, r in back] + requeue
+    finally:
+        for folder in folders:
+            _drop(folder)
+
+
+def _decompile_batch_copies(
     members: list[tuple[Artifact, Path, ArtifactReport, set[str], set[str]]], ctx: Ctx
 ) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
     """Stage 2 for a batch: one primary-engine JVM over several small jars.
@@ -3022,9 +3065,6 @@ def run(
                                     if (
                                         batch_runner is not None
                                         and not target.is_dir()
-                                        # a batch takes the expected classes from its target (the copy), so a
-                                        # refused class would not count as missing
-                                        and not report.refused
                                         and a.classes < _SMALL_CLASSES
                                         and chain[0] in engines.BATCH_ENGINES
                                         and report.method != "maven"  # a Maven row with a gap: its class retries run alone (#180)
