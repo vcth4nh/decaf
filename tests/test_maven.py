@@ -975,6 +975,27 @@ def test_a_dropped_download_keeps_the_cache_file_of_another_thread(tmp_path: Pat
     assert not list(cache.glob("*.part"))
 
 
+def test_no_download_for_a_check_when_central_is_dead(tmp_path: Path, sources_bytes):
+    """#189 review F2: with no route to Central for the run, a download from another repository is lost work."""
+    from decaf.verdicts import VerdictCache
+
+    net = NetState()
+    for _ in range(maven.BREAKER_STRIKES):
+        net.record_artifact({CENTRAL_HOST}, set())
+    assert net.is_dead(CENTRAL_HOST)
+    seen: list[str] = []
+    log = ResolutionLog()
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    repos = [GROUP, MAVEN_CENTRAL]
+    with make_client(_by_file({("group.test", "sources"): sources_bytes}, seen)) as c:
+        got = fetch_sources(GAV12, BUILD, repos, c, tmp_path / "cache", net=net, log=log, verdicts=verdicts,
+                            verified=(GROUP,))
+    assert got is None and seen == []
+    assert log.download_failures == 2  # the group, and Central itself
+    assert log.events[0] == "repo1.maven.org skipped (unreachable this run) during sources check"
+    assert not verdicts.has_no_sources(KEY12, BUILD, maven._redacted(repos))
+
+
 def test_sources_of_central_itself_get_no_check(make_jar, tmp_path: Path, sources_bytes):
     jar = _patched_jar(make_jar)
     seen: list[str] = []

@@ -680,6 +680,11 @@ def fetch_sources(
                 else:
                     clean_answers += 1
                 continue
+        if central is not None and not _is_central(repo) and net.is_dead(httpx.URL(central).host):
+            # the check cannot run, so the download would be dropped (#189)
+            log.events.append(f"{httpx.URL(central).host} skipped (unreachable this run) during sources check")
+            log.download_failures += 1
+            continue
         url = f"{repo}/{gav.sources_path()}"
         try:
             got = _download(client, url, cached, net, log)
