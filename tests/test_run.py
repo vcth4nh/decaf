@@ -1960,8 +1960,8 @@ def test_a_batch_member_reads_its_class_files_in_a_worker(fake_env, make_jar, tm
     make_jar("big.jar", {**{f"com/big/C{i}.class": b"x" for i in range(900)},
                          "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()}, base=input_dir)
     readers: list[threading.Thread] = []
-    lists_itself = check.lists_itself
-    monkeypatch.setattr(check, "lists_itself", lambda data: (readers.append(threading.current_thread()), lists_itself(data))[1])
+    class_links = check.class_links
+    monkeypatch.setattr(check, "class_links", lambda data: (readers.append(threading.current_thread()), class_links(data))[1])
     all_queued = threading.Event()
     queued = [0]
 

@@ -514,10 +514,10 @@ def _stems_and_claims(source: Path, read: bool = True) -> tuple[set[str], set[st
     from sharing a batch, but never join expectations (#75): such a file is
     copied when an engine emits it, exactly like a solo run — never retried.
 
-    A class with an outer class by name that does not list itself in its InnerClasses attribute, for example the
-    module class Foo$ of a Scala object, is a top-level class for the JVM: no file of another class holds it, so it
-    is expected (#206). A class file that decaf cannot read stays an inner class, as in _read_unnested. With
-    read=False, the rule is by name only: no class file is read, and the union of the sets is the same.
+    A class with an outer class by name that is top-level for the JVM (_class_parents) is expected: no file of
+    another class holds it. For example the module class Foo$ of a Scala object (#206), or a stale class whose outer
+    class was compiled again without it (#207). With read=False, the rule is by name only: no class file is read,
+    and the union of the sets is the same.
     """
     if source.is_dir():
         entries = [p.relative_to(source).as_posix() for p in source.rglob("*.class")]
@@ -536,9 +536,7 @@ def _stems_and_claims(source: Path, read: bool = True) -> tuple[set[str], set[st
         else:
             stems.add(_class_stem(e))
     inner = {s for s in stems if outer_stem(s, stems) is not None}
-    names = [e for e in entries if _class_stem(e) in inner] if read else []
-    tops = {_class_stem(name) for name, data in _read_classes(source, names)
-            if check.lists_itself(data) is False}  # a multi-release class: one entry is enough
+    tops = {s for s, parent in _class_parents(source).items() if parent is None} & inner if read and inner else set()
     return (stems - inner) | tops, claims | (inner - tops)
 
 

@@ -844,13 +844,23 @@ def test_stems_and_claims_keep_top_level_dollar_classes(make_jar, tmp_path):
 
 def _named_inner_classes() -> dict[str, bytes]:
     """Classes with an outer class by name. Foo$ does not list itself in its InnerClasses attribute, as the module
-    class of a Scala object: it is a top-level class for the JVM. A$1 lists itself. The file of Cut$1 is cut, and
-    Big$1 is above the size limit of a class file (the test sets the limit): decaf cannot read them."""
+    class of a Scala object: it is a top-level class for the JVM. A$1 lists itself, and A names it. S$B lists itself,
+    but S does not name it: S was compiled again without it, so it is stale and top-level (#207). K creates the
+    Kotlin class K$f$$inlined$g$1, and E lists E$1, which does not list itself: they are inner classes. The file of
+    Cut$1 is cut, and Big$1 is above the size limit of a class file (the test sets the limit): decaf cannot read
+    them."""
     from test_check import _class_with, _class_with_inner_classes
 
     inner = _class_with_inner_classes("com/a/A$1", (("com/a/A$1", "com/a/A"),))
+    inlined = "com/a/K$f$$inlined$g$1"
     return {
-        "com/a/A.class": _class_with("com/a/A"), "com/a/A$1.class": inner,
+        "com/a/A.class": _class_with("com/a/A", interfaces=("com/a/A$1",)), "com/a/A$1.class": inner,
+        "com/a/S.class": _class_with("com/a/S"),
+        "com/a/S$B.class": _class_with_inner_classes("com/a/S$B", (("com/a/S$B", "com/a/S"),)),
+        "com/a/K.class": _class_with("com/a/K", interfaces=(inlined,)),
+        f"{inlined}.class": _class_with_inner_classes(inlined, ((inlined, None),), enclosing="com/a/K"),
+        "com/a/E.class": _class_with_inner_classes("com/a/E", (("com/a/E$1", None),)),
+        "com/a/E$1.class": _class_with("com/a/E$1"),
         "com/a/Foo.class": _class_with("com/a/Foo"), "com/a/Foo$.class": _class_with("com/a/Foo$"),
         "com/a/Cut.class": _class_with("com/a/Cut"), "com/a/Cut$1.class": _class_with("com/a/Cut$1")[:12],
         "com/a/Big.class": _class_with("com/a/Big"), "com/a/Big$1.class": _class_with("com/a/Big$1") + bytes(100),
@@ -861,8 +871,9 @@ def _named_inner_classes() -> dict[str, bytes]:
 @pytest.mark.parametrize("folder", [False, True])
 def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar, tmp_path, monkeypatch, folder):
     """Foo$ does not list itself, so CFR and Procyon write it only from its own class file, and it is expected. Before,
-    it was a claim, so a lost Foo$ was never missing, retried, or counted (#206). A class that lists itself, and a
-    class file that decaf cannot read, stay claims, as module-info and package-info do."""
+    it was a claim, so a lost Foo$ was never missing, retried, or counted (#206). The same for the stale S$B (#207).
+    The classes of the family that hold a class, and a class file that decaf cannot read, keep it a claim, as
+    module-info and package-info are."""
     from decaf import pipeline
 
     entries = _named_inner_classes()
@@ -875,8 +886,10 @@ def test_stems_and_claims_expect_a_class_that_is_top_level_for_the_jvm(make_jar,
         source = make_jar("t.jar", entries)
     monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", len(entries["com/a/Big$1.class"]) - 1)
     stems, claims = pipeline._stems_and_claims(source)
-    assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big"}
-    assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info"}
+    assert stems == {"com/a/A", "com/a/Foo", "com/a/Foo$", "com/a/Cut", "com/a/Big", "com/a/S", "com/a/S$B",
+                     "com/a/K", "com/a/E"}
+    assert claims == {"com/a/A$1", "com/a/Cut$1", "com/a/Big$1", "com/a/package-info", "module-info",
+                      "com/a/K$f$$inlined$g$1", "com/a/E$1"}
 
 
 def _inner(name: str, outer: str | None, enclosing: str | None = None, lists=(), refs=()) -> bytes:
@@ -1012,7 +1025,7 @@ def test_stems_and_claims_expect_a_multi_release_class_when_one_entry_is_top_lev
         "p/Foo.class": _class_with("p/Foo"),
         **{name: _class_with("p/Foo$") if name == top else inner
            for name in ("p/Foo$.class", "META-INF/versions/9/p/Foo$.class")},
-        "p/Bar.class": _class_with("p/Bar"),
+        "p/Bar.class": _class_with("p/Bar", interfaces=("p/Bar$1",)),  # Bar creates Bar$1 (#207)
         "META-INF/versions/9/p/Bar$1.class": _class_with_inner_classes("p/Bar$1", (("p/Bar$1", None),)),
     })
     assert _stems_and_claims(jar) == ({"p/Foo", "p/Foo$", "p/Bar"}, {"p/Bar$1"})
@@ -1045,8 +1058,9 @@ def _foo_folder(tmp_path: Path) -> Path:
 
     root = tmp_path / "in"
     (root / "p").mkdir(parents=True)
-    for name in ("Foo", "Foo$", "Bar"):
+    for name in ("Foo$", "Bar"):
         (root / f"p/{name}.class").write_bytes(_class_with(f"p/{name}"))
+    (root / "p/Foo.class").write_bytes(_class_with("p/Foo", interfaces=("p/Foo$1",)))  # Foo creates Foo$1 (#207)
     (root / "p/Foo$1.class").write_bytes(_class_with_inner_classes("p/Foo$1", (("p/Foo$1", None),)))
     return root
 
@@ -1126,7 +1140,7 @@ def test_a_batch_member_counts_its_class_that_is_top_level_for_the_jvm(make_jar,
         return EngineResult(spec.name, 0, False, 0, "")
 
     m1 = _member(make_jar, "a.jar", {
-        "p/Foo.class": _class_with("p/Foo"), "p/Foo$.class": _class_with("p/Foo$"),
+        "p/Foo.class": _class_with("p/Foo", interfaces=("p/Foo$1",)), "p/Foo$.class": _class_with("p/Foo$"),
         "p/Foo$1.class": _class_with_inner_classes("p/Foo$1", (("p/Foo$1", None),)),
     })
     m2 = _member(make_jar, "b.jar", {"q/B.class": _class_with("q/B")})
@@ -1598,15 +1612,18 @@ _K, _KL = "com/x/K", "com/x/K$$Lambda$0"
 
 def _k_classes(class_file, lambda_file: str | None, namer: str | None) -> dict[str, bytes]:
     """K and its lambda K$$Lambda$0, a class that is top-level for the JVM. namer: the class whose constant pool has
-    a Class entry of the lambda: K, the inner class K$1, or the class K$$Lambda$0$1 below the lambda."""
+    a Class entry of the lambda: K, the inner class K$1, or the class K$$Lambda$0$1 below the lambda. K names K$1,
+    and the lambda names K$$Lambda$0$1: they are inner classes (#207)."""
     from test_check import _class_with, _class_with_inner_classes
 
     classes = {
-        f"{_K}.class": _class_with(_K, interfaces=(_KL,)) if namer == "K" else _class_with(_K),
-        f"{_KL}.class": class_file(_KL, lambda_file),
+        f"{_K}.class": _class_with(_K, interfaces={"K": (_KL,), "K$1": (f"{_K}$1",)}.get(namer, ())),
+        f"{_KL}.class": _class_with(_KL, interfaces=(f"{_KL}$1",)) if namer == "K$$Lambda$0$1"
+        else class_file(_KL, lambda_file),
     }
     if namer == "K$1":
-        classes[f"{_K}$1.class"] = _class_with_inner_classes(f"{_K}$1", ((f"{_K}$1", _K), (_KL, None)))
+        # a Class entry, no entry in its InnerClasses attribute: a class that lists the lambda nests it (#207)
+        classes[f"{_K}$1.class"] = _class_with_inner_classes(f"{_K}$1", ((f"{_K}$1", _K),), refs=(_KL,))
     if namer == "K$$Lambda$0$1":
         classes[f"{_KL}$1.class"] = _class_with_inner_classes(f"{_KL}$1", ((f"{_KL}$1", _KL),))
     return classes
@@ -3778,7 +3795,7 @@ def test_two_retry_files_with_the_key_of_the_outer_class_are_both_written(make_j
 def _a1_class(shape: str) -> dict[str, bytes]:
     """A class file of A$1. An inner class of the JVM lists itself in its InnerClasses attribute ("inner"). A class
     that does not is a top-level class for the JVM: it has no InnerClasses attribute ("top"), or a tool removed the
-    attribute and kept its name in the constant pool ("stripped")."""
+    attribute and kept its name in the constant pool ("stripped"). The A of "inner" names A$1 (#207)."""
     from test_check import _class_with, _class_with_inner_classes
 
     data = {
@@ -3786,7 +3803,8 @@ def _a1_class(shape: str) -> dict[str, bytes]:
         "top": _class_with("com/x/A$1"),
         "stripped": _class_with("com/x/A$1", utf8=("InnerClasses",)),
     }[shape]
-    return {"com/x/A$1.class": data}
+    outer = {"com/x/A.class": _class_with("com/x/A", interfaces=("com/x/A$1",))} if shape == "inner" else {}
+    return {"com/x/A$1.class": data, **outer}
 
 
 @pytest.mark.parametrize("shape, expected", [
@@ -3980,18 +3998,25 @@ def test_root_prefix_is_empty_when_the_name_does_not_match(tmp_path: Path, class
 
 
 def _inner_class_file(name: str) -> bytes:
-    """A class file of an inner class: it lists itself in its InnerClasses attribute, so it is no expected class
-    (#206)."""
+    """A class file of an inner class: it lists itself in its InnerClasses attribute, and its outer class names it
+    (_outer_class_file), so it is no expected class (#206, #207)."""
     from test_check import _class_with_inner_classes
 
     return _class_with_inner_classes(name, ((name, name.rsplit("$", 1)[0]),))
+
+
+def _outer_class_file(name: str, inner: str) -> bytes:
+    """A class file whose constant pool names the inner class, as the code of a class that creates it."""
+    from test_check import _class_with
+
+    return _class_with(name, interfaces=(inner,))
 
 
 def _class_folder(tmp_path: Path, class_file) -> Path:
     root = tmp_path / "in"
     _tree(root, {
         "target/classes/p/A.class": class_file("p/A"),
-        "target/classes/q/B.class": class_file("q/B"),
+        "target/classes/q/B.class": _outer_class_file("q/B", "q/B$Nested"),
         "target/classes/q/B$Nested.class": _inner_class_file("q/B$Nested"),
     })
     return root
@@ -4045,7 +4070,7 @@ def test_a_rooted_engine_gets_the_classes_of_a_war_without_their_container(make_
     """Before, CFR and Procyon wrote com/x/A.java, and JD took WEB-INF.classes.com.x as the package (#170, #173)."""
     war = make_jar("app.war", {
         "WEB-INF/web.xml": "<web-app/>",
-        "WEB-INF/classes/com/x/A.class": class_file("com/x/A"),
+        "WEB-INF/classes/com/x/A.class": _outer_class_file("com/x/A", "com/x/A$1"),
         "WEB-INF/classes/com/x/A$1.class": _inner_class_file("com/x/A$1"),
     })
     runner = by_name_runner()
@@ -4084,7 +4109,7 @@ def test_a_retry_tree_with_two_roots_gives_two_runs(make_jar, tmp_path: Path, cl
     """A Spring Boot jar has its loader classes at the root and its own classes under BOOT-INF/classes/."""
     jar = make_jar("boot.jar", {
         "BOOT-INF/classes/com/x/Done.class": class_file("com/x/Done"),
-        "BOOT-INF/classes/com/x/A.class": class_file("com/x/A"),
+        "BOOT-INF/classes/com/x/A.class": _outer_class_file("com/x/A", "com/x/A$1"),
         "BOOT-INF/classes/com/x/A$1.class": _inner_class_file("com/x/A$1"),
         "org/boot/L.class": class_file("org/boot/L"),
     })

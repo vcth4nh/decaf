@@ -288,17 +288,22 @@ def test_run_per_class_runs_top_level_dollar_classes(tmp_path: Path, monkeypatch
 
 def test_run_per_class_runs_a_class_that_is_top_level_for_the_jvm(tmp_path: Path, monkeypatch):
     """Foo$ does not list itself in its InnerClasses attribute, as the module class of a Scala object, so no outer
-    class nests it: CFR and Procyon write it only from its own class file (#206). A$1 lists itself, and decaf cannot
-    read the cut file of Cut$1 or the file of Big$1, which is above the size limit (the test sets the limit)."""
+    class nests it: CFR and Procyon write it only from its own class file (#206). The same for S$B, which lists
+    itself, but S does not name it: S was compiled again without it (#207). A$1 lists itself, and A names it; E lists
+    E$1. decaf cannot read the cut file of Cut$1 or the file of Big$1, which is above the size limit (the test sets
+    the limit)."""
     from test_check import _class_with, _class_with_inner_classes
 
     from decaf import pipeline
 
     tree = tmp_path / "classes"
     (tree / "p").mkdir(parents=True)
-    for name in ("A", "Foo", "Foo$", "Cut", "Big"):
+    for name in ("Foo", "Foo$", "Cut", "Big", "S", "E$1"):
         (tree / f"p/{name}.class").write_bytes(_class_with(f"p/{name}"))
+    (tree / "p/A.class").write_bytes(_class_with("p/A", interfaces=("p/A$1",)))
     (tree / "p/A$1.class").write_bytes(_class_with_inner_classes("p/A$1", (("p/A$1", "p/A"),)))
+    (tree / "p/S$B.class").write_bytes(_class_with_inner_classes("p/S$B", (("p/S$B", "p/S"),)))
+    (tree / "p/E.class").write_bytes(_class_with_inner_classes("p/E", (("p/E$1", None),)))
     (tree / "p/Cut$1.class").write_bytes(_class_with("p/Cut$1")[:12])
     big = _class_with("p/Big$1") + bytes(100)
     (tree / "p/Big$1.class").write_bytes(big)
@@ -306,7 +311,8 @@ def test_run_per_class_runs_a_class_that_is_top_level_for_the_jvm(tmp_path: Path
     seen: list[list[str]] = []
     monkeypatch.setattr(engines, "build_batch_command", _fake_batch("pass", seen))
     run_engine(ENGINES["procyon"], JAR, tree, tmp_path / "out", timeout=30)
-    assert seen == [["A.class", "Big.class", "Cut.class", "Foo$.class", "Foo.class"]]
+    assert seen == [["A.class", "Big.class", "Cut.class", "E.class", "Foo$.class", "Foo.class", "S$B.class",
+                     "S.class"]]
 
 
 def test_run_per_class_runs_one_jvm_for_each_class_when_the_one_jvm_fails(tmp_path: Path, monkeypatch):
