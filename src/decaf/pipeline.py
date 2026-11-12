@@ -734,13 +734,18 @@ def _refused(source: Path) -> list[zipfile.ZipInfo] | list[str]:
 def _copy_without_refused(archive: Path, folder: Path) -> Path:
     """A copy of the archive in folder, with its file name, without the _refused_entry entries.
 
-    The entries keep their order, and each entry of a name that is not refused stays. An entry that cannot be read
-    stays out, as in _root_jar. Each entry goes through a file, not through memory.
+    The copy has one entry for each name, and the last entry of a name decides, as in Java, _root_jar, and
+    safe_extract_zip: when the last entry is refused or cannot be read, the copy has no entry of that name, and an
+    earlier entry of the name never goes in. The entries keep the order of the first entry of each name. Each entry
+    goes through a file, not through memory.
     """
     jar = folder / archive.name  # an engine reads the suffix, and one engine names its output after the file
     part = folder / "entry.part"
     with zipfile.ZipFile(archive) as zf, zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as out:
+        last: dict[str, zipfile.ZipInfo] = {}
         for info in zf.infolist():
+            last[info.filename] = info  # a dict keeps the place of the first entry of a name
+        for info in last.values():
             if _refused_entry(zf, info):
                 continue
             try:
@@ -754,7 +759,6 @@ def _copy_without_refused(archive: Path, folder: Path) -> Path:
             entry.external_attr = info.external_attr
             entry.compress_type = zipfile.ZIP_STORED if info.is_dir() else zipfile.ZIP_DEFLATED
             entry.file_size = part.stat().st_size
-            out.NameToInfo.pop(info.filename, None)  # a second entry of a name stays, with no "Duplicate name" warning
             with open(part, "rb") as f, out.open(entry, "w") as dst:
                 shutil.copyfileobj(f, dst)
     part.unlink(missing_ok=True)  # no part when each entry is refused

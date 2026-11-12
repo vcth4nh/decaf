@@ -4881,14 +4881,16 @@ def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, 
     jar = _zip(tmp_path / "app.jar", [
         ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"),
         ("p/", b""),
+        ("p/D.class", class_file("p/\0D")),  # the first entry of a name is refused
         ("p/A.class", class_file("p/A")),
         ("p/B.class", class_file("../B")),  # its class name leaves the folder
         ("../x/C.class", class_file("x/C")),  # its entry name leaves the folder
-        ("p/D.class", class_file("p/\0D")),  # the first copy of a name is refused
-        ("p/D.class", class_file("p/D")),  # the last copy is not
-        ("p/E.class", class_file("p/E") + b"1"),  # two good copies of a name both stay
-        ("p/E.class", class_file("p/E") + b"2"),
+        ("p/D.class", class_file("p/D")),  # the last entry decides, at the place of the first entry
+        ("p/E.class", class_file("p/E") + b"1"),
+        ("p/F.class", class_file("p/F")),
+        ("p/E.class", class_file("p/E") + b"2"),  # of two good entries, the last one goes in
         ("p/r.txt", b"r"),
+        ("p/F.class", class_file("../F")),  # a refused last entry: no entry of the name goes in
     ])
     before = jar.read_bytes()
     runner = _names_runner()
@@ -4899,16 +4901,33 @@ def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, 
         warnings.simplefilter("error")  # no "Duplicate name" warning of zipfile
         report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     ((target, names),) = runner.calls
-    assert names == ["META-INF/MANIFEST.MF", "p/", "p/A.class", "p/D.class", "p/E.class", "p/E.class", "p/r.txt"]
+    assert names == ["META-INF/MANIFEST.MF", "p/", "p/D.class", "p/A.class", "p/E.class", "p/r.txt"]
     with zipfile.ZipFile(target) as zf:
         assert zf.read("p/D.class") == class_file("p/D") and zf.getinfo("p/").is_dir()
-        assert [zf.read(i) for i in zf.infolist() if i.filename == "p/E.class"] == [
-            class_file("p/E") + b"1", class_file("p/E") + b"2"]
+        assert zf.read("p/E.class") == class_file("p/E") + b"2"
     assert target.name == "app.jar" and target != jar and target.parent in ctx.family_dirs["app.jar"]
-    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 5, 2, 3)
-    assert warns == ["app.jar: no engine gets 3 of its entries, because a name or a class name can leave the output"
-                     " folder, or decaf cannot read the class name; the first is 'p/B.class'"]
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 6, 3, 3)
+    assert warns == ["app.jar: no engine gets 4 of its entries, because a name or a class name can leave the output"
+                     " folder, or decaf cannot read the class name; the first is 'p/D.class'"]
     assert jar.read_bytes() == before
+
+
+@pytest.mark.parametrize("first_bad", [True, False])
+def test_the_last_entry_of_a_name_decides_what_the_copy_gets(tmp_path: Path, class_file, first_bad):
+    """As in Java: a refused first entry still gives the copy the last one; a refused last entry gives the copy no
+    entry of the name, and the class is missing."""
+    bad, good = class_file("../A"), class_file("p/A")
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", bad if first_bad else good), ("p/B.class", class_file("p/B")),
+                                      ("p/A.class", good if first_bad else bad)])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    ((target, names),) = runner.calls
+    assert names == (["p/A.class", "p/B.class"] if first_bad else ["p/B.class"])
+    if first_bad:
+        with zipfile.ZipFile(target) as zf:
+            assert zf.read("p/A.class") == good
+    assert (report.classes, report.missing_classes) == (2, 0 if first_bad else 1)
 
 
 def test_an_engine_gets_a_normal_archive_itself(tmp_path: Path, class_file):
