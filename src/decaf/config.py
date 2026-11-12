@@ -15,10 +15,9 @@ import httpx
 import platformdirs
 import tomli_w
 
-from .maven import redact_url
+from .maven import _CENTRAL_HOSTS, _is_central, redact_url
 
 MAVEN_CENTRAL = "https://repo1.maven.org/maven2"
-_CENTRAL_HOSTS = ("repo1.maven.org", "repo.maven.apache.org")  # two names of one repository
 
 
 class ConfigError(Exception):
@@ -82,15 +81,6 @@ def _read_toml(path: Path) -> dict:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
-
-
-def _is_central(url: str) -> bool:
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return False
-    # Central answers plain HTTP with 501, so only an https entry is Central (#115).
-    return parts.scheme == "https" and parts.hostname in _CENTRAL_HOSTS and parts.path.rstrip("/") == "/maven2"
 
 
 def _https_central(url: str) -> str:

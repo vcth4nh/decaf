@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -794,6 +795,153 @@ def test_aar_of_an_index_hit_is_proven_by_its_aar_sidecar(make_jar, tmp_path: Pa
         "/maven2/com/example/widget/2.0/widget-2.0.aar.sha1",
         "/maven2/com/example/widget/2.0/widget-2.0-sources.jar",
     ]
+
+
+GROUP = "https://deploy:s3cr3t@group.test/m2"  # one URL that joins several repositories (#189)
+CENTRAL_HOST = "repo1.maven.org"
+OTHER_BUILD_MISS = (
+    "found com.example:lib:1.2 in pom.properties but the -sources.jar in https://group.test/m2 "
+    "is the sources jar of another build on Maven Central"
+)
+
+
+def _file_kind(path: str) -> str:
+    if path.endswith("-sources.jar.sha1"):
+        return "sources sha1"
+    if path.endswith(".sha1"):
+        return "probe"
+    if path.endswith("-sources.jar"):
+        return "sources"
+    raise AssertionError(f"unexpected request: {path}")
+
+
+def _by_file(answers: dict[tuple[str, str], object], seen: list[str]):
+    """A handler by (host, file kind); seen gets "host kind" for each request.
+
+    No key is a 404, an int is a status, "connect error" raises, a str or bytes is a 200 with that body.
+    """
+
+    def handler(request):
+        key = (request.url.host, _file_kind(request.url.path))
+        seen.append(" ".join(key))
+        answer = answers.get(key, 404)
+        if answer == "connect error":
+            raise httpx.ConnectError("refused", request=request)
+        if isinstance(answer, int):
+            return httpx.Response(answer)
+        return httpx.Response(200, content=answer if isinstance(answer, bytes) else answer.encode())
+
+    return handler
+
+
+def _patched_jar(make_jar) -> Path:
+    return make_jar("lib-1.2.jar", {"META-INF/maven/com.example/lib/pom.properties": POM, "A.class": b"patched"})
+
+
+def _group_answers(jar: Path, sources: bytes, **central: object) -> dict[tuple[str, str], object]:
+    """#189: the group gives the .sha1 of jar and sources; Central gives central["probe"] and central["sources_sha1"]."""
+    answers: dict[tuple[str, str], object] = {("group.test", "probe"): sha1_of(jar), ("group.test", "sources"): sources}
+    for kind, answer in central.items():
+        answers[(CENTRAL_HOST, kind.replace("_", " "))] = answer
+    return answers
+
+
+def test_group_sources_of_the_central_build_are_dropped(make_jar, tmp_path: Path, sources_bytes):
+    """#189: one URL gives the .sha1 of a patched build and the sources jar of the Central build."""
+    from decaf.verdicts import VerdictCache
+
+    jar = _patched_jar(make_jar)
+    seen: list[str] = []
+    their_sources = f"{hashlib.sha1(sources_bytes).hexdigest()}  lib-1.2-sources.jar\n"
+    answers = _group_answers(jar, sources_bytes, probe=OTHER, sources_sha1=their_sources)
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    cache = tmp_path / "cache"
+    repos = [GROUP, MAVEN_CENTRAL]
+    with make_client(_by_file(answers, seen)) as c:
+        res = resolve_sources(jar, repos, c, cache, verdicts=verdicts)
+    assert res.sources_jar is None and res.miss == OTHER_BUILD_MISS
+    assert not list(cache.glob("*-sources.jar")) and not list(cache.glob("*.repo"))
+    assert verdicts.has_no_sources(KEY12, sha1_of(jar), maven._redacted(repos))
+    assert seen == [
+        "group.test probe", "group.test sources",
+        "repo1.maven.org probe", "repo1.maven.org sources sha1",
+        "repo1.maven.org probe",  # the next repository of the list
+    ]
+
+
+@pytest.mark.parametrize(
+    "central, checks",
+    [
+        ({}, ["repo1.maven.org probe"]),  # Central has no such build
+        ({"probe": "SAME"}, ["repo1.maven.org probe"]),  # Central holds this build
+        ({"probe": OTHER, "sources_sha1": OTHER}, ["repo1.maven.org probe", "repo1.maven.org sources sha1"]),
+        ({"probe": OTHER}, ["repo1.maven.org probe", "repo1.maven.org sources sha1"]),
+    ],
+    ids=["no-build-on-central", "same-build", "other-sources", "no-sources-sha1"],
+)
+def test_group_sources_that_pass_the_central_check_are_kept(make_jar, tmp_path: Path, sources_bytes, central, checks):
+    """#189: the check keeps the sources jar unless it is the sources jar of another build on Central."""
+    jar = _patched_jar(make_jar)
+    if central.get("probe") == "SAME":
+        central["probe"] = f"{sha1_of(jar)}  lib-1.2.jar\n"
+    seen: list[str] = []
+    with make_client(_by_file(_group_answers(jar, sources_bytes, **central), seen)) as c:
+        res = resolve_sources(jar, [GROUP, MAVEN_CENTRAL], c, tmp_path / "cache")
+    assert res.miss is None and res.repo == "https://group.test/m2"
+    assert res.sources_jar is not None and res.sources_jar.read_bytes() == sources_bytes
+    assert seen == ["group.test probe", "group.test sources", *checks]
+
+
+@pytest.mark.parametrize(
+    "central, event",
+    [
+        ({"probe": 503}, "repo1.maven.org: HTTP 503 during sources check"),
+        ({"probe": "connect error"}, "repo1.maven.org: connection error during sources check"),
+        ({"probe": 403}, "repo1.maven.org: HTTP 403 (auth) during sources check"),
+        ({"probe": "<html>a proxy page</html>"}, "repo1.maven.org: no SHA-1 in the answer during sources check"),
+        ({"probe": OTHER, "sources_sha1": 503}, "repo1.maven.org: HTTP 503 during sources check"),
+    ],
+    ids=["503", "transport", "auth", "no-sha1", "503-on-sources-sha1"],
+)
+def test_group_sources_without_a_central_answer_are_a_network_fallback(
+    make_jar, tmp_path: Path, sources_bytes, central, event
+):
+    """#189: a check with no decision drops the sources jar and stores no verdict."""
+    from decaf.verdicts import VerdictCache
+
+    jar = _patched_jar(make_jar)
+    seen: list[str] = []
+    verdicts = VerdictCache(tmp_path / "verdicts")
+    cache = tmp_path / "cache"
+    repos = [GROUP, MAVEN_CENTRAL]
+    with make_client(_by_file(_group_answers(jar, sources_bytes, **central), seen)) as c:
+        res = resolve_sources(jar, repos, c, cache, verdicts=verdicts)
+    assert res.sources_jar is None and res.miss is not None
+    assert res.miss.startswith(f"network: {event}")
+    assert res.miss.endswith("found com.example:lib:1.2 in pom.properties but no -sources.jar in any reachable repo")
+    assert not list(cache.glob("*-sources.jar")) and not list(cache.glob("*.repo"))
+    assert not verdicts.has_no_sources(KEY12, sha1_of(jar), maven._redacted(repos))
+    if central["probe"] in (503, "connect error"):
+        assert seen.count("repo1.maven.org probe") == 2 * maven.RETRY_ATTEMPTS  # the check, then the next repository
+
+
+def test_sources_of_central_itself_get_no_check(make_jar, tmp_path: Path, sources_bytes):
+    jar = _patched_jar(make_jar)
+    seen: list[str] = []
+    answers = {(CENTRAL_HOST, "probe"): sha1_of(jar), (CENTRAL_HOST, "sources"): sources_bytes}
+    with make_client(_by_file(answers, seen)) as c:
+        res = resolve_sources(jar, [MAVEN_CENTRAL], c, tmp_path / "cache")
+    assert res.repo == MAVEN_CENTRAL and res.sources_jar is not None
+    assert seen == ["repo1.maven.org probe", "repo1.maven.org sources"]
+
+
+def test_a_list_without_central_gets_no_check(make_jar, tmp_path: Path, sources_bytes):
+    jar = _patched_jar(make_jar)
+    seen: list[str] = []
+    with make_client(_by_file(_group_answers(jar, sources_bytes), seen)) as c:
+        res = resolve_sources(jar, [GROUP], c, tmp_path / "cache")
+    assert res.repo == "https://group.test/m2" and res.sources_jar is not None
+    assert seen == ["group.test probe", "group.test sources"]
 
 
 @pytest.mark.parametrize("resolved_by", ["pom-properties", "sha1-index", "verified-guess"])

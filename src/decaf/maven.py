@@ -13,6 +13,7 @@ import zipfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -41,6 +42,18 @@ def redact_url(url: str) -> str:
 
 def _redacted(repos: Sequence[str]) -> list[str]:
     return [redact_url(r) for r in repos]
+
+
+_CENTRAL_HOSTS = ("repo1.maven.org", "repo.maven.apache.org")  # two names of one repository
+
+
+def _is_central(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    # Central answers plain HTTP with 501, so only an https entry is Central (#115).
+    return parts.scheme == "https" and parts.hostname in _CENTRAL_HOSTS and parts.path.rstrip("/") == "/maven2"
 
 
 _COORD_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*")
@@ -256,6 +269,7 @@ class ResolutionLog:
     download_failures: int = 0
     cached_no_sources: bool = False
     damaged: str = ""  # a downloaded -sources.jar that is no readable zip: no clean miss (#111)
+    other_build: str = ""  # a downloaded -sources.jar of another build on Maven Central: a clean miss (#189)
 
 
 def _exc_kind(exc: httpx.TransportError) -> str:
@@ -572,6 +586,52 @@ def gav_from_central_sha1(
         return None
 
 
+def _central_sha1s(client: httpx.Client, url: str, net: NetState, log: ResolutionLog) -> list[str] | None:
+    """The SHA-1s of a .sha1 file of Maven Central, [] when it has no such file, None for no answer (#189)."""
+    host = httpx.URL(url).host
+    try:
+        resp = _get_retry(client, url, net=net, log=log, step="sources check", follow_redirects=True)
+    except NetworkFailure as nf:
+        log.events.append(f"{nf.detail} during sources check")
+        if nf.kind in _TRANSPORT_KINDS and nf.host in log.failed_hosts:
+            log.ok_hosts.discard(nf.host)  # the same breaker rule as a sources download (#180)
+        return None
+    except httpx.HTTPError as exc:
+        log.events.append(f"{type(exc).__name__} during sources check")
+        return None
+    if resp.status_code in _ABSENT:
+        return []
+    if resp.status_code != 200:
+        auth = " (auth)" if resp.status_code in _AUTH else ""
+        log.events.append(f"{host}: HTTP {resp.status_code}{auth} during sources check")
+        return None
+    # the rule of verify_gav: each token can be the hash
+    hashes = [token.lower() for token in resp.text.split() if _SHA1_RE.fullmatch(token)]
+    if not hashes:
+        log.events.append(f"{host}: no SHA-1 in the answer during sources check")
+        return None
+    return hashes
+
+
+def _central_check(
+    gav: Gav, sha1: str, sources: Path, central: str, client: httpx.Client, net: NetState, log: ResolutionLog,
+    suffix: str,
+) -> bool | None:
+    """True: keep the sources jar. False: it is the sources jar of another build on Central. None: no answer (#189).
+
+    One URL that joins several repositories can give the .sha1 file of one build and the sources jar of another.
+    """
+    binary = _central_sha1s(client, f"{central}/{gav.jar_path(suffix)}.sha1", net, log)
+    if binary is None:
+        return None
+    if not binary or sha1.lower() in binary:
+        return True  # Central has no such build, or the same build
+    theirs = _central_sha1s(client, f"{central}/{gav.sources_path()}.sha1", net, log)
+    if theirs is None:
+        return None
+    return sha1_of(sources) not in theirs
+
+
 def fetch_sources(
     gav: Gav,
     sha1: str,
@@ -590,7 +650,8 @@ def fetch_sources(
     One GAV can name more than one build: a -SNAPSHOT changes, and a team can deploy a release again (#180).
     A download needs a proof that the repository holds the build (#180): the .sha1 sidecar of its main
     artifact file (suffix is the file type) matches sha1. verified names the repositories that the caller
-    already proved; they get no second probe.
+    already proved; they get no second probe. When repos has Maven Central, a sources jar from another repository
+    must not be the sources jar of another build on Central (#189).
     """
     if net is None:
         net = NetState()
@@ -606,6 +667,7 @@ def fetch_sources(
         log.cached_no_sources = True
         return None
     clean_answers = 0  # a repo without this build or without a sources jar
+    central = next((r for r in repos if _is_central(r)), None)
     if on_state is not None and repos:
         on_state("downloading")
     for repo in repos:
@@ -638,6 +700,18 @@ def fetch_sources(
         if got is None:
             clean_answers += 1
             continue
+        if central is not None and not _is_central(repo):
+            keep = _central_check(gav, sha1, cached, central, client, net, log, suffix)
+            if not keep:
+                drop_cached_sources(cached)
+                if keep is None:  # a repo that decaf could not ask
+                    log.download_failures += 1
+                else:  # no sources jar of this build
+                    clean_answers += 1
+                    log.other_build = log.other_build or (
+                        f"the -sources.jar in {redact_url(repo)} is the sources jar of another build on Maven Central"
+                    )
+                continue
         marker.write_text(redact_url(repo))
         # drop the file of an older decaf version: its name has no SHA-1, so this version never reads it (#180)
         drop_cached_sources(cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar")
@@ -776,6 +850,8 @@ def _fetched(gav: Gav, fetched: tuple[Path, str, bool] | None, resolved_by: str,
 def _no_sources(prefix: str, log: ResolutionLog) -> str:
     if log.damaged:
         return f"{prefix} but {log.damaged}"
+    if log.other_build:
+        return f"{prefix} but {log.other_build}"
     if log.download_failures:
         return f"{prefix} but no -sources.jar in any reachable repo"
     # another repository can hold a sources jar of another build of the same GAV (#180)
