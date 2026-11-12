@@ -974,6 +974,31 @@ def test_class_parents_of_a_kotlin_inlined_class_and_a_class_named_only_below_it
     assert _parents(make_jar, named)["p/A$1"] == "p/A$B"  # A$B is no $-prefix of A$1: the first class that names it
 
 
+def test_class_parents_of_crafted_class_files_have_no_cycle(make_jar):
+    """A$B names A$C as its outer class, and A$C names A$B: the name rule breaks the cycle, so the tree of a family
+    plan has an end (#208)."""
+    crafted = {"p/A": _lister("p/A"), "p/A$B": _inner("p/A$B", "p/A$C", refs=("p/A$C",)),
+               "p/A$C": _inner("p/A$C", "p/A$B", refs=("p/A$B",))}
+    assert _parents(make_jar, crafted) == {"p/A$B": "p/A", "p/A$C": "p/A$B"}
+
+
+def test_read_parents_keeps_the_container_root_of_a_copy(make_jar):
+    """The war has X at the root and below WEB-INF/classes/: the key of each copy keeps its container root, and so
+    does the key of its parent (#107, #208)."""
+    from decaf.pipeline import _copied_keys, _Held, _read_parents
+
+    classes = _scala_family("X")
+    war = make_jar("app.war", {**classes, **{f"WEB-INF/classes/{n}": d for n, d in classes.items()}})
+    held = _Held(copies=_copied_keys(war))
+    families = {"com/x/X", "WEB-INF/classes/com/x/X"}
+    _read_parents(war, families, held, lambda key: key.split("$", 1)[0])
+    assert held.parents == {
+        "com/x/X": {"com/x/X$": None, "com/x/X$$anon$1": "com/x/X"},
+        "WEB-INF/classes/com/x/X": {"WEB-INF/classes/com/x/X$": None,
+                                    "WEB-INF/classes/com/x/X$$anon$1": "WEB-INF/classes/com/x/X"},
+    }
+
+
 def test_class_parents_read_only_the_families_asked_for(make_jar, tmp_path):
     """A class folder above its package root (#199): the stems keep the folder, the class files name the classes."""
     from decaf.pipeline import _class_parents
@@ -3942,6 +3967,68 @@ def test_a_stub_of_a_stale_inner_class_stays_when_the_file_of_the_outer_class_do
     })
     assert written == {_A: "class A { /* vf */ }", ab: stub}
     assert [s["path"] for s in report.stubs] == [ab]
+
+
+_X, _XM, _XA = "com/x/X.java", "com/x/X$.java", "com/x/X$$anon$1.java"
+
+
+def _scala_family(enclosing: str) -> dict[str, bytes]:
+    """The Scala class X, its module class X$, and the anonymous class X$$anon$1 with this EnclosingMethod class
+    (S4, S5 of #208). X lists X$$anon$1; with the EnclosingMethod class X$, X$ lists it too."""
+    from test_check import _class_with, _class_with_inner_classes
+
+    anon = "com/x/X$$anon$1"
+    return {
+        "com/x/X.class": _class_with_inner_classes("com/x/X", ((anon, None),)),
+        "com/x/X$.class": _class_with_inner_classes("com/x/X$", ((anon, None),)) if enclosing == "X$"
+        else _class_with("com/x/X$"),
+        f"{anon}.class": _class_with_inner_classes(anon, ((anon, None),), enclosing=f"com/x/{enclosing}"),
+    }
+
+
+@pytest.mark.parametrize("enclosing", ["X", "X$"])
+@pytest.mark.parametrize("apart_first", [True, False])
+def test_a_scala_anonymous_class_has_one_file_from_the_class_that_nests_it(
+    make_jar, tmp_path: Path, enclosing, apart_first,
+):
+    """One engine writes X$$anon$1 apart, the other engine nests it in the file of its EnclosingMethod class, as each
+    engine does. The parent of X$$anon$1 comes from its class files, so the chosen files hold each class one time.
+    Before, X$$anon$1 was a child of X$ by name, so a file of X$ that does not nest it took it: the class was lost,
+    and the report did not show it (#208)."""
+    apart = {_X: "class X { /* apart */ }", _XM: "class X$ { /* apart */ }", _XA: "class X$$anon$1 {} // FLAG apart"}
+    nested = {_X: "class X { /* nested */ }", _XM: "class X$ { /* nested */ }"}
+    for holder in [_X] if enclosing == "X" else [_X, _XM]:  # S5: each class that lists it nests it
+        nested[holder] = nested[holder].replace("*/", "+ X$$anon$1 */")
+    if not apart_first:
+        nested[_X] += " // FLAG nested"  # a flagged file of the outer class holds its family (#150)
+    first, second = (apart, nested) if apart_first else (nested, apart)
+    jar = make_jar("app.jar", _scala_family(enclosing))
+    runner = writing_runner({"vineflower": first, "cfr": second})
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    out = tmp_path / "out/app.jar"
+    written = {p.relative_to(out).as_posix(): p.read_text() for p in out.rglob("*.java")}
+    held = [c for text in written.values() for c in ("X$$anon$1",) if c in text]
+    assert held == ["X$$anon$1"]  # no class is lost, and no class goes out two times
+    assert set(written) == {_X, _XM}  # the file of the class that nests it replaced the flagged file
+    assert report.missing_classes == 0
+
+
+def test_an_unchecked_file_of_the_module_class_does_not_hold_the_anonymous_class_of_the_class(
+    make_jar, tmp_path: Path,
+):
+    """The clean X of CFR replaces the flagged X$$anon$1 of Vineflower: X holds it (#208). The unchecked X$ of CFR
+    does not, so the family is done, and its files go out after CFR. Before, X$ held it by name, so the family
+    waited for a file of X$ that passes the check, and each next engine got a retry of X."""
+    jar = make_jar("app.jar", _scala_family("X"))
+    runner = writing_runner({
+        "vineflower": {_X: "class X { /* vf */ }", _XA: "class X$$anon$1 {} // FLAG vf"},
+        "cfr": {_X: "class X { /* cfr + X$$anon$1 */ }", _XM: "class X$ {} // ENV cfr"},
+    })
+    ctx = make_ctx(tmp_path, runner, checker=marker_checker(), writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [a.engine for a in report.attempts] == ["vineflower", "cfr"]
+    assert sorted(p.name for p in (tmp_path / "out/app.jar/com/x").iterdir()) == ["X$.java", "X.java"]
 
 
 # --- CFR, Procyon, and JD get one package root at a time (#199, #200, #170, #171, #173) ---

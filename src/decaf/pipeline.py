@@ -13,7 +13,7 @@ import time
 import traceback
 import zipfile
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -824,6 +824,16 @@ def _class_parents(source: Path, families: Collection[str] | None = None) -> dic
             prefixes = [q for q in namers if x.startswith(q + "$")]
             e = prefix[x] + enclosing if enclosing else None
             out[x] = e if e in namers else max(prefixes, key=len) if prefixes else namers[0] if namers else None
+        for x in ms:  # crafted class files can give a cycle of parents: the name rule breaks it
+            path, q = [x], out.get(x) or by_name(x) if tops[x] is not None else None
+            while q is not None:
+                if q in path:
+                    cut = next(c for c in path[path.index(q):] if out.get(c) not in (None, by_name(c)))
+                    out[cut] = by_name(cut)
+                    path, q = [x], out.get(x) or by_name(x)
+                    continue
+                path.append(q)
+                q = out.get(q) or by_name(q) if tops[q] is not None else None
     return out
 
 
@@ -1102,15 +1112,26 @@ def _twice(own: list[Path], others: list[Path], ctx: Ctx) -> Callable[[str], boo
     return twice
 
 
-def _units(keys: Collection[str]) -> dict[str, list[str]]:
-    """Each key -> the keys of inner classes one level down: no other key of keys is between them (#159)."""
+def _parent_key(key: str, parents: Mapping[str, str | None]) -> str | None:
+    """The key above a key in the tree of a family plan: its parent (_read_parents), else its name without the last
+    $ part. A class that is top-level for the JVM stays below its outer class by name, so the plan reaches it (#208).
+    None: the key has no $ part."""
+    parent = parents.get(key)
+    if parent is not None:
+        return parent
+    cut = key.rfind("$")
+    return key[:cut] if cut > 0 else None
+
+
+def _units(keys: Collection[str], parents: Mapping[str, str | None]) -> dict[str, list[str]]:
+    """Each key -> the keys of inner classes one level down: no other key of keys is between them (#159, #208)."""
     out: dict[str, list[str]] = {}
     for k in keys:
-        cut = k.rfind("$")
-        while cut > 0 and k[:cut] not in keys:
-            cut = k.rfind("$", 0, cut)
-        if cut > 0:
-            out.setdefault(k[:cut], []).append(k)
+        up = _parent_key(k, parents)
+        while up is not None and up not in keys:
+            up = _parent_key(up, parents)
+        if up is not None:
+            out.setdefault(up, []).append(k)
     return out
 
 
@@ -1170,13 +1191,14 @@ class _FamilyPlan:
 
 
 def _plan_family(
-    family: str, olds: dict[str, _HeldFile], new: dict[str, _HeldFile], written: set[str], unnested: set[str],
-    replace: bool = True,
+    family: str, olds: dict[str, _HeldFile], new: dict[str, _HeldFile], written: set[str],
+    parents: Mapping[str, str | None], replace: bool = True,
 ) -> _FamilyPlan:
     """Choose the files of a family that waits, from its held files (olds) and the files of this output (#159).
 
-    A file holds its class and each inner class that its engine did not write apart; an empty file counts as
-    written apart. No file of another class holds a class of unnested: that class is top-level for the JVM. From
+    A file holds its class and each inner class below it that its engine did not write apart; an empty file counts
+    as written apart. parents: the parent of each class (_read_parents), so a file of a class holds the classes that
+    its engine nests in it (#208). No file of another class holds a class that is top-level for the JVM. From
     the outer class down, the file of the earlier engine holds a class, unless the file of this output and the
     files that it needs replace the files that go, as for one file (_replaces): a class that no file holds is a
     loss, as a stub is. With replace=False, nothing replaces a held file. A class without a held file takes the
@@ -1186,12 +1208,13 @@ def _plan_family(
     memo: dict[str, dict[str, _HeldFile]] = {}
     lost: dict[str, frozenset[str]] = {}  # key -> the classes at or below key that no file of memo[key] holds
     units: dict[int, dict[str, list[str]]] = {}  # id of a peers set -> its units, made once
+    unnested = {k for k, parent in parents.items() if parent is None}
 
     def holding(key: str, f: _HeldFile) -> tuple[dict[str, _HeldFile], frozenset[str]]:
         """f holds key and the inner classes that it nests; the best files hold the inner classes of its peers.
         Also the classes that no file holds."""
         if id(f.peers) not in units:
-            units[id(f.peers)] = _units((f.peers | unnested) - written)
+            units[id(f.peers)] = _units((f.peers | unnested) - written, parents)
         out, gaps = {key: f}, frozenset()
         for k in units[id(f.peers)].get(key, ()):
             out |= best(k)
@@ -1205,7 +1228,7 @@ def _plan_family(
             if old is None and now is None:  # no file of this class: its inner classes take their own files
                 out: dict[str, _HeldFile] = {}
                 gaps = frozenset({key})
-                for k in _units(olds.keys() | new.keys() | {key}).get(key, ()):
+                for k in _units(olds.keys() | new.keys() | {key}, parents).get(key, ()):
                     out |= best(k)
                     gaps |= lost[k]
             elif old is None or now is None:
@@ -1225,10 +1248,8 @@ def _plan_family(
 
     def holder(k: str) -> str | None:
         """The chosen key whose file holds the class k: the nearest chosen key at k or above it."""
-        while k not in chosen:
-            if "$" not in k:
-                return None
-            k = k.rsplit("$", 1)[0]
+        while k is not None and k not in chosen:
+            k = _parent_key(k, parents)
         return k
 
     drop: set[str] = set()
@@ -1283,11 +1304,11 @@ def _apply_hold(
     retry. In a family that waits, each class has one file: _plan_family chooses it, as for one
     file, from the held files and the files of the output (#159). A class that is top-level for the
     JVM (_read_parents) has no file of another class that holds it. The held files that a chosen
-    file nests wait as spares, unless a file of the output replaced the file of their class or of an outer class. The family is done when the outer class
-    has a file, no chosen file has a stub or a flag, and no unchecked chosen file nests a flagged
-    spare without a stub. Then the chosen files go out, the spares go, and the outer class gets no
-    more retries. Only a held file of an inner class whose family does not wait still follows the
-    rule of one file.
+    file nests wait as spares, unless a file of the output replaced the file of their class or of
+    an outer class. The family is done when the outer class has a file, no chosen file has a stub
+    or a flag, and no unchecked chosen file nests a flagged spare without a stub. Then the chosen
+    files go out, the spares go, and the outer class gets no more retries. Only a held file of an
+    inner class whose family does not wait still follows the rule of one file.
     """
     if held.copies is None:
         held.copies = _copied_keys(source)
@@ -1349,9 +1370,8 @@ def _apply_hold(
         for rel, key, stub, r in by_family[family]:  # a file of a class that an earlier output wrote goes (#107)
             if key not in held.written:
                 new.setdefault(key, _HeldFile(engine, rel, stub, r, peers[family]))
-        unnested = {k for k, parent in held.parents[family].items() if parent is None}
         plans[family] = plan = _plan_family(  # after Ctrl-C the check did not run or end, so replace=False (#112)
-            family, olds[family], new, held.written, unnested, replace=not engines.PROCESSES.closed,
+            family, olds[family], new, held.written, held.parents[family], replace=not engines.PROCESSES.closed,
         )
         for k in plan.drop | (plan.spares if plan.done else set()):
             (held.root / held.files.pop(k).path).unlink(missing_ok=True)
