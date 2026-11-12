@@ -526,6 +526,15 @@ def _class_attribute(pool: tuple[dict[int, bytes], dict[int, int], int], data: b
     """The offset of the data of a class attribute, or None when the class has no such attribute; pos is the
     offset of fields_count. A cut file raises ValueError, and so does a file with more than _WALK_MAX fields,
     methods, and attributes of them: a crafted file can make the walk take seconds."""
+    hit = _class_attributes(pool, data, pos, (name,)).get(name)
+    return hit[0] if hit is not None else None
+
+
+def _class_attributes(
+    pool: tuple[dict[int, bytes], dict[int, int], int], data: bytes, pos: int, names: tuple[bytes, ...],
+) -> dict[bytes, tuple[int, int]]:
+    """The offset and the length of the data of each class attribute of names that the class has, as for
+    _class_attribute. The walk stops when it has them all."""
     utf8 = pool[0]
     u2 = lambda at: int.from_bytes(data[at:at + 2], "big")  # noqa: E731
     steps = 0
@@ -540,40 +549,68 @@ def _class_attribute(pool: tuple[dict[int, bytes], dict[int, int], int], data: b
                 pos += 6 + int.from_bytes(data[pos + 2:pos + 6], "big")
     if pos + 2 > len(data):
         raise ValueError("cut class file")
+    found: dict[bytes, tuple[int, int]] = {}
     count, pos = u2(pos), pos + 2
     for _ in range(count):
         length = int.from_bytes(data[pos + 2:pos + 6], "big")
         if pos + 6 + length > len(data):
             raise ValueError("cut class file")
-        if utf8.get(u2(pos)) == name:
-            return pos + 6
+        name = utf8.get(u2(pos))
+        if name in names and name not in found:
+            found[name] = (pos + 6, length)
+            if len(found) == len(names):
+                break
         pos += 6 + length
-    return None
+    return found
 
 
 def lists_itself(data: bytes) -> bool | None:
     """Does a class file list itself in its InnerClasses attribute? True for an inner class of the JVM. False for a
     top-level class, also one with a $ in its name, for example the module class Foo$ of a Scala object (#159).
     None when the file is cut or does not parse."""
+    links = class_links(data)
+    # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
+    return None if links is None else any(inner == links[0] for inner, _ in links[1])
+
+
+def class_links(data: bytes) -> tuple[str, tuple[tuple[str, str | None], ...], str | None] | None:
+    """The name of a class file, the entries of its InnerClasses attribute as (inner class, outer class or None),
+    and the class of its EnclosingMethod attribute, or None. A class takes its parent from these (#207, #208).
+    None when the file is cut or does not parse, also above the walk limit."""
     pool = _pool(data)
     if pool is None or pool[2] + 8 > len(data):  # also a file cut in its constant pool
         return None
-    if b"InnerClasses" not in data:
-        return False
     this_class = _class_at(pool, data, pool[2] + 2)
     if this_class is None:  # this_class names no Class entry: the file does not parse
         return None
+    name = this_class.decode("utf-8", "replace")
+    if b"InnerClasses" not in data and b"EnclosingMethod" not in data:
+        return name, (), None
     start = pool[2] + 8  # after access_flags, this_class, super_class, and interfaces_count
     count = int.from_bytes(data[start - 2:start], "big")
     try:
-        at = _class_attribute(pool, data, start + 2 * count, b"InnerClasses")
+        found = _class_attributes(pool, data, start + 2 * count, (b"InnerClasses", b"EnclosingMethod"))
     except ValueError:  # a cut file
         return None
-    if at is None:  # the name is only a constant, for example after a tool removed the attribute
-        return False
-    entries = int.from_bytes(data[at:at + 2], "big")
-    # the names, not the pool indexes: a class writer can name the class again in a second Class entry (#209)
-    return any(_class_at(pool, data, at + 2 + 8 * k) == this_class for k in range(entries))
+    entries: list[tuple[str, str | None]] = []
+    if b"InnerClasses" in found:  # else the name is only a constant, for example after a tool removed the attribute
+        at, length = found[b"InnerClasses"]
+        n = int.from_bytes(data[at:at + 2], "big")
+        if 2 + 8 * n > length:
+            return None
+        for k in range(n):
+            inner = _class_at(pool, data, at + 2 + 8 * k)
+            outer = _class_at(pool, data, at + 4 + 8 * k)
+            if inner is not None:
+                entries.append((inner.decode("utf-8", "replace"), outer.decode("utf-8", "replace") if outer else None))
+    enclosing = None
+    if b"EnclosingMethod" in found:
+        at, length = found[b"EnclosingMethod"]
+        if length < 4:
+            return None
+        cls = _class_at(pool, data, at)
+        enclosing = cls.decode("utf-8", "replace") if cls else None
+    return name, tuple(entries), enclosing
 
 
 SOURCE = Path(__file__).with_name("checker") / "Checker.java"
