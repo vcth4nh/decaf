@@ -814,16 +814,17 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
     with no write and no read of an entry that is not a class entry: (None, the refused names).
 
     The copy has one entry for each name as zipfile writes it (_copy_name), and the last entry of a name decides, as
-    in Java: an earlier entry is not read. The entries keep the order of the first entry of each name.
-    An entry is refused when its raw name, its zipfile name, or its name in the copy does not stay inside, when its
-    zipfile name is the zipfile name of an entry whose names do not stay inside (as safe_extract_zip and
-    _discover_nested skip it), when its name in the copy is too long for zipfile (_NAME_MAX), or when it is a class
-    entry by one of its names and decaf cannot read it or its data fails _safe_class. A folder entry (by one of its
-    names) goes in as a folder, with no data; with a name that is refused, it stays out with no count. Another entry that decaf cannot read stays out with no count, and a large one goes through
-    a part file, so a read error leaves no part of it in the copy. The copy is stored, with no extra field: each of its
-    entries has one name. A nested archive inside the copy goes in as it is, with no test of its entries. This
-    assumes that no engine opens an archive that is inside its input: decaf decompiles a nested archive in its own
-    row, with the same tests (a nested archive beyond --max-depth gets no row).
+    in Java: an earlier entry is not read. The entries keep the order of the first entry of each name. An entry is
+    refused when its raw name, its zipfile name, or its name in the copy does not stay inside, when its zipfile name
+    is the zipfile name of an entry whose names do not stay inside (as safe_extract_zip and _discover_nested skip
+    it), when its name in the copy is too long for zipfile (_NAME_MAX), or when it is a class entry by one of its
+    names and decaf cannot read it or its data fails _safe_class. A folder entry (by one of its names) goes in as a
+    folder, with no data; with a name that is refused, it stays out with no count. Another entry that decaf cannot
+    read stays out with no count, and a large one goes through a part file, so a read error leaves no part of it in
+    the copy. The copy is stored, with no extra field: each of its entries has one name. A nested archive inside the
+    copy goes in as it is, with no test of its entries. This assumes that no engine opens an archive that is inside
+    its input: decaf decompiles a nested archive in its own row, with the same tests (a nested archive beyond
+    --max-depth gets no row).
     """
     refused: list[str] = []
     # an engine reads the suffix, and one engine names its output after the file
