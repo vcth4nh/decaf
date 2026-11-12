@@ -925,61 +925,6 @@ def test_group_sources_without_a_central_answer_are_a_network_fallback(
         assert seen.count("repo1.maven.org probe") == 2 * maven.RETRY_ATTEMPTS  # the check, then the next repository
 
 
-def _cached_jar(cache: Path, payload: bytes, marker: str) -> Path:
-    cache.mkdir(parents=True, exist_ok=True)
-    cached = cache / f"com.example_lib_1.2_{BUILD}-sources.jar"
-    cached.write_bytes(payload)
-    cached.with_suffix(".repo").write_text(marker)
-    return cached
-
-
-def test_a_checked_jar_gets_the_mark_in_its_marker(tmp_path: Path, sources_bytes):
-    """#189: the first line of the marker stays the repository; the second line says that the jar passed the check."""
-    seen: list[str] = []
-    answers = {("group.test", "sources"): sources_bytes}  # Central has no such build
-    with make_client(_by_file(answers, seen)) as c:
-        got = fetch_sources(GAV12, BUILD, [GROUP, MAVEN_CENTRAL], c, tmp_path / "cache", verified=(GROUP,))
-    assert got is not None and seen == ["group.test sources", "repo1.maven.org probe"]
-    assert got[0].with_suffix(".repo").read_text().splitlines() == ["https://group.test/m2", maven._CENTRAL_CHECKED]
-    with make_client(_explode) as c:
-        assert fetch_sources(GAV12, BUILD, [GROUP, MAVEN_CENTRAL], c, tmp_path / "cache") == (
-            got[0], "https://group.test/m2", True
-        )
-
-
-def test_a_cached_jar_of_an_earlier_version_is_checked(tmp_path: Path, sources_bytes):
-    """#189: a jar that an earlier version stored from a repository that is not Central had no check."""
-    cache = tmp_path / "cache"
-    _cached_jar(cache, b"an old jar", "https://group.test/m2")
-    seen: list[str] = []
-    their_sources = hashlib.sha1(sources_bytes).hexdigest()
-    answers = {("group.test", "sources"): sources_bytes, (CENTRAL_HOST, "probe"): OTHER,
-               (CENTRAL_HOST, "sources sha1"): their_sources}
-    log = ResolutionLog()
-    with make_client(_by_file(answers, seen)) as c:
-        got = fetch_sources(GAV12, BUILD, [GROUP, MAVEN_CENTRAL], c, cache, log=log, verified=(GROUP,))
-    assert got is None and log.other_build
-    assert seen[:3] == ["group.test sources", "repo1.maven.org probe", "repo1.maven.org sources sha1"]
-    assert not list(cache.glob("*-sources.jar")) and not list(cache.glob("*.repo"))
-
-
-@pytest.mark.parametrize(
-    "marker, repo",
-    [
-        (MAVEN_CENTRAL, MAVEN_CENTRAL),
-        (f"https://group.test/m2\n{maven._CENTRAL_CHECKED}\n", "https://group.test/m2"),
-        ("https://group.test/m2", "https://group.test/m2"),  # a list without Central: no check
-    ],
-    ids=["central", "mark", "no-central-in-list"],
-)
-def test_a_valid_cached_jar_needs_no_request(tmp_path: Path, marker, repo):
-    cache = tmp_path / "cache"
-    cached = _cached_jar(cache, b"a jar", marker)
-    repos = [GROUP] if marker == repo == "https://group.test/m2" else [GROUP, MAVEN_CENTRAL]
-    with make_client(_explode) as c:
-        assert fetch_sources(GAV12, BUILD, repos, c, cache) == (cached, repo, True)
-
-
 def test_sources_of_central_itself_get_no_check(make_jar, tmp_path: Path, sources_bytes):
     jar = _patched_jar(make_jar)
     seen: list[str] = []

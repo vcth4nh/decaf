@@ -632,9 +632,6 @@ def _central_check(
     return sha1_of(sources) not in theirs
 
 
-_CENTRAL_CHECKED = "checked with Maven Central"  # the second line of a marker file: the jar passed the check (#189)
-
-
 def fetch_sources(
     gav: Gav,
     sha1: str,
@@ -663,17 +660,14 @@ def fetch_sources(
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}_{sha1}-sources.jar"
     marker = cached.with_suffix(".repo")
-    central = next((r for r in repos if _is_central(r)), None)
     if cached.is_file() and marker.is_file():
-        lines = marker.read_text().splitlines() or [""]
-        # an earlier version stored a jar of another repository with no check: download it again (#189)
-        if central is None or _is_central(lines[0].strip()) or _CENTRAL_CHECKED in lines[1:]:
-            return cached, redact_url(lines[0].strip()), True
+        return cached, redact_url(marker.read_text().strip()), True
     gav_key = (gav.group, gav.artifact, gav.version)
     if verdicts is not None and verdicts.has_no_sources(gav_key, sha1, _redacted(repos)):
         log.cached_no_sources = True
         return None
     clean_answers = 0  # a repo without this build or without a sources jar
+    central = next((r for r in repos if _is_central(r)), None)
     if on_state is not None and repos:
         on_state("downloading")
     for repo in repos:
@@ -718,9 +712,7 @@ def fetch_sources(
                         f"the -sources.jar in {redact_url(repo)} is the sources jar of another build on Maven Central"
                     )
                 continue
-            marker.write_text(f"{redact_url(repo)}\n{_CENTRAL_CHECKED}\n")
-        else:
-            marker.write_text(redact_url(repo))
+        marker.write_text(redact_url(repo))
         # drop the file of an older decaf version: its name has no SHA-1, so this version never reads it (#180)
         drop_cached_sources(cache_dir / f"{gav.group}_{gav.artifact}_{gav.version}-sources.jar")
         return cached, redact_url(repo), False

@@ -222,10 +222,9 @@
   coordinates. When Maven Central holds another build and the downloaded jar
   is its sources jar, decaf drops the jar and decompiles the artifact. The
   miss then says `is the sources jar of another build on Maven Central`.
-  When Maven Central gives no answer, the row is a network fallback. A sources
-  jar that an earlier version cached from such a repository is downloaded
-  and checked one time. The check costs one request for each sources jar
-  from another repository, and two when Maven Central holds another build.
+  When Maven Central gives no answer, the row is a network fallback. The
+  check costs one request for each sources jar from another repository, and
+  two when Maven Central holds another build.
 
 ## [1.12.0] - 2026-10-31
 
