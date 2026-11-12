@@ -153,6 +153,9 @@ class ArtifactReport:
     resources_copied: int = 0
     missing_classes: int = 0
     sources_gap: int = 0  # top-level classes that the Maven sources jar lacks; the engines write them (#180)
+    # entries (class files of a class folder, names of nested archives) that decaf kept from the engines or did not
+    # use because their name or class name can leave the output folder
+    refused: int = 0
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
     stubs: list[dict] = field(default_factory=list)  # classes left stubbed in the output (#96)
@@ -291,6 +294,10 @@ class MergeWriter:
         """The merged tree has no folder for each archive."""
 
 
+class OutsideOutput(Exception):
+    """A path from a name is not below the output folder; the row fails. Not a ZIP_ERRORS type: nothing skips it."""
+
+
 class MirrorWriter:
     """Copies each artifact's source files under out_root/<its folder> (see nest)."""
 
@@ -307,7 +314,15 @@ class MirrorWriter:
         self._folders[rel] = f"{self._folders.get(parent, parent)}/{rel.removeprefix(f'{parent}!/')}"
 
     def dest_for(self, rel: str) -> Path:
-        return self.root / self._folders.get(rel, rel)
+        """The folder of an artifact below root. A folder that is not below root raises OutsideOutput."""
+        dest = self.root / self._folders.get(rel, rel)
+        try:
+            inside = dest.resolve().is_relative_to(self.root.resolve())
+        except OSError:
+            inside = False
+        if not inside:
+            raise OutsideOutput(f"{ascii(rel)}: the folder of this artifact is not below the output folder")
+        return dest
 
     def out_path(self, rel: str, raw: str) -> str:
         """The path below the artifact folder of an engine file: the engine path (#174)."""
@@ -765,9 +780,14 @@ def _copy_without_refused(archive: Path, folder: Path) -> Path:
     return jar
 
 
-def _refused_warning(rel: str, count: int, unit: str, first: str) -> str:
-    return (f"{rel}: no engine gets {count} of its {unit}, because a name or a class name can leave the output"
-            f" folder, or decaf cannot read the class name; the first is {ascii(first)}")
+def _note_refused(artifact: Artifact, ctx: Ctx, report: ArtifactReport, names: list[str], unit: str) -> None:
+    """Count the refused items of a row, and print one warning for them."""
+    if not names:
+        return
+    report.refused += len(names)
+    if ctx.on_warn is not None:
+        ctx.on_warn(f"{artifact.rel}: decaf does not use {len(names)} of its {unit}, because a name or a class name"
+                    f" can leave the output folder, or decaf cannot read the class name; the first is {ascii(names[0])}")
 
 
 def _class_versions(source: Path) -> tuple[dict[str, int], dict[str, str]]:
@@ -2070,13 +2090,18 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
     report.outcome = "ok"
 
 
-def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
+def _discover_nested(artifact: Artifact, ctx: Ctx, refused: list[str] | None = None) -> list[Artifact]:
+    """The nested archives of an archive. A name that does not stay inside gives no artifact: it goes to refused,
+    before any other use, so no path is made from it."""
     try:
         with zipfile.ZipFile(artifact.path) as zf:
             infos = zf.infolist()
     except (zipfile.BadZipFile, OSError):
         return []
-    found = find_nested_archives(i.filename for i in infos)
+    found = find_nested_archives(i.orig_filename for i in infos)  # the name before zipfile cuts it at a NUL
+    if refused is not None:
+        refused += [n for n in found if not stays_inside(n)]
+    found = [n for n in found if stays_inside(n)]
     names = list(dict.fromkeys(found))  # two entries of one name: one row, and the last one wins, as in Java
     if not names:
         return []
@@ -2182,7 +2207,9 @@ def _fetch_stage(
             groups = casefs.case_groups(_output_stems(artifact))
             if groups:
                 if artifact.kind in (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR):
-                    nested = _discover_nested(artifact, ctx)  # nested jars get their own check
+                    bad: list[str] = []
+                    nested = _discover_nested(artifact, ctx, bad)  # nested jars get their own check
+                    _note_refused(artifact, ctx, report, bad, "entries")
                 unit = "source files" if artifact.kind is ArtifactKind.SOURCES_JAR else "classes"
                 report.outcome = "failed"
                 report.failure = _case_failure(groups, unit, ctx.case_insensitive)
@@ -2192,7 +2219,9 @@ def _fetch_stage(
             report.failure = "unreadable archive"
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
             state("scanning")
-            nested = _discover_nested(artifact, ctx)  # e.g. a war bundling only jars
+            bad = []
+            nested = _discover_nested(artifact, ctx, bad)  # e.g. a war bundling only jars
+            _note_refused(artifact, ctx, report, bad, "entries")
             state("copying resources")
             copied, skipped = ctx.writer.add_resources(
                 artifact.path, artifact.rel, include_sources=True
@@ -2210,7 +2239,9 @@ def _fetch_stage(
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             state("scanning")
-            nested = _discover_nested(artifact, ctx)  # e.g. a war with one stray .java and its jars (#110)
+            bad = []
+            nested = _discover_nested(artifact, ctx, bad)  # e.g. a war with one stray .java and its jars (#110)
+            _note_refused(artifact, ctx, report, bad, "entries")
             state("extracting")
             tmp = _tmp_dir(ctx)
             damaged: list[str] = []
@@ -2238,12 +2269,12 @@ def _fetch_stage(
                 ctx.tree_expected[artifact.rel] = expected_class_stems(tmp)  # before the removal
             for rel in refused:
                 (tmp / rel).unlink()
-            if refused and ctx.on_warn is not None:
-                ctx.on_warn(_refused_warning(artifact.rel, len(refused), "class files", refused[0]))
+            _note_refused(artifact, ctx, report, refused, "class files")
             return report, nested, tmp
         else:  # ARCHIVE
             state("scanning")
-            nested = _discover_nested(artifact, ctx)
+            bad = []
+            nested = _discover_nested(artifact, ctx, bad)  # its names are refused entries of the archive too
             state("copying resources")
             copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
             report.resources_copied += copied
@@ -2307,19 +2338,17 @@ def _fetch_stage(
                     if gap:
                         msg += f"; {len(gap)} classes not in the sources jar"
                     ctx.on_stderr(f"maven {artifact.rel}: {msg}")
-            if gap:  # the engines get only the retry trees of the gap classes, without the refused class files
+            if hit and not gap:  # no engine runs: only the names of the nested archives were not used
+                _note_refused(artifact, ctx, report, bad, "entries")
+                return report, nested, None
+            refused = _refused(artifact.path)
+            _note_refused(artifact, ctx, report, [info.orig_filename for info in refused], "entries")
+            if gap or not refused:  # a gap: the engines get only the retry trees of the gap classes
                 return report, nested, artifact.path
-            if not hit:
-                refused = _refused(artifact.path)
-                if not refused:
-                    return report, nested, artifact.path
-                folder = _tmp_dir(ctx)
-                with ctx.family_lock:
-                    ctx.family_dirs.setdefault(artifact.rel, []).append(folder)  # it goes when the row is final
-                target = _copy_without_refused(artifact.path, folder)
-                if ctx.on_warn is not None:
-                    ctx.on_warn(_refused_warning(artifact.rel, len(refused), "entries", refused[0].filename))
-                return report, nested, target
+            folder = _tmp_dir(ctx)
+            with ctx.family_lock:
+                ctx.family_dirs.setdefault(artifact.rel, []).append(folder)  # it goes when the row is final
+            return report, nested, _copy_without_refused(artifact.path, folder)
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]

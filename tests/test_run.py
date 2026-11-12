@@ -2033,7 +2033,7 @@ def test_an_archive_with_a_refused_entry_is_no_batch_target(fake_env, make_jar, 
     assert batches == ([] if refused else [["s0.jar", "s1.jar"]])
     row = next(r for r in report.artifacts if r.rel.endswith("s1.jar"))
     assert (row.classes, row.missing_classes) == ((2, 1) if refused else (2, 0))
-    assert len([w for w in warns if "no engine gets" in w]) == refused
+    assert len([w for w in warns if "decaf does not use" in w]) == refused
 
 
 def test_a_maven_row_with_a_gap_runs_alone_not_in_a_batch(fake_env, make_jar, tmp_path):

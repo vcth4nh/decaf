@@ -4907,7 +4907,7 @@ def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, 
         assert zf.read("p/E.class") == class_file("p/E") + b"2"
     assert target.name == "app.jar" and target != jar and target.parent in ctx.family_dirs["app.jar"]
     assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 6, 3, 3)
-    assert warns == ["app.jar: no engine gets 4 of its entries, because a name or a class name can leave the output"
+    assert warns == ["app.jar: decaf does not use 4 of its entries, because a name or a class name can leave the output"
                      " folder, or decaf cannot read the class name; the first is 'p/D.class'"]
     assert jar.read_bytes() == before
 
@@ -4947,7 +4947,7 @@ def test_the_warning_shows_a_control_character_of_the_first_name_as_an_escape(tm
     warns: list[str] = []
     ctx.on_warn = warns.append
     process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
-    assert warns == ["app.jar: no engine gets 1 of its entries, because a name or a class name can leave the output"
+    assert warns == ["app.jar: decaf does not use 1 of its entries, because a name or a class name can leave the output"
                      " folder, or decaf cannot read the class name; the first is '\\x1b[2J/../B.class'"]
 
 
@@ -4987,7 +4987,7 @@ def test_an_engine_gets_the_class_folder_without_its_refused_class_files(tmp_pat
     report, _ = process_artifact(Artifact(folder, "_classes", ArtifactKind.CLASS_TREE), ctx)
     assert runner.sent == [["p/A$1.class", "p/A.class"]]
     assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 3, 1, 2)
-    assert warns == ["_classes: no engine gets 1 of its class files, because a name or a class name can leave the"
+    assert warns == ["_classes: decaf does not use 1 of its class files, because a name or a class name can leave the"
                      " output folder, or decaf cannot read the class name; the first is 'p/B.class'"]
     assert _snapshot(folder) == before
 
@@ -5056,3 +5056,78 @@ def test_a_class_folder_that_holds_the_temp_root_counts_only_its_own_classes(tmp
     assert runner.sent == [["loose/p/A.class"]]
     assert (report.classes, report.missing_classes, report.java_files) == (2, 1, 1)
     assert ctx.tree_expected == {}  # the row took its set
+
+
+# --- decaf's own use of a nested archive name ---
+
+
+def _drive(ctx, jar: Path) -> list:
+    """process_artifact on an input and its nested archives, as the scheduler does (nest before a write)."""
+    rows = []
+    todo = [Artifact(jar, jar.name, ArtifactKind.ARCHIVE)]
+    while todo:
+        a = todo.pop()
+        report, nested = process_artifact(a, ctx)
+        rows.append(report)
+        for n in nested:
+            ctx.writer.nest(n.rel, a.rel)
+            todo.append(n)
+    return rows
+
+
+def _outside(tmp_path: Path, known: set[Path]) -> list[Path]:
+    keep = [(tmp_path / "out").resolve(), (tmp_path / "work").resolve()]
+    return [p for p in tmp_path.rglob("*")
+            if p.is_file() and not any(p.resolve().is_relative_to(k) for k in keep) and p not in known]
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("mirror", [True, False])
+@pytest.mark.parametrize("at_limit", [False, True])
+def test_a_nested_archive_name_that_leaves_its_folder_gives_no_row(tmp_path: Path, class_file, mirror, at_limit):
+    """Below the depth limit, the name points at an archive outside the extraction folder that is no part of the
+    input. At the depth limit, the row of the name would copy the entry (mirror mode)."""
+    known: set[Path] = set()
+    if at_limit:
+        (tmp_path / "build").mkdir()
+        inner = _zip(tmp_path / "build/inner.jar", [("q/B.class", class_file("q/B")),
+                                                    ("../../../../landing/blob.jar", b"blob")])
+        jar = _zip(tmp_path / "outer.jar", [("p/A.class", class_file("p/A")), ("lib/inner.jar", inner.read_bytes())])
+        parent, bad = "outer.jar!/lib/inner.jar", "../../../../landing/blob.jar"
+        known.add(inner)
+    else:
+        (tmp_path / "elsewhere").mkdir()
+        local = _zip(tmp_path / "elsewhere/local.jar", [("s/Secret.class", class_file("s/Secret"))])
+        jar = _zip(tmp_path / "outer.jar", [("p/A.class", class_file("p/A")), ("../../elsewhere/local.jar", b"x")])
+        parent, bad = "outer.jar", "../../elsewhere/local.jar"
+        known.add(local)
+    known.add(jar)
+    runner = _names_runner()
+    writer = MirrorWriter(tmp_path / "out") if mirror else MergeWriter(tmp_path / "out/src")
+    ctx = make_ctx(tmp_path, runner, fallback=False, writer=writer)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    rows = {r.rel: r for r in _drive(ctx, jar)}
+    assert sorted(rows) == sorted(["outer.jar", "outer.jar!/lib/inner.jar"] if at_limit else ["outer.jar"])
+    assert all(t.name in ("outer.jar", "inner.jar") for t, _ in runner.calls)  # no engine call for the name
+    assert rows[parent].refused == 1
+    assert [w for w in warns if bad in w or ascii(bad) in w] == warns and len(warns) == 1
+    assert warns[0].startswith(parent + ": ")
+    assert _outside(tmp_path, known) == []
+
+
+def test_the_mirror_writer_refuses_a_folder_that_is_not_below_its_root(tmp_path: Path, make_jar):
+    """Defense in depth: a rel whose folder leaves the output folder raises, also in add_resources and add_blob."""
+    from decaf.pipeline import OutsideOutput
+
+    writer = MirrorWriter(tmp_path / "out")
+    writer.nest("a.jar!/../../x.jar", "a.jar")
+    jar = make_jar("x.jar", {"r.txt": b"r"})
+    with pytest.raises(OutsideOutput):
+        writer.dest_for("a.jar!/../../x.jar")
+    with pytest.raises(OutsideOutput):
+        writer.add_resources(jar, "a.jar!/../../x.jar")
+    with pytest.raises(OutsideOutput):
+        writer.add_blob(jar, "r.txt", "a.jar!/../../x.jar")
+    assert writer.dest_for("a.jar") == tmp_path / "out/a.jar"
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == [jar]
