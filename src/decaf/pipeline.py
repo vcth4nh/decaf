@@ -808,14 +808,15 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
     with the file name of the archive, the raw names of the refused entries). With folder None, the same tests run
     with no write and no read of an entry that is not a class entry: (None, the refused names).
 
-    The copy has one entry for each raw name, as the copy writes it (_copy_name), and the last entry of a name
-    decides, as in Java: an earlier entry is not read. The entries keep the order of the first entry of each name.
+    The copy has one entry for each name as zipfile writes it (_copy_name), and the last entry of a name decides, as
+    in Java: an earlier entry is not read. The entries keep the order of the first entry of each name.
     An entry is refused when its raw name, its zipfile name, or its name in the copy does not stay inside, when its
     name in the copy is too long for zipfile (_NAME_MAX), or when it is a class entry by one of its names and decaf
     cannot read it or its data fails _safe_class. A folder entry (by its raw name or its name in the copy) goes in as
     a folder, with no data. Another entry that decaf cannot read stays out with no count, and a large one goes through
     a part file, so a read error leaves no part of it in the copy. The copy is stored, with no extra field: each of its
-    entries has one name.
+    entries has one name. A nested archive inside the copy goes in as it is, with no test of its entries: decaf
+    decompiles each nested archive in its own row, with the same tests.
     """
     refused: list[str] = []
     # an engine reads the suffix, and one engine names its output after the file

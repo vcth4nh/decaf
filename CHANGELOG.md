@@ -239,15 +239,16 @@
   decaf uses no nested archive name that can leave its folder. An engine
   never reads the input archive: it reads a copy that decaf wrote from the
   entries that it tested, with one entry for each name. The copy, and each
-  retry, hold only the archive entries and class files whose names (each
-  name of the entry and each class name of the class file) stay inside the
-  archive and the output folder, and whose class file decaf can read. The
-  row counts each entry or name that decaf did not use in the new field
-  `refused`, and the totals count them in `refused_entries`. A row with
-  `refused` > 0 is partial, a refused class that is an expected class also
-  counts as a missing class, and the run prints one warning for the
-  artifact. In mirror mode, an artifact folder whose name has a root, a
-  drive, or a parent part fails the row.
+  retry, hold only the archive entries and class files whose names (each name
+  of the entry and each class name of the class file) stay inside the archive
+  and the output folder, and whose class file decaf can read. decaf's own
+  extraction of an archive follows the same name rule, so no file comes from
+  an entry that the row does not use. The row counts each entry or name that
+  decaf did not use in the new field `refused`, and the totals count them in
+  `refused_entries`. In an ok row, `refused` > 0 makes the row partial, and a
+  refused class that is an expected class also counts as a missing class. The
+  run prints one warning for the artifact. In mirror mode, an artifact folder
+  whose name has a root, a drive, or a parent part fails the row.
 
 ## [1.12.0] - 2026-10-31
 
