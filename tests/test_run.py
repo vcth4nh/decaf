@@ -4264,25 +4264,48 @@ def _watch_final_delete(monkeypatch) -> list[list[str]]:
     return left
 
 
-def _other_folders(dest, target) -> set[str]:
+def _live_copies(monkeypatch) -> set[str]:
+    """The names of the folders that hold a copy of an archive for the engines, from the copy until the drop of the
+    folder: such a folder goes when its decompile step ends."""
+    import decaf.pipeline as pipeline
+
+    live: set[str] = set()
+    copy, drop = pipeline._engine_copy, pipeline._drop
+
+    def recording_copy(archive, folder):
+        if folder is not None:
+            live.add(Path(folder).name)
+        return copy(archive, folder)
+
+    def recording_drop(folder):
+        if folder is not None:
+            live.discard(Path(folder).name)
+        return drop(folder)
+
+    monkeypatch.setattr(pipeline, "_engine_copy", recording_copy)
+    monkeypatch.setattr(pipeline, "_drop", recording_drop)
+    return live
+
+
+def _other_folders(dest, target, live: set[str]) -> set[str]:
     """The folders of the temp root that are not the output folder or the input folder of this engine call (#97),
-    and not the copy of an archive for the engines: it goes when its decompile step ends. Another worker can have
-    made the folder of a copy and not its file yet."""
-    found = list(Path(dest).parent.iterdir())  # one listing: another worker can make a folder at any time
-    copies = {p.name for p in found
-              if p.is_dir() and all(c.is_file() and c.suffix in (".jar", ".part") for c in p.iterdir())}
-    return {p.name for p in found} - {Path(dest).name, Path(target).name} - copies
+    and not a live copy folder (_live_copies). With jobs=1 one worker makes the copies and runs the engines, so no
+    folder of a copy is made during the call."""
+    return {p.name for p in Path(dest).parent.iterdir()} - {Path(dest).name, Path(target).name} - live
 
 
-def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_path):
+def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_path, monkeypatch):
     """#97: the temp root grew with the whole run. Now the folders of an engine call go after the call."""
     input_dir = tmp_path / "in"
     for k in range(3):
         make_jar(f"j{k}.jar", {f"p{k}/A.class": b"a", f"p{k}/B.class": b"b"}, base=input_dir)
     left: list[set[str]] = []
+    live = _live_copies(monkeypatch)
+    copies: list[int] = []
 
     def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
-        left.append(_other_folders(dest, target))
+        left.append(_other_folders(dest, target, live))
+        copies.append(len(live))
         res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
         if spec.name in ("vineflower", "cfr"):  # B is missing: two class retries
             for b in Path(dest).rglob("B.java"):
@@ -4292,6 +4315,7 @@ def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_p
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1), runner=engine)
     assert report.totals["ok"] == 3 and all(r.missing_classes == 0 for r in report.artifacts)
     assert left == [set()] * 9  # 3 jars, 3 engine calls each
+    assert copies == [1] * 9  # the copy of the row: no copy of an earlier row stays
 
 
 def test_run_leaves_the_final_delete_an_empty_temp_root(fake_env, make_jar, tmp_path, monkeypatch):
@@ -4333,6 +4357,8 @@ def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_pat
     all_queued = threading.Event()
     queued = [0]
     left: list[set[str]] = []
+    live = _live_copies(monkeypatch)
+    copies: list[int] = []
 
     def on_event(kind, subject, detail):
         if kind == "queued":
@@ -4344,7 +4370,8 @@ def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_pat
         if Path(target).name == "big.jar":
             all_queued.wait(timeout=30)  # the two small jars then form one batch
         if Path(target).is_dir():  # a class retry of a jar of the batch
-            left.append(_other_folders(dest, target))
+            left.append(_other_folders(dest, target, live))
+            copies.append(len(live))
         return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
 
     def batch_without_b(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
@@ -4361,6 +4388,7 @@ def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_pat
     # At the retry of the first jar: the nested folder of big.jar and the split folder of the second
     # jar, which is not written yet. At the retry of the second jar: only the nested folder.
     assert [len(s) for s in left] == [2, 1]
+    assert copies == [2, 2]  # the copies of the batch, until the batch ends
     assert at_end == [[]]  # the nested folder went when the rows of the batch were final
 
 

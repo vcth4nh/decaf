@@ -5829,3 +5829,62 @@ def test_the_class_test_ignores_the_dots_and_spaces_at_the_end_of_a_name(tmp_pat
     copy, refused = _engine_copy(jar, tmp_path)
     assert refused == ["p/A.class.", "p/B.class . "]
     assert _entries(copy) == [("p/C.class", class_file("p/C")), ("p/D.txt.", b"d")]
+
+
+def test_the_copy_folder_of_a_solo_row_goes_after_an_engine_call_that_raises(make_jar, tmp_path: Path):
+    import decaf.pipeline as pipeline
+    from decaf.pipeline import ArtifactReport
+
+    jar = make_jar("a.jar", {"com/a/A.class": b"x"})
+    targets: list[Path] = []
+
+    def raising(spec, jar_path, target, dest, timeout, **kw):
+        targets.append(Path(target))
+        raise RuntimeError("engine call failed")
+
+    ctx = make_ctx(tmp_path, raising)
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    with pytest.raises(RuntimeError):
+        pipeline._decompile(Artifact(jar, "a.jar", ArtifactKind.ARCHIVE), jar, ctx, report)
+    assert [t.name for t in targets] == ["a.jar"] and targets[0] != jar
+    assert not targets[0].parent.exists() and list(ctx.tmp_root.iterdir()) == []
+
+
+def _bad_crc(path: Path, data: bytes) -> Path:
+    """The zip at path, with a wrong CRC-32 for the entry that holds data, in both headers."""
+    import struct
+    import zlib
+
+    raw = path.read_bytes()
+    good, bad = struct.pack("<I", zlib.crc32(data)), struct.pack("<I", zlib.crc32(data) ^ 1)
+    assert raw.count(good) == 2
+    path.write_bytes(raw.replace(good, bad))
+    return path
+
+
+def test_a_read_error_after_the_first_read_of_a_large_entry_leaves_no_part_of_it(tmp_path: Path, monkeypatch):
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 64)
+    big = bytes(range(256)) * 256  # far above the limit and the 4 KiB of one zipfile read: the CRC test comes later
+    jar = _bad_crc(_raw_zip(tmp_path / "a.jar", [(b"big.bin", big), (b"r.txt", b"r")]), big)
+    with zipfile.ZipFile(jar) as zf, zf.open("big.bin") as f:
+        assert len(f.read(65)) == 65  # the first read has no error
+        with pytest.raises(zipfile.BadZipFile):
+            f.read()
+    copy, refused = _engine_copy(jar, tmp_path)  # the helper also checks that no part file stays
+    assert (refused, _entries(copy)) == ([], [("r.txt", b"r")])
+
+
+def test_a_large_entry_goes_in_with_its_size(tmp_path: Path, monkeypatch):
+    """zipfile takes the size of an entry before its data: with a small ZIP64_LIMIT, a wrong size raises."""
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 64)
+    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 1000)
+    big = bytes(range(256)) * 20
+    jar = _zip(tmp_path / "a.jar", [("big.bin", big), ("r.txt", b"r")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    with zipfile.ZipFile(copy) as zf:
+        assert [(i.filename, i.file_size) for i in zf.infolist()] == [("big.bin", len(big)), ("r.txt", 1)]
+        assert zf.read("big.bin") == big
