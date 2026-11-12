@@ -2605,6 +2605,10 @@ def test_family_classpath_input_group_and_class_tree(make_jar, tmp_path: Path):
     assert _family_classpath(Artifact(a_jar, "a.jar", ArtifactKind.ARCHIVE), a_jar, ctx) == [
         a_jar, b_jar, tmp_path / "in",
     ]
+    copy = make_jar("engines/a.jar", {"com/a/A.class": b"a"})  # the copy of the engines replaces its archive
+    assert _family_classpath(Artifact(a_jar, "a.jar", ArtifactKind.ARCHIVE), copy, ctx) == [
+        copy, b_jar, tmp_path / "in",
+    ]
     tree = tmp_path / "copy"
     tree.mkdir()
     t = Artifact(tmp_path / "in", "_classes", ArtifactKind.CLASS_TREE)
@@ -5209,7 +5213,60 @@ def test_a_class_folder_that_holds_the_temp_root_counts_only_its_own_classes(tmp
     report, _ = process_artifact(Artifact(tmp_path, "_classes", ArtifactKind.CLASS_TREE), ctx)
     assert runner.sent == [["loose/p/A.class"]]
     assert (report.classes, report.missing_classes, report.java_files) == (2, 1, 1)
-    assert ctx.tree_expected == {}  # the row took its set
+    assert ctx.expected_before_refusal == {}  # the row took its set
+
+
+@pytest.mark.class_names
+def test_the_hold_step_and_the_class_retries_read_only_the_copy(tmp_path: Path, class_file):
+    """The input archive goes after the first engine call: the retry of p/A reads the copy."""
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("p/B.class", class_file("p/B"))])
+    inner = writing_runner({"vineflower": {"p/B.java": "class B {}"}, "cfr": {"p/A.java": "class A {}"}})
+
+    def runner(spec, jar_path, target, dest, timeout, **kw):
+        jar.unlink(missing_ok=True)
+        return inner(spec, jar_path, target, dest, timeout)
+
+    ctx = make_ctx(tmp_path, runner)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [name for name, _ in inner.calls] == ["vineflower", "cfr"] and inner.sent[1] == ["p/A.class"]
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 2, 0, 2)
+
+
+@pytest.mark.class_names
+def test_the_readers_of_a_target_see_the_same_in_the_copy_of_a_normal_archive(tmp_path: Path, class_file):
+    import decaf.pipeline as pipeline
+
+    war = _zip(tmp_path / "app.war", [
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"), ("WEB-INF/web.xml", b"<web-app/>"),
+        ("WEB-INF/classes/com/x/A.class", class_file("com/x/A")),
+        ("WEB-INF/classes/com/x/A$1.class", class_file("com/x/A$1")),
+        ("WEB-INF/lib/dep.jar", _zip(tmp_path / "dep.jar", [("q/B.class", class_file("q/B"))]).read_bytes()),
+        ("module-info.class", class_file("module-info")), ("p/C.class", class_file("p/C")),
+    ])
+    copy, _ = _engine_copy(war, tmp_path)
+    for read in (pipeline._class_bytes, pipeline._container_classes, pipeline._stems_and_claims,
+                 lambda p: pipeline._stems_and_claims(p, read=False), pipeline.expected_class_stems,
+                 pipeline._class_versions):
+        assert read(copy) == read(war)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    pipeline._root_jar(war, "WEB-INF/classes/", tmp_path / "a/x.jar")
+    pipeline._root_jar(copy, "WEB-INF/classes/", tmp_path / "b/x.jar")
+    assert _entries(tmp_path / "a/x.jar") == _entries(tmp_path / "b/x.jar") != []
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("refused", [False, True])
+def test_the_fetch_stage_stores_the_expected_classes_only_for_a_row_with_refused_entries(tmp_path: Path, class_file,
+                                                                                        refused):
+    from decaf.pipeline import _fetch_stage
+
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")),
+                                      ("p/B.class", class_file("../B" if refused else "p/B"))])
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False)
+    report, _, target = _fetch_stage(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert target != jar and report.refused == refused
+    assert ctx.expected_before_refusal == ({"app.jar": {"p/A", "p/B"}} if refused else {})
 
 
 # --- decaf's own use of a nested archive name ---

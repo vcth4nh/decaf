@@ -3070,7 +3070,8 @@ def test_run_injected_checker_reports_check_and_settings(fake_env, make_jar, tmp
     assert [(a.engine, a.flagged) for a in art.attempts] == [("vineflower", 1), ("cfr", 0)]
     assert report.totals["checked_files"] == 1
     assert report.settings["check"] is True and report.settings["javac"] is None
-    assert calls[0][0].classpath == (input_dir / "app.jar",)  # own archive; the input group adds nothing new
+    # its own archive as the copy of the engines; the input group adds nothing new
+    assert [p.name for p in calls[0][0].classpath] == ["app.jar"] and calls[0][0].classpath[0] != input_dir / "app.jar"
 
 
 def test_run_no_check_setting_ignores_injected_checker(fake_env, make_jar, tmp_path: Path):

@@ -486,8 +486,9 @@ class Ctx:
     family_lock: threading.Lock = field(default_factory=threading.Lock)
     # rel -> the top-level classes that its Maven sources lack; stage 2 decompiles them (#180)
     maven_gaps: dict[str, set[str]] = field(default_factory=dict)
-    # rel -> the expected classes of the copy of a class folder before the removal of its refused class files
-    tree_expected: dict[str, set[str]] = field(default_factory=dict)
+    # rel -> the expected classes of a row with refused items, with them: of the input of an archive, of the copy of
+    # a class folder before the removal. Stage 2 takes the set, so a refused class counts as missing.
+    expected_before_refusal: dict[str, set[str]] = field(default_factory=dict)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -1160,9 +1161,10 @@ def _family_classpath(artifact: Artifact, source: Path, ctx: Ctx, roots: list[Pa
             cp += _container_group(artifact.parent, entry[0], ctx)
     else:
         cp += ctx.input_group
+    replaced = artifact.path if not source.is_dir() and source != artifact.path else None  # by the copy of an archive
     out: list[Path] = []
     for p in cp:
-        if p not in out:
+        if p not in out and p != replaced:
             out.append(p)
     return out
 
@@ -2079,9 +2081,8 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
                      if s not in gap and not any(s[:i] in gap for i in range(len(s)) if s[i] == "$")}
         _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held(written=published))
         return
-    source = target if target.is_dir() else artifact.path
-    # For a class folder with refused class files, the set of its copy before the removal: they count as missing.
-    expected = ctx.tree_expected.pop(artifact.rel, None)
+    source = target  # the copy: the hold step and the class retries read only what the engines get
+    expected = ctx.expected_before_refusal.pop(artifact.rel, None)
     if expected is None:
         expected = expected_class_stems(source)
     report.classes = len(expected)
@@ -2314,7 +2315,7 @@ def _fetch_stage(
             copy_class_tree(artifact.path, tmp)
             refused = _refused(tmp)  # the files of the copy: the bytes that the engines get
             if refused:
-                ctx.tree_expected[artifact.rel] = expected_class_stems(tmp)  # before the removal
+                ctx.expected_before_refusal[artifact.rel] = expected_class_stems(tmp)  # before the removal
             for rel in refused:
                 (tmp / rel).unlink()
             _note_refused(artifact, ctx, report, refused, "class files")
@@ -2398,6 +2399,8 @@ def _fetch_stage(
             with ctx.family_lock:
                 ctx.family_dirs.setdefault(artifact.rel, []).append(folder)  # it goes when the row is final
             copy, refused = _engine_copy(artifact.path, folder)
+            if refused:
+                ctx.expected_before_refusal[artifact.rel] = expected_class_stems(artifact.path)
             _note_refused(artifact, ctx, report, refused, "entries")
             return report, nested, copy
     except Exception:
