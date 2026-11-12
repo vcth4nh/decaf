@@ -1997,6 +1997,53 @@ def test_a_batch_member_reads_its_class_files_in_a_worker(fake_env, make_jar, tm
     assert readers and threading.main_thread() not in readers
 
 
+@pytest.mark.class_names
+@pytest.mark.parametrize("refused", [False, True])
+def test_a_batch_member_with_a_refused_entry_runs_alone(fake_env, make_jar, tmp_path, class_file, refused):
+    """A batch takes the expected classes from its target, and the copy without the refused entries lacks them: such
+    a member goes back for a solo run, which counts it one time. With one member left, it goes back too: main never
+    ran a batch of one member."""
+    s0 = make_jar("s0.jar", {"com/s0/A.class": class_file("com/s0/A")})
+    s1 = make_jar("s1.jar", {"com/s1/B.class": class_file("com/s1/B"),
+                             "com/s1/C.class": class_file("../C" if refused else "com/s1/C")})
+    input_dir = tmp_path / "in"
+    make_jar("big.jar", {**{f"com/big/C{i}.class": class_file(f"com/big/C{i}") for i in range(900)},
+                         "lib/s0.jar": s0.read_bytes(), "lib/s1.jar": s1.read_bytes()}, base=input_dir)
+    all_queued = threading.Event()
+    queued = [0]
+
+    def on_event(kind, subject, detail):
+        if kind == "queued":
+            queued[0] += 1
+            if queued[0] == 3:
+                all_queued.set()
+
+    solo: list[str] = []
+
+    def gated_solo(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
+        solo.append(Path(target).name)
+        if Path(target).name == "big.jar":
+            all_queued.wait(timeout=30)
+        return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
+
+    batches: list[list[str]] = []
+
+    def recording_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
+        batches.append(sorted(Path(t).name for t in targets))
+        return merged_batch_engine(spec, jar_path, targets, dest, timeout, java=java)
+
+    warns: list[str] = []
+    report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, mirror=False, fallback=False, jobs=1,
+                          cpus=1),
+                 runner=gated_solo, batch_runner=recording_batch, on_event=on_event, on_warn=warns.append)
+    assert batches == ([] if refused else [["s0.jar", "s1.jar"]])
+    assert (solo[0], sorted(solo[1:])) == (("big.jar", ["s0.jar", "s1.jar"]) if refused else ("big.jar", []))
+    row = next(r for r in report.artifacts if r.rel.endswith("s1.jar"))
+    assert (row.classes, row.missing_classes, row.refused) == ((2, 1, 1) if refused else (2, 0, 0))
+    assert [a.level for a in row.attempts] == (["archive"] if refused else ["batch"])
+    assert len([w for w in warns if "decaf does not use" in w]) == refused
+
+
 def test_a_maven_row_with_a_gap_runs_alone_not_in_a_batch(fake_env, make_jar, tmp_path):
     """#180: a batch would decompile the whole jar; the gap classes run as class retries."""
     sources = make_jar("s-sources.jar", {"com/s/A.java": "// upstream\nclass A {}", "com/s/D.java": "// upstream\nclass D {}"})
@@ -3030,7 +3077,8 @@ def test_run_injected_checker_reports_check_and_settings(fake_env, make_jar, tmp
     assert [(a.engine, a.flagged) for a in art.attempts] == [("vineflower", 1), ("cfr", 0)]
     assert report.totals["checked_files"] == 1
     assert report.settings["check"] is True and report.settings["javac"] is None
-    assert calls[0][0].classpath == (input_dir / "app.jar",)  # own archive; the input group adds nothing new
+    # its own archive as the copy of the engines; the input group adds nothing new
+    assert [p.name for p in calls[0][0].classpath] == ["app.jar"] and calls[0][0].classpath[0] != input_dir / "app.jar"
 
 
 def test_run_no_check_setting_ignores_injected_checker(fake_env, make_jar, tmp_path: Path):
@@ -3472,6 +3520,7 @@ def test_run_damaged_class_entry_of_a_war_fails_none_of_its_libraries(fake_env, 
     war.parent.mkdir(parents=True)
     with zipfile.ZipFile(war, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("WEB-INF/classes/com/w/W.class", b"\xca\xfe\xba\xbe" + bytes(200))
+        zf.writestr("WEB-INF/classes/com/w/V.class", b"v")  # no engine gets W.class, so the war needs another class
         zf.writestr("WEB-INF/lib/dep.jar", dep.read_bytes())
     _damage_entry(war, "WEB-INF/classes/com/w/W.class")
     report = run(
@@ -3931,7 +3980,10 @@ def _deflated_jar(path: Path, entries: dict[str, bytes]) -> Path:
     return path
 
 
-def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path):
+def test_run_warns_when_an_estimate_exceeds_the_share(fake_env, tmp_path, monkeypatch):
+    from decaf import pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 32 << 20)  # an engine gets the 25 MB class file
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})  # 73 + 48 x 25 = 1273 MB
     warnings: list[str] = []
@@ -3977,6 +4029,7 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
 
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 32 << 20)  # an engine gets the 25 MB class file
     reads: list[Path] = []
     monkeypatch.setattr(pipeline, "_class_bytes", lambda target: reads.append(target) or 0)
     for out, engine in (("out", "jd"), ("out2", "vineflower")):
@@ -3989,8 +4042,11 @@ def test_run_share_warning_reads_no_class_bytes_without_a_model(fake_env, tmp_pa
         assert len(reads) == (engine == "vineflower")  # jd has no size model: decaf does not read the jar
 
 
-def test_run_warns_for_a_batch_eligible_jar_too(fake_env, tmp_path):
+def test_run_warns_for_a_batch_eligible_jar_too(fake_env, tmp_path, monkeypatch):
     """#114: a jar under 3000 classes got no estimate, but a batch JVM has one share too."""
+    from decaf import pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 32 << 20)  # an engine gets the 25 MB class file
     input_dir = tmp_path / "in"
     _deflated_jar(input_dir / "big.jar", {"com/x/A.class": b"\0" * (25 * 2**20)})
 
@@ -4128,7 +4184,7 @@ def test_run_gives_the_jvms_paths_they_can_open_for_an_input_folder_that_is_not_
     assert [r.outcome for r in report.artifacts] == ["ok", "ok"]
     for p in [*targets, *classpath]:
         str(p).encode("utf-8")  # no lone surrogate: Java reads this name
-    assert jar.resolve() in targets.values()
+    assert [t.name for t in targets.values() if t.suffix == ".jar"] == ["x.jar"]  # the copy of the jar
     assert {jar.resolve(), input_dir.resolve()} <= set(classpath.values())
 
 
@@ -4169,7 +4225,7 @@ def test_run_gives_the_jvms_ascii_paths_for_an_input_that_is_not_ascii(fake_env,
     report = run(Settings(input=input_dir, output=tmp_path / "out"), runner=engine, checker=checker, resolver=resolver)
     assert [r.outcome for r in report.artifacts] == ["ok", "ok"]
     assert [p for p in [*targets, *classpath] if not str(p.absolute()).isascii()] == []
-    assert jar.resolve() in targets.values()
+    assert [t.name for t in targets.values() if t.suffix == ".jar"] == ["mylib-1.2.3.jar"]  # the copy of the jar
     assert {jar.resolve(), input_dir.resolve()} <= set(classpath.values())
     assert names == ["mylib-1.2.3.jar"]  # the file-name hints of the Maven lookup
     assert jar.is_file()  # the run deletes the links, not the input
@@ -4189,7 +4245,7 @@ def test_run_keeps_the_input_path_when_the_link_fails(fake_env, make_jar, tmp_pa
 
     monkeypatch.setattr(os, "symlink", no_link)
     report = run(Settings(input=tmp_path / "in", output=tmp_path / "out", maven=False), runner=engine)
-    assert report.artifacts[0].outcome == "ok" and targets == [jar]
+    assert report.artifacts[0].outcome == "ok" and [t.name for t in targets] == [jar.name]  # the copy of the jar
 
 
 def _watch_final_delete(monkeypatch) -> list[list[str]]:
@@ -4208,20 +4264,48 @@ def _watch_final_delete(monkeypatch) -> list[list[str]]:
     return left
 
 
-def _other_folders(dest, target) -> set[str]:
-    """The folders of the temp root that are not the output folder or the input folder of this engine call (#97)."""
-    return {p.name for p in Path(dest).parent.iterdir()} - {Path(dest).name, Path(target).name}
+def _live_copies(monkeypatch) -> set[str]:
+    """The names of the folders that hold a copy of an archive for the engines, from the copy until the drop of the
+    folder: such a folder goes when its decompile step ends."""
+    import decaf.pipeline as pipeline
+
+    live: set[str] = set()
+    copy, drop = pipeline._engine_copy, pipeline._drop
+
+    def recording_copy(archive, folder):
+        if folder is not None:
+            live.add(Path(folder).name)
+        return copy(archive, folder)
+
+    def recording_drop(folder):
+        if folder is not None:
+            live.discard(Path(folder).name)
+        return drop(folder)
+
+    monkeypatch.setattr(pipeline, "_engine_copy", recording_copy)
+    monkeypatch.setattr(pipeline, "_drop", recording_drop)
+    return live
 
 
-def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_path):
+def _other_folders(dest, target, live: set[str]) -> set[str]:
+    """The folders of the temp root that are not the output folder or the input folder of this engine call (#97),
+    and not a live copy folder (_live_copies). With jobs=1 one worker makes the copies and runs the engines, so no
+    folder of a copy is made during the call."""
+    return {p.name for p in Path(dest).parent.iterdir()} - {Path(dest).name, Path(target).name} - live
+
+
+def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_path, monkeypatch):
     """#97: the temp root grew with the whole run. Now the folders of an engine call go after the call."""
     input_dir = tmp_path / "in"
     for k in range(3):
         make_jar(f"j{k}.jar", {f"p{k}/A.class": b"a", f"p{k}/B.class": b"b"}, base=input_dir)
     left: list[set[str]] = []
+    live = _live_copies(monkeypatch)
+    copies: list[int] = []
 
     def engine(spec, jar_path, target, dest, timeout, java="java", cpu_budget=None):
-        left.append(_other_folders(dest, target))
+        left.append(_other_folders(dest, target, live))
+        copies.append(len(live))
         res = perfect_engine(spec, jar_path, target, dest, timeout, java=java)
         if spec.name in ("vineflower", "cfr"):  # B is missing: two class retries
             for b in Path(dest).rglob("B.java"):
@@ -4231,6 +4315,7 @@ def test_run_drops_each_temp_folder_after_its_last_use(fake_env, make_jar, tmp_p
     report = run(Settings(input=input_dir, output=tmp_path / "out", maven=False, jobs=1), runner=engine)
     assert report.totals["ok"] == 3 and all(r.missing_classes == 0 for r in report.artifacts)
     assert left == [set()] * 9  # 3 jars, 3 engine calls each
+    assert copies == [1] * 9  # the copy of the row: no copy of an earlier row stays
 
 
 def test_run_leaves_the_final_delete_an_empty_temp_root(fake_env, make_jar, tmp_path, monkeypatch):
@@ -4272,6 +4357,8 @@ def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_pat
     all_queued = threading.Event()
     queued = [0]
     left: list[set[str]] = []
+    live = _live_copies(monkeypatch)
+    copies: list[int] = []
 
     def on_event(kind, subject, detail):
         if kind == "queued":
@@ -4283,7 +4370,8 @@ def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_pat
         if Path(target).name == "big.jar":
             all_queued.wait(timeout=30)  # the two small jars then form one batch
         if Path(target).is_dir():  # a class retry of a jar of the batch
-            left.append(_other_folders(dest, target))
+            left.append(_other_folders(dest, target, live))
+            copies.append(len(live))
         return perfect_engine(spec, jar_path, target, dest, timeout, java=java)
 
     def batch_without_b(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
@@ -4300,6 +4388,7 @@ def test_run_drops_the_batch_folders_after_the_split(fake_env, make_jar, tmp_pat
     # At the retry of the first jar: the nested folder of big.jar and the split folder of the second
     # jar, which is not written yet. At the retry of the second jar: only the nested folder.
     assert [len(s) for s in left] == [2, 1]
+    assert copies == [2, 2]  # the copies of the batch, until the batch ends
     assert at_end == [[]]  # the nested folder went when the rows of the batch were final
 
 

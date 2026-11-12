@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import contextlib
 import hashlib
 import json
 import os
@@ -37,9 +38,11 @@ from .scanner import (
     classify_counted,
     copy_class_tree,
     find_nested_archives,
+    names_stay,
     outer_stem,
     safe_extract_zip,
     scan_counted,
+    stays_inside,
 )
 from .verdicts import VerdictCache
 
@@ -152,6 +155,9 @@ class ArtifactReport:
     resources_copied: int = 0
     missing_classes: int = 0
     sources_gap: int = 0  # top-level classes that the Maven sources jar lacks; the engines write them (#180)
+    # entries (class files of a class folder, names of nested archives) that decaf kept from the engines or did not
+    # use because their name or class name can leave the output folder, or decaf cannot read the class name
+    refused: int = 0
     attempts: list[EngineAttempt] = field(default_factory=list)
     collisions: list[dict] = field(default_factory=list)
     stubs: list[dict] = field(default_factory=list)  # classes left stubbed in the output (#96)
@@ -163,9 +169,11 @@ class ArtifactReport:
 
     @property
     def partial(self) -> bool:
-        """ok but degraded: engine holes, stubs, flagged files, or decompiled sources-less due to network."""
+        """ok but degraded: engine holes, refused entries, stubs, flagged files, or decompiled sources-less due to
+        network."""
         return self.outcome == "ok" and (
             self.missing_classes > 0
+            or self.refused > 0
             or bool(self.stubs)
             or bool(self.flagged)
             or (self.sources_miss or "").startswith("network:")
@@ -290,6 +298,10 @@ class MergeWriter:
         """The merged tree has no folder for each archive."""
 
 
+class OutsideOutput(Exception):
+    """A path from a name is not below the output folder; the row fails. Not a ZIP_ERRORS type: nothing skips it."""
+
+
 class MirrorWriter:
     """Copies each artifact's source files under out_root/<its folder> (see nest)."""
 
@@ -306,7 +318,14 @@ class MirrorWriter:
         self._folders[rel] = f"{self._folders.get(parent, parent)}/{rel.removeprefix(f'{parent}!/')}"
 
     def dest_for(self, rel: str) -> Path:
-        return self.root / self._folders.get(rel, rel)
+        """The folder of an artifact below root. A folder text with a root, a drive, or a .. part raises OutsideOutput.
+
+        The test is of the text, not of the disk: a linked folder below root gets its files, as before.
+        """
+        folder = Path(self._folders.get(rel, rel))
+        if folder.anchor or ".." in folder.parts:
+            raise OutsideOutput(f"{ascii(rel)}: the folder of this artifact is not below the output folder")
+        return self.root / folder
 
     def out_path(self, rel: str, raw: str) -> str:
         """The path below the artifact folder of an engine file: the engine path (#174)."""
@@ -395,6 +414,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "flagged_files": sum((r.check or {}).get("flagged", 0) for r in reports),
         "noted_files": sum((r.check or {}).get("noted", 0) for r in reports),
         "unchecked_files": sum((r.check or {}).get("unchecked", 0) for r in reports),
+        "refused_entries": sum(r.refused for r in reports),
     }
 
 
@@ -467,6 +487,9 @@ class Ctx:
     family_lock: threading.Lock = field(default_factory=threading.Lock)
     # rel -> the top-level classes that its Maven sources lack; stage 2 decompiles them (#180)
     maven_gaps: dict[str, set[str]] = field(default_factory=dict)
+    # rel -> the expected classes of a class folder with refused class files: of its copy before the removal. Stage 2
+    # takes the set, so a refused class counts as missing.
+    expected_before_refusal: dict[str, set[str]] = field(default_factory=dict)
 
 
 def _tmp_dir(ctx: Ctx) -> Path:
@@ -683,6 +706,181 @@ def _bounded(f) -> bytes | None:
     """The content of an open class file, or None when it is larger than _CLASS_FILE_MAX."""
     data = f.read(_CLASS_FILE_MAX + 1)
     return data if len(data) <= _CLASS_FILE_MAX else None
+
+
+def _safe_class(data: bytes | None) -> bool:
+    """Can decaf prove that the class names of a class file stay inside the output folder?"""
+    return data is not None and check.class_names_stay_inside(data)
+
+
+def _refused(source: Path) -> list[str]:
+    """The class files of a folder (paths below it) that no engine gets: their class names fail _safe_class."""
+    out: list[str] = []
+    for p in sorted(source.rglob("*.class")):
+        if not p.is_file():
+            continue  # a folder named x.class
+        try:
+            with open(p, "rb") as f:
+                data = _bounded(f)
+        except OSError:
+            data = None
+        if not _safe_class(data):
+            out.append(p.relative_to(source).as_posix())
+    return out
+
+
+def _copy_name(info: zipfile.ZipInfo) -> str:
+    """The name of an entry in a copy, as zipfile writes it: the tests take this name, because the engines read it.
+
+    It keeps the bytes of the input where zipfile can write them: a name with no UTF-8 flag that zipfile read as
+    cp437, and whose bytes are valid UTF-8, keeps its bytes (zipfile writes it as UTF-8). Then zipfile.ZipInfo
+    changes each os.sep to / (on Windows, each backslash) and cuts the name at a NUL.
+    """
+    name = info.orig_filename
+    if not (info.flag_bits & 0x800 or name.isascii()):
+        try:
+            name = name.encode("cp437").decode("utf-8")
+        except UnicodeError:
+            pass  # other bytes: zipfile writes the cp437 text as UTF-8
+    return zipfile.ZipInfo(name).filename
+
+
+def _is_folder(info: zipfile.ZipInfo) -> bool:
+    """Is an entry a folder entry, by its raw name or by its zipfile name? decaf never makes a file from it."""
+    return info.orig_filename.endswith("/") or info.filename.endswith("/")
+
+
+def _outside_names(archive: Path) -> list[str]:
+    """The raw names of the entries of an archive whose names do not stay inside (names_stay). No class is read: for
+    a row whose archive no engine reads. A folder entry has no count."""
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            return [info.orig_filename for info in zf.infolist() if not (names_stay(info) or _is_folder(info))]
+    except (zipfile.BadZipFile, OSError):
+        return []
+
+
+def _is_class_entry(name: str) -> bool:
+    """Does a name end with .class for a reader that ignores the case, and for Windows, which drops the dots and
+    spaces at the end of a file name?"""
+    name = name.rstrip(". ")
+    return name.lower().endswith(".class") or name.upper().endswith(".CLASS") or name.casefold().endswith(".class")
+
+
+def _read_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo, part: Path | None) -> bytes | Path | None:
+    """The data of an entry, read one time: its bytes up to _CLASS_FILE_MAX; above that, the part file that holds
+    them, or None with no part file. None also when decaf cannot read the entry. A disk error raises."""
+    try:
+        with zf.open(info) as src:  # by its ZipInfo: not an earlier entry of the name
+            data = src.read(_CLASS_FILE_MAX + 1)
+            if len(data) <= _CLASS_FILE_MAX:
+                return data
+            if part is None:
+                return None
+            with open(part, "wb") as f:
+                f.write(data)
+                shutil.copyfileobj(src, f, 1 << 20)
+            return part
+    except ZIP_ERRORS as exc:
+        if isinstance(exc, OSError) and exc.errno is not None:
+            raise  # the disk, not the entry
+        return None
+
+
+def _put(out: zipfile.ZipFile, entry: zipfile.ZipInfo, data: bytes | Path) -> None:
+    """Write an entry of the copy from bytes or from a part file, with the external attributes of the input: zipfile
+    writes 0o600 for a 0, and the central directory takes the value of the entry at the close."""
+    attr = entry.external_attr
+    if isinstance(data, bytes):
+        out.writestr(entry, data)
+    else:
+        entry.file_size = data.stat().st_size
+        with open(data, "rb") as f, out.open(entry, "w") as dst:
+            shutil.copyfileobj(f, dst, 1 << 20)
+    entry.external_attr = attr
+
+
+_NAME_MAX = 0xFFFF  # bytes: the name field of a zip entry
+
+
+def _too_long(name: str) -> bool:
+    """Is a name longer than zipfile can write (UTF-8)? A character has at most 4 bytes: a short name is not read."""
+    return len(name) > _NAME_MAX // 4 and len(name.encode("utf-8")) > _NAME_MAX
+
+
+def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[str]]:
+    """One pass over an archive that tests each entry and writes the copy that the engines get: (the copy in folder,
+    with the file name of the archive, the raw names of the refused entries). With folder None, the same tests run
+    with no write and no read of an entry that is not a class entry: (None, the refused names).
+
+    The copy has one entry for each name as zipfile writes it (_copy_name), and the last entry of a name decides, as
+    in Java: an earlier entry is not read. The entries keep the order of the first entry of each name. An entry is
+    refused when its raw name, its zipfile name, or its name in the copy does not stay inside, when its zipfile name
+    is the zipfile name of an entry whose names do not stay inside (as safe_extract_zip and _discover_nested skip
+    it), when its name in the copy is too long for zipfile (_NAME_MAX), or when it is a class entry by one of its
+    names and decaf cannot read it or its data fails _safe_class. A folder entry (by one of its names) goes in as a
+    folder, with no data; with a name that is refused, it stays out with no count. Another entry that decaf cannot
+    read stays out with no count, and a large one goes through a part file, so a read error leaves no part of it in
+    the copy. The copy is stored, with no extra field: each of its entries has one name. A nested archive inside the
+    copy goes in as it is, with no test of its entries. This assumes that no engine opens an archive that is inside
+    its input: decaf decompiles a nested archive in its own row, with the same tests (a nested archive beyond
+    --max-depth gets no row).
+    """
+    refused: list[str] = []
+    # an engine reads the suffix, and one engine names its output after the file
+    jar = folder / archive.name if folder is not None else None
+    part = jar.with_name(jar.name + ".part") if jar is not None else None
+    with zipfile.ZipFile(archive) as zf, (
+        zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) if jar is not None else contextlib.nullcontext()
+    ) as out:
+        last: dict[str, zipfile.ZipInfo] = {}
+        infos = zf.infolist()
+        outside = {info.filename for info in infos if not names_stay(info)}
+        for info in infos:
+            last[_copy_name(info)] = info  # a dict keeps the place of the first entry of a name
+        try:
+            for name, info in last.items():
+                raw = info.orig_filename
+                is_folder = _is_folder(info) or name.endswith("/")
+                if info.filename in outside or not stays_inside(name) or _too_long(name):
+                    if not is_folder:  # decaf never makes a file from a folder entry: no count
+                        refused.append(raw)
+                    continue
+                entry = zipfile.ZipInfo(name, info.date_time)
+                entry.external_attr, entry.create_system = info.external_attr, info.create_system
+                if is_folder:  # a folder in the input or in the copy: no data
+                    if out is not None:
+                        _put(out, entry, b"")
+                    continue
+                is_class = _is_class_entry(raw) or _is_class_entry(info.filename) or _is_class_entry(name)
+                if out is None and not is_class:
+                    continue
+                data = _read_entry(zf, info, None if is_class else part)
+                if is_class and not _safe_class(data):
+                    refused.append(raw)
+                elif out is None or data is None:
+                    continue
+                else:
+                    _put(out, entry, data)
+        finally:
+            if part is not None:
+                part.unlink(missing_ok=True)
+    return jar, refused
+
+
+_WARN_NAME_MAX = 200  # characters of the ascii() text of the first refused name in the warning
+
+
+def _note_refused(artifact: Artifact, ctx: Ctx, report: ArtifactReport, names: list[str], unit: str) -> None:
+    """Count the refused items of a row, and print one warning for them."""
+    if not names:
+        return
+    report.refused += len(names)
+    if ctx.on_warn is not None:
+        first = ascii(names[0])
+        first = first if len(first) <= _WARN_NAME_MAX else first[:_WARN_NAME_MAX] + "..."
+        ctx.on_warn(f"{artifact.rel}: decaf does not use {len(names)} of its {unit}, because a name or a class name"
+                    f" can leave the output folder, or decaf cannot read the class name; the first is {first}")
 
 
 def _class_versions(source: Path) -> tuple[dict[str, int], dict[str, str]]:
@@ -1016,9 +1214,10 @@ def _family_classpath(artifact: Artifact, source: Path, ctx: Ctx, roots: list[Pa
             cp += _container_group(artifact.parent, entry[0], ctx)
     else:
         cp += ctx.input_group
+    replaced = artifact.path if not source.is_dir() and source != artifact.path else None  # by the copy of an archive
     out: list[Path] = []
     for p in cp:
-        if p not in out:
+        if p not in out and p != replaced:
             out.append(p)
     return out
 
@@ -1686,16 +1885,21 @@ def _extract_failed_classes(source: Path, missing: set[str], ctx: Ctx) -> Path |
 
     out = _tmp_dir(ctx)
     if source.is_dir():
-        count = 0
         for rel in names:
             if wanted(rel):
                 target = out / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source / rel, target)
-                count += 1
     else:
-        count = safe_extract_zip(source, out, members=[n for n in names if wanted(n)])
-    return out if count else None
+        safe_extract_zip(source, out, members=[n for n in names if wanted(n) and stays_inside(n)])
+    # The file on the disk is the file that the engine gets: of two entries with one name, the last one.
+    for rel in _refused(out):
+        (out / rel).unlink()
+    count = sum(1 for p in out.rglob("*.class") if p.is_file())
+    if not count:
+        _drop(out)
+        return None
+    return out
 
 
 # CFR and Procyon write a class at the path of its name, and JD takes the path below its input as the name (#199,
@@ -1767,7 +1971,7 @@ def _root_jar(archive: Path, prefix: str, jar: Path) -> None:
             if info.is_dir() or not name.endswith(".class") or _container_prefix(name) != prefix:
                 continue
             below = name[len(prefix) :]
-            if not below.startswith("/") and ".." not in below.split("/"):
+            if stays_inside(below):
                 chosen[below] = info
         part = jar.with_name("entry.part")
         with zipfile.ZipFile(jar, "w", zipfile.ZIP_STORED) as out:
@@ -1925,14 +2129,43 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         # The retry tree of a gap class has the family of its outer class by name (#206), so an engine can also
         # write a class that the sources jar wrote. Such a file goes, as a file of a class that an earlier output
         # wrote (#107): only the gap classes and the classes below them by name get engine files.
+        if not engines.PROCESSES.closed:  # after Ctrl-C, no tests: the retries stop at once
+            _, refused = _engine_copy(artifact.path, None)  # the tests of the copy, with no write
+            _note_refused(artifact, ctx, report, refused, "entries")
         stems, claims = _stems_and_claims(artifact.path, read=False)  # the union is the same without the reads
         published = {s for s in stems | claims
                      if s not in gap and not any(s[:i] in gap for i in range(len(s)) if s[i] == "$")}
         _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held(written=published))
         return
-    source = target if target.is_dir() else artifact.path
-    expected = expected_class_stems(source)
+    if target.is_dir():  # the copy of a class folder, from the fetch stage
+        expected = ctx.expected_before_refusal.pop(artifact.rel, None)
+        _decompile_source(artifact, target, expected_class_stems(target) if expected is None else expected, ctx,
+                          report)
+        return
+    if engines.PROCESSES.closed:  # Ctrl-C: no copy, and the row ends as the engine loop ends it
+        report.classes = len(expected_class_stems(target))
+        report.outcome, report.failure = "failed", "interrupted"
+        return
+    # An engine never reads the input archive: it reads a copy that decaf wrote from the entries that it tested.
+    folder = _tmp_dir(ctx)
+    try:
+        copy, refused = _engine_copy(target, folder)
+        _note_refused(artifact, ctx, report, refused, "entries")
+        # with refused entries, the expected classes of the input: a refused class counts as missing
+        _decompile_source(artifact, copy, expected_class_stems(target if refused else copy), ctx, report)
+    finally:
+        _drop(folder)
+
+
+def _decompile_source(artifact: Artifact, source: Path, expected: set[str], ctx: Ctx, report: ArtifactReport) -> None:
+    """The engine chain and the class retries on a source that decaf made: the copy of an archive or of a class
+    folder. The engines, the hold step, and the retries read only this source."""
+    target = source
     report.classes = len(expected)
+    if report.refused and not any(_stems_and_claims(source, read=False)):  # no class entry is left for an engine
+        report.outcome = "failed"
+        report.failure = "no class file is left: decaf refused each one"
+        return
     produced: set[str] = set()
     held = _Held()
     heap = ctx.memory_plan.heap_mb(_decompile_weight(artifact))
@@ -1981,12 +2214,18 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
 
 
 def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
+    """The nested archives of an archive. An entry whose names do not stay inside (names_stay) gives no artifact,
+    and neither does another entry with its zipfile name: the name test comes before each other use, so no path is
+    made from such a name, and the bytes of such an entry never become a row. The row of the archive counts them."""
     try:
         with zipfile.ZipFile(artifact.path) as zf:
             infos = zf.infolist()
     except (zipfile.BadZipFile, OSError):
         return []
-    found = find_nested_archives(i.filename for i in infos)
+    # The work takes the zipfile name, as safe_extract_zip does: the last entry of the name.
+    outside = {info.filename for info in infos if not names_stay(info)}
+    found = [info.filename for info in infos
+             if names_stay(info) and info.filename not in outside and find_nested_archives([info.filename])]
     names = list(dict.fromkeys(found))  # two entries of one name: one row, and the last one wins, as in Java
     if not names:
         return []
@@ -2093,6 +2332,7 @@ def _fetch_stage(
             if groups:
                 if artifact.kind in (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR):
                     nested = _discover_nested(artifact, ctx)  # nested jars get their own check
+                    _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
                 unit = "source files" if artifact.kind is ArtifactKind.SOURCES_JAR else "classes"
                 report.outcome = "failed"
                 report.failure = _case_failure(groups, unit, ctx.case_insensitive)
@@ -2103,6 +2343,7 @@ def _fetch_stage(
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
             state("scanning")
             nested = _discover_nested(artifact, ctx)  # e.g. a war bundling only jars
+            _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
             state("copying resources")
             copied, skipped = ctx.writer.add_resources(
                 artifact.path, artifact.rel, include_sources=True
@@ -2121,6 +2362,7 @@ def _fetch_stage(
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             state("scanning")
             nested = _discover_nested(artifact, ctx)  # e.g. a war with one stray .java and its jars (#110)
+            _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
             state("extracting")
             tmp = _tmp_dir(ctx)
             damaged: list[str] = []
@@ -2143,6 +2385,12 @@ def _fetch_stage(
             state("copying classes")
             tmp = _tmp_dir(ctx)
             copy_class_tree(artifact.path, tmp)
+            refused = _refused(tmp)  # the files of the copy: the bytes that the engines get
+            if refused:
+                ctx.expected_before_refusal[artifact.rel] = expected_class_stems(tmp)  # before the removal
+            for rel in refused:
+                (tmp / rel).unlink()
+            _note_refused(artifact, ctx, report, refused, "class files")
             return report, nested, tmp
         else:  # ARCHIVE
             state("scanning")
@@ -2210,8 +2458,12 @@ def _fetch_stage(
                     if gap:
                         msg += f"; {len(gap)} classes not in the sources jar"
                     ctx.on_stderr(f"maven {artifact.rel}: {msg}")
-            if not hit or gap:
-                return report, nested, artifact.path
+            if hit and not gap:  # no engine runs: only the names count
+                _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
+                return report, nested, None
+            # Stage 2 makes the copy that the engines get and counts the refused entries: the fetch stage does no
+            # more work, because the order in which the archives get ready makes the batches.
+            return report, nested, artifact.path
     except Exception:
         report.outcome = "failed"
         report.failure = traceback.format_exc()[-2000:]
@@ -2302,6 +2554,43 @@ def _watch_batch(
 
 
 def _decompile_batch(
+    members: list[tuple[Artifact, Path, ArtifactReport, set[str], set[str]]], ctx: Ctx
+) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
+    """Stage 2 for a batch on the copies that the engines get (_engine_copy), one for each member.
+
+    A batch takes the expected classes from its targets, so a member whose copy has refused entries goes back for a
+    solo run with its input, which counts and prints them one time, and its copy folder goes at once. With fewer than
+    two members left, each member goes back: no batch has one member. A requeued member gets its input back. The copy
+    folders go when the batch ends, also after an error. After Ctrl-C, no copy is made and each member goes back.
+    """
+    folders: list[Path] = []
+    try:
+        inputs: dict[Path, Path] = {}  # copy -> input
+        kept, requeue = [], []
+        try:
+            for a, t, r, stems, claims in members:
+                if engines.PROCESSES.closed:
+                    return [], [(a, t, r) for a, t, r, _, _ in members]
+                folders.append(_tmp_dir(ctx))
+                copy, refused = _engine_copy(t, folders[-1])
+                if refused:
+                    requeue.append((a, t, r))
+                    _drop(folders.pop())
+                else:
+                    inputs[copy] = t
+                    kept.append((a, copy, r, stems, claims))
+        except Exception:  # e.g. a full disk: each member gets its own try, and its own failure (#112)
+            return [], [(a, t, r) for a, t, r, _, _ in members]
+        if len(kept) < 2:
+            return [], [(a, t, r) for a, t, r, _, _ in members]
+        done, back = _decompile_batch_copies(kept, ctx)
+        return done, [(a, inputs[t], r) for a, t, r in back] + requeue
+    finally:
+        for folder in folders:
+            _drop(folder)
+
+
+def _decompile_batch_copies(
     members: list[tuple[Artifact, Path, ArtifactReport, set[str], set[str]]], ctx: Ctx
 ) -> tuple[list[ArtifactReport], list[tuple[Artifact, Path, ArtifactReport]]]:
     """Stage 2 for a batch: one primary-engine JVM over several small jars.

@@ -1,4 +1,6 @@
 import re
+import sys
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -482,6 +484,132 @@ def test_decompile_batch_splits_and_attributes(make_jar, tmp_path):
     assert (out / "com/a/A.java").is_file() and (out / "com/b/B.java").is_file()
 
 
+def _recording_batch(targets: list[Path]):
+    def _run(spec, jar_path, ts, dest, timeout, java="java", cpu_budget=None, **kw):
+        targets.extend(Path(t) for t in ts)
+        return merged_batch_engine(spec, jar_path, ts, dest, timeout, java=java)
+
+    return _run
+
+
+@pytest.mark.class_names
+def test_a_batch_runs_on_the_copies_and_sends_a_member_with_a_refused_entry_back_for_a_solo_run(make_jar, tmp_path,
+                                                                                               class_file):
+    """The solo run of the member prints the warning and counts refused one time; the batch notes nothing."""
+    from decaf.pipeline import _decompile_batch
+
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": class_file("com/a/A")})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": class_file("com/b/B"), "com/b/C.class": class_file("../C")})
+    m3 = _member(make_jar, "c.jar", {"com/c/D.class": class_file("com/c/D")})
+    copies: list[list[str]] = []
+    batch = _recording_batch(targets)
+
+    def batch_and_copies(spec, jar_path, ts, dest, timeout, **kw):
+        copies.append(sorted(p.name for p in ctx.tmp_root.rglob("*.jar")))
+        return batch(spec, jar_path, ts, dest, timeout, **kw)
+
+    ctx = _batch_ctx(tmp_path, batch_and_copies)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    done, requeue = _decompile_batch([m1, m2, m3], ctx)
+    assert [r.rel for r in done] == ["a.jar", "c.jar"] and all(r.attempts[0].level == "batch" for r in done)
+    assert [(a.rel, t) for a, t, _ in requeue] == [("b.jar", m2[1])]  # the input: its solo run makes its own copy
+    assert (requeue[0][2].attempts, requeue[0][2].refused, warns) == ([], 0, [])
+    assert [t.name for t in targets] == ["a.jar", "c.jar"] and not {m1[1], m3[1]} & set(targets)  # the copies
+    assert copies == [["a.jar", "c.jar"]]  # the copy of b.jar went at once
+    assert list(ctx.tmp_root.iterdir()) == []  # the copy folders went with the batch
+
+
+@pytest.mark.class_names
+def test_a_batch_with_one_member_left_sends_each_member_back(make_jar, tmp_path, class_file):
+    """main never ran a batch of one member: the member that is left goes back for a solo run too."""
+    from decaf.pipeline import _decompile_batch
+
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": class_file("com/a/A")})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": class_file("../B")})
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert (done, [t for _, t, _ in requeue], targets) == ([], [m1[1], m2[1]], [])
+    assert all(r.attempts == [] and r.refused == 0 for _, _, r in requeue)
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+@pytest.mark.class_names
+def test_a_batch_of_members_with_refused_entries_runs_no_engine(make_jar, tmp_path, class_file):
+    from decaf.pipeline import _decompile_batch
+
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": class_file("../A")})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": class_file("../B")})
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    done, requeue = _decompile_batch([m1, m2], ctx)
+    assert (done, [t for _, t, _ in requeue], targets) == ([], [m1[1], m2[1]], [])
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_a_batch_whose_copy_fails_sends_each_member_back_and_drops_its_copy_folders(make_jar, tmp_path,
+                                                                                   monkeypatch):
+    import decaf.pipeline as pipeline
+
+    real = pipeline._engine_copy
+
+    def copy_then_fail(archive, folder):
+        if Path(archive).name == "b.jar":
+            raise OSError(28, "No space left on device")
+        return real(archive, folder)
+
+    monkeypatch.setattr(pipeline, "_engine_copy", copy_then_fail)
+    targets: list[Path] = []
+    m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
+    m2 = _member(make_jar, "b.jar", {"com/b/B.class": b"y"})
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    done, requeue = pipeline._decompile_batch([m1, m2], ctx)
+    assert (done, [t for _, t, _ in requeue], targets) == ([], [m1[1], m2[1]], [])
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_after_ctrl_c_a_batch_makes_no_more_copies_and_sends_each_member_back(make_jar, tmp_path, monkeypatch):
+    import decaf.pipeline as pipeline
+    from decaf.engines import PROCESSES
+
+    real, copied = pipeline._engine_copy, []
+
+    def copy_then_ctrl_c(archive, folder):
+        copied.append(Path(archive).name)
+        PROCESSES.kill_all()  # Ctrl-C lands after the first copy
+        return real(archive, folder)
+
+    monkeypatch.setattr(pipeline, "_engine_copy", copy_then_ctrl_c)
+    targets: list[Path] = []
+    members = [_member(make_jar, f"{n}.jar", {f"com/{n}/A.class": b"x"}) for n in "abc"]
+    ctx = _batch_ctx(tmp_path, _recording_batch(targets))
+    try:
+        done, requeue = pipeline._decompile_batch(members, ctx)
+    finally:
+        PROCESSES.reset()
+    assert (done, [t for _, t, _ in requeue], targets, copied) == ([], [m[1] for m in members], [], ["a.jar"])
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+def test_after_ctrl_c_an_archive_row_makes_no_copy_and_ends_as_interrupted(make_jar, tmp_path, monkeypatch):
+    import decaf.pipeline as pipeline
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import ArtifactReport
+
+    monkeypatch.setattr(pipeline, "_engine_copy", lambda *a: pytest.fail("a copy after Ctrl-C"))
+    jar = make_jar("a.jar", {"com/a/A.class": b"x", "com/a/B.class": b"y"})
+    ctx = make_ctx(tmp_path, writing_runner({}))
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    PROCESSES.kill_all()
+    try:
+        pipeline._decompile(Artifact(jar, "a.jar", ArtifactKind.ARCHIVE), jar, ctx, report)
+    finally:
+        PROCESSES.reset()
+    assert (report.outcome, report.failure, report.classes, report.attempts) == ("failed", "interrupted", 2, [])
+
+
 def test_decompile_batch_failure_requeues_members(make_jar, tmp_path):
     from decaf.engines import EngineResult
     from decaf.pipeline import _decompile_batch
@@ -495,6 +623,7 @@ def test_decompile_batch_failure_requeues_members(make_jar, tmp_path):
     done, requeue = _decompile_batch([m1, m2], ctx)
     assert done == []
     assert [a.rel for a, _, _ in requeue] == ["a.jar", "b.jar"]
+    assert [t for _, t, _ in requeue] == [m1[1], m2[1]]  # the inputs, not the copies of the batch
     for _, _, report in requeue:
         assert report.attempts[0].level == "batch" and report.attempts[0].returncode == 1
 
@@ -515,12 +644,12 @@ def test_decompile_batch_empty_member_requeued(make_jar, tmp_path):
 
 def test_decompile_batch_writes_sources_only(make_jar, tmp_path):
     """Resources come from the fetch stage's add_resources, not from the batch."""
-    from decaf.pipeline import MirrorWriter, _decompile_batch
+    from decaf.pipeline import MirrorWriter, _decompile_batch_copies
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "META-INF/spring.factories": b"cfg"})
     ctx = _batch_ctx(tmp_path, merged_batch_engine)
     ctx.writer = MirrorWriter(tmp_path / "out")
-    done, requeue = _decompile_batch([m1], ctx)
+    done, requeue = _decompile_batch_copies([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
     assert (tmp_path / "out/a.jar/com/a/A.java").is_file()
     assert not (tmp_path / "out/a.jar/META-INF/spring.factories").exists()
@@ -740,7 +869,7 @@ def test_decompile_batch_counts_an_empty_file_as_a_class_that_its_engine_wrote_a
 
 def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
     from decaf.engines import EngineResult
-    from decaf.pipeline import _decompile_batch
+    from decaf.pipeline import _decompile_batch_copies
 
     def inner_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
         dest = Path(dest)
@@ -753,7 +882,7 @@ def test_decompile_batch_inner_class_rides_with_outer(make_jar, tmp_path):
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x", "com/a/A$1.class": b"y"})
     ctx = _batch_ctx(tmp_path, inner_emitting_batch)
-    done, requeue = _decompile_batch([m1], ctx)
+    done, requeue = _decompile_batch_copies([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
     out = tmp_path / "out" / "src"
     assert (out / "com/a/A.java").is_file()
@@ -766,7 +895,7 @@ def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
     no-owner-stem case: a stray file with no matching member must never land
     in any output tree, even when it's the only extra file the engine wrote."""
     from decaf.engines import EngineResult
-    from decaf.pipeline import _decompile_batch
+    from decaf.pipeline import _decompile_batch_copies
 
     def stray_emitting_batch(spec, jar_path, targets, dest, timeout, java="java", cpu_budget=None):
         dest = Path(dest)
@@ -778,7 +907,7 @@ def test_decompile_batch_drops_unmatched_split_output(make_jar, tmp_path):
 
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
     ctx = _batch_ctx(tmp_path, stray_emitting_batch)
-    done, requeue = _decompile_batch([m1], ctx)
+    done, requeue = _decompile_batch_copies([m1], ctx)
     assert requeue == [] and done[0].outcome == "ok"
     out = tmp_path / "out" / "src"
     assert (out / "com/a/A.java").is_file()
@@ -2323,7 +2452,7 @@ def test_batch_watcher_not_started_without_on_event(make_jar, tmp_path, monkeypa
     monkeypatch.setattr(pipeline, "_watch_batch", lambda *a, **k: calls.append(1))
     m1 = _member(make_jar, "a.jar", {"com/a/A.class": b"x"})
     ctx = _batch_ctx(tmp_path, merged_batch_engine)  # on_event defaults to None
-    done, requeue = pipeline._decompile_batch([m1], ctx)
+    done, requeue = pipeline._decompile_batch_copies([m1], ctx)
     assert [r.outcome for r in done] == ["ok"] and requeue == []
     assert calls == []
 
@@ -2353,7 +2482,7 @@ def test_batch_watcher_exception_never_taints_outcome(make_jar, tmp_path, monkey
         return res
 
     ctx = _batch_ctx(tmp_path, slow_batch, on_event=lambda k, s, d: events.append((k, s, d)))
-    done, requeue = pipeline._decompile_batch([m1], ctx)
+    done, requeue = pipeline._decompile_batch_copies([m1], ctx)
     assert [r.outcome for r in done] == ["ok"] and requeue == []  # split ran on this thread, unpoisoned
     assert not [e for e in events if e[0] == "progress"]
 
@@ -2603,6 +2732,10 @@ def test_family_classpath_input_group_and_class_tree(make_jar, tmp_path: Path):
     ctx.input_group = [a_jar, b_jar, tmp_path / "in"]
     assert _family_classpath(Artifact(a_jar, "a.jar", ArtifactKind.ARCHIVE), a_jar, ctx) == [
         a_jar, b_jar, tmp_path / "in",
+    ]
+    copy = make_jar("engines/a.jar", {"com/a/A.class": b"a"})  # the copy of the engines replaces its archive
+    assert _family_classpath(Artifact(a_jar, "a.jar", ArtifactKind.ARCHIVE), copy, ctx) == [
+        copy, b_jar, tmp_path / "in",
     ]
     tree = tmp_path / "copy"
     tree.mkdir()
@@ -4409,7 +4542,7 @@ def test_vineflower_and_fernflower_get_the_target_unchanged(make_jar, tmp_path: 
     process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
     process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
     assert runner.sent[0] == ["target/classes/p/A.class", "target/classes/q/B$Nested.class", "target/classes/q/B.class"]
-    assert runner.calls[1] == (engine, war)
+    assert [(n, t.name, t == war) for n, t in runner.calls[1:]] == [(engine, "app.war", False)]  # the copy, as it is
 
 
 @pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
@@ -4418,7 +4551,7 @@ def test_a_rooted_engine_gets_an_archive_without_a_container_entry_unchanged(mak
     runner = writing_runner({engine: {"com/x/A.java": "class A {}"}})
     ctx = make_ctx(tmp_path, runner, engine=engine, fallback=False)
     process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
-    assert runner.calls == [(engine, jar)]
+    assert [(n, t.name, t == jar) for n, t in runner.calls] == [(engine, "app.jar", False)]  # the copy, as it is
 
 
 @pytest.mark.parametrize("engine", ["cfr", "procyon", "jd"])
@@ -4758,7 +4891,7 @@ def test_the_row_counts_a_class_whose_entry_name_leaves_the_output_folder_as_mis
     report, _ = process_artifact(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
     assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 2, 1, 1)
     assert _sources(tmp_path / "out") == ["app.war/WEB-INF/classes/q/B.java"]
-    assert _files_outside(tmp_path, tmp_path / "out", {war}) == []
+    assert _files_outside(tmp_path, tmp_path / "out", {war, *ctx.tmp_root.rglob("*")}) == []  # the copy is a temp file
 
 
 def test_the_temp_jar_goes_when_the_engine_raises(tmp_path: Path, class_file):
@@ -4808,3 +4941,1019 @@ def test_the_temp_jar_leaves_out_an_entry_that_cannot_be_read(make_damaged_jar, 
     ctx = make_ctx(tmp_path, runner, engine="cfr")
     _run_engine(ctx, ENGINES["cfr"], Path("/fake/cfr.jar"), war, tmp_path / "dest", 100, java="java")
     assert [sorted(c["data"]) for c in runner.calls] == [["com/x/A.class"]]
+
+
+# --- no engine gets an entry name or a class name that leaves its folder ---
+
+
+def _engine_copy(jar: Path, tmp_path: Path) -> tuple[Path, list[str]]:
+    """The copy of the engines and its refused raw names; the same test without a write gives the same names."""
+    from decaf.pipeline import _engine_copy
+
+    folder = tmp_path / f"copy-{len(list(tmp_path.glob('copy-*')))}"
+    folder.mkdir()
+    copy, refused = _engine_copy(jar, folder)
+    assert _engine_copy(jar, None) == (None, refused)
+    assert list(folder.iterdir()) == [copy]  # no part file stays
+    return copy, refused
+
+
+def _entries(path: Path) -> list[tuple[str, bytes]]:
+    with zipfile.ZipFile(path) as zf:
+        return [(i.filename, zf.read(i)) for i in zf.infolist()]
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_refuses_the_entries_whose_name_leaves_the_archive(tmp_path: Path, class_file):
+    jar = _raw_zip(tmp_path / "a.jar", [  # raw names: zipfile writes a backslash as / on Windows
+        (b"p/A.class", class_file("p/A")),
+        (b"../up.txt", b"x"),
+        (b"C:/dir/", b""),
+        (b"p\\..\\..\\B.class", class_file("B")),
+    ])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["../up.txt", "p\\..\\..\\B.class"]  # a folder entry has no count
+    assert _entries(copy) == [("p/A.class", class_file("p/A"))]
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("name", [b"../p/A", b"p/\xc0\xae\xc0\xae/A", b"/p/A"])
+def test_the_engine_copy_refuses_a_class_entry_whose_class_name_leaves_the_folder(tmp_path: Path, class_file, name):
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file(name)), ("p/B.class", class_file("p/B"))])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class"] and _entries(copy) == [("p/B.class", class_file("p/B"))]
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_refuses_a_class_entry_that_does_not_parse_or_cannot_be_read(make_damaged_jar, tmp_path: Path,
+                                                                                       class_file):
+    """Another entry that decaf cannot read stays out with no count."""
+    jar = make_damaged_jar("a.jar", {
+        "p/A.class": b"no class", "p/B.class": class_file("p/B"), "p/C.class": class_file("p/C"), "p/r.txt": b"no class",
+        "p/s.txt": b"s" * 100,
+    }, damaged=("p/C.class", "p/s.txt"))
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class", "p/C.class"]
+    assert _entries(copy) == [("p/B.class", class_file("p/B")), ("p/r.txt", b"no class")]
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_refuses_a_class_entry_above_the_size_limit_and_streams_another_entry(
+        make_damaged_jar, tmp_path: Path, class_file, monkeypatch):
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 64)
+    big = bytes(range(256)) * 2
+    jar = make_damaged_jar("a.jar", {"p/A.class": class_file("p/A") + bytes(64), "p/B.class": class_file("p/B"),
+                                     "p/big.txt": big, "p/bad.txt": big}, damaged=("p/bad.txt",))
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class"]
+    assert _entries(copy) == [("p/B.class", class_file("p/B")), ("p/big.txt", big)]
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("first_bad", [True, False])
+def test_the_last_entry_of_a_raw_name_decides_and_an_earlier_one_is_not_read(tmp_path: Path, class_file, first_bad,
+                                                                             monkeypatch):
+    bad, good = class_file("../A"), class_file("p/A")
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", bad if first_bad else good), ("p/B.class", class_file("p/B")),
+                                    ("p/A.class", good if first_bad else bad)])
+    with zipfile.ZipFile(jar) as zf:
+        first = zf.infolist()[0].header_offset
+    real_open = zipfile.ZipFile.open
+    read: list[int] = []
+
+    def recording_open(self, name, *a, **k):
+        read.append(getattr(name, "header_offset", -1))  # a ZipInfo to write has no offset yet
+        return real_open(self, name, *a, **k)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", recording_open)
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert first not in read
+    if first_bad:
+        assert refused == [] and _entries(copy) == [("p/A.class", good), ("p/B.class", class_file("p/B"))]
+    else:
+        assert refused == ["p/A.class"] and _entries(copy) == [("p/B.class", class_file("p/B"))]
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_of_a_normal_archive_has_each_entry_stored_with_its_attributes(tmp_path: Path, class_file):
+    entries = [
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"), ("p/", b""), ("p/A.class", class_file("p/A")),
+        ("p/A$1.class", class_file("p/A$1")), ("WEB-INF/classes/q/B.class", class_file("q/B")),
+        ("META-INF/versions/9/p/A.class", class_file("p/A")), ("p/r.txt", b"x" * 1000), ("p/s.sh", b"#!/bin/sh\n"),
+    ]
+    jar = tmp_path / "a.jar"
+    with zipfile.ZipFile(jar, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n, (name, data) in enumerate(entries):
+            info = zipfile.ZipInfo(name, (2001, 2, 3, 4, 5, 6 + 2 * n))
+            info.external_attr = (0o40755 if name.endswith("/") else 0o100750 + n) << 16
+            info.create_system = n % 2 * 3
+            zf.writestr(info, data)
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [] and copy.name == "a.jar" and _entries(copy) == entries
+    with zipfile.ZipFile(jar) as a, zipfile.ZipFile(copy) as b:
+        for x, y in zip(a.infolist(), b.infolist(), strict=True):
+            assert y.compress_type == zipfile.ZIP_STORED and y.extra == b""
+            assert (y.date_time, y.external_attr, y.create_system) == (x.date_time, x.external_attr, x.create_system)
+        assert b.getinfo("p/").is_dir()
+
+
+def _unicode_path(raw: str, name: str) -> bytes:
+    """An Info-ZIP Unicode Path extra field: zipfile takes info.filename from it, info.orig_filename stays raw."""
+    import struct
+    import zlib
+
+    text = name.encode()
+    return struct.pack("<HHBL", 0x7075, 5 + len(text), 1, zlib.crc32(raw.encode())) + text
+
+
+@pytest.mark.class_names
+def test_each_name_of_an_entry_with_two_names_gets_the_tests_and_the_copy_has_the_raw_name(tmp_path: Path,
+                                                                                            class_file):
+    jar = tmp_path / "a.jar"
+    with zipfile.ZipFile(jar, "w") as zf:
+        for raw, name, data in [
+            ("p/A.class", "../A.class", class_file("p/A")),  # the zipfile name leaves the folder
+            ("../B.class", "p/B.class", class_file("p/B")),  # the raw name leaves the folder
+            ("p/C.txt", "p/C.class", b"no class"),  # a class entry by its zipfile name
+            ("p/D.class", "q/D.class", class_file("p/D")),  # both names stay inside
+        ]:
+            info = zipfile.ZipInfo(raw)
+            info.extra = _unicode_path(raw, name)
+            zf.writestr(info, data)
+    with zipfile.ZipFile(jar) as zf:
+        assert [(i.orig_filename, i.filename) for i in zf.infolist()][0] == ("p/A.class", "../A.class")
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class", "../B.class", "p/C.txt"]
+    assert _entries(copy) == [("p/D.class", class_file("p/D"))]
+
+
+@pytest.mark.class_names
+def test_a_folder_entry_is_a_folder_by_its_raw_name(tmp_path: Path, class_file):
+    jar = _raw_zip(tmp_path / "a.jar", [(b"d/", b"x"), (b"p/A.class", class_file("p/A"))])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [] and _entries(copy) == [("d/", b""), ("p/A.class", class_file("p/A"))]
+    with zipfile.ZipFile(copy) as zf:
+        assert [i.external_attr for i in zf.infolist()] == [0, 0]  # as in the input: zipfile writes 0o600 for a 0
+
+
+@pytest.mark.class_names
+def test_two_raw_names_with_the_same_bytes_give_the_copy_one_entry(tmp_path: Path):
+    """With no UTF-8 flag, zipfile reads the bytes as cp437; with the flag, as UTF-8: the copy writes both as one
+    name, and the last entry decides."""
+    jar = _raw_zip(tmp_path / "a.jar", [(b"p/\xc3\xa9.txt", b"1"), (b"p/\xc3\xa9.txt", b"2")], flags={1: 0x800})
+    with zipfile.ZipFile(jar) as zf:
+        assert len({i.orig_filename for i in zf.infolist()}) == 2
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "Duplicate name" warning of zipfile
+        copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [] and _entries(copy) == [("p/\xe9.txt", b"2")]
+
+
+@pytest.mark.class_names
+def test_the_copy_tests_the_name_that_zipfile_writes_with_the_separator_of_windows(tmp_path: Path, class_file,
+                                                                                   monkeypatch):
+    """zipfile changes each os.sep of a name to /: on Windows, two raw names give one name in the copy, and a raw
+    name that ends with a backslash gives a folder name. The patch of os.sep covers only the copy."""
+    import os
+
+    from decaf.pipeline import _engine_copy
+
+    second = class_file("p/A") + b"2"
+    jar = _raw_zip(tmp_path / "a.jar", [
+        (b"p/A.class", class_file("p/A")),
+        (b"p\\A.class", second),  # the same name in the copy on Windows: the last entry decides
+        (b"p/F.class\\", class_file("../F")),  # a folder name in the copy on Windows: no data
+        (b"p/G.class/", class_file("../G")),  # a folder by its raw name
+    ])
+    folder = tmp_path / "copy"
+    folder.mkdir()
+    with monkeypatch.context() as m, warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "Duplicate name" warning of zipfile
+        m.setattr(os, "sep", "\\")
+        copy, refused = _engine_copy(jar, folder)
+        tested = _engine_copy(jar, None)
+    assert refused == [] and tested == (None, [])
+    assert _entries(copy) == [("p/A.class", second), ("p/F.class/", b""), ("p/G.class/", b"")]
+
+
+@pytest.mark.class_names
+def test_refused_lists_the_class_files_of_a_folder_that_fail(tmp_path: Path, class_file, monkeypatch):
+    import decaf.pipeline as pipeline
+
+    folder = tmp_path / "classes"
+    for rel, data in {"p/A.class": class_file("p/A"), "p/B.class": class_file("../B"), "p/C.class": b"no class",
+                      "p/D.class": class_file("p/D"), "p/r.txt": b"x",
+                      "p/x.class/E.class": class_file("p/E")}.items():  # a folder named x.class is no file
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_bytes(data)
+    real_open = open
+
+    def failing_open(path, *a, **k):
+        if str(path).endswith("D.class"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", failing_open)
+    assert pipeline._refused(folder) == ["p/B.class", "p/C.class", "p/D.class"]
+
+
+def _names_runner():
+    """Fake engine: records the target and its entry names (data: the bytes of each name; heads: the first bytes of
+    the file), and writes one file for each top-level class entry. The copy of the engines goes after the row, so the
+    call reads it."""
+    calls: list[tuple[Path, list[str]]] = []
+    data: list[dict[str, bytes]] = []
+    heads: list[bytes] = []
+
+    def _run(spec, jar_path, target, dest, timeout, **kw):
+        heads.append(Path(target).read_bytes()[:4])
+        with zipfile.ZipFile(target) as zf:
+            names = zf.namelist()
+            data.append({n: zf.read(n) for n in names})
+        calls.append((Path(target), names))
+        n = 0
+        for name in dict.fromkeys(names):
+            if name.endswith(".class") and "$" not in name.rsplit("/", 1)[-1]:
+                out = Path(dest) / (name[: -len(".class")] + ".java")
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text("class X {}\n")
+                n += 1
+        return EngineResult(spec.name, 0, False, n, "")
+
+    _run.calls = calls
+    _run.data = data
+    _run.heads = heads
+    return _run
+
+
+@pytest.mark.class_names
+def test_an_engine_gets_the_archive_without_its_refused_entries(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"),
+        ("p/", b""),
+        ("p/D.class", class_file("p/\0D")),  # an earlier entry of a name is not read
+        ("p/A.class", class_file("p/A")),
+        ("p/B.class", class_file("../B")),  # its class name leaves the folder
+        ("../x/C.class", class_file("x/C")),  # its entry name leaves the folder
+        ("p/D.class", class_file("p/D")),  # the last entry decides, at the place of the first entry
+        ("p/E.class", class_file("p/E") + b"1"),
+        ("p/F.class", class_file("p/F")),
+        ("p/E.class", class_file("p/E") + b"2"),  # of two good entries, the last one goes in
+        ("p/r.txt", b"r"),
+        ("p/F.class", class_file("../F")),  # a refused last entry: no entry of the name goes in
+    ])
+    before = jar.read_bytes()
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no "Duplicate name" warning of zipfile
+        report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    ((target, names),) = runner.calls
+    assert names == ["META-INF/MANIFEST.MF", "p/", "p/D.class", "p/A.class", "p/E.class", "p/r.txt"]
+    ((data),) = runner.data
+    assert data["p/D.class"] == class_file("p/D") and data["p/E.class"] == class_file("p/E") + b"2"
+    assert target.name == "app.jar" and target != jar and not target.parent.exists()  # the copy went with the row
+    # the same counts as with the copy of the fetch stage: the expected classes come from the input
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files, report.refused) == (
+        "ok", 6, 3, 3, 3)
+    assert warns == ["app.jar: decaf does not use 3 of its entries, because a name or a class name can leave the output"
+                     " folder, or decaf cannot read the class name; the first is 'p/B.class'"]
+    assert jar.read_bytes() == before
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("first_bad", [True, False])
+def test_the_last_entry_of_a_name_decides_what_the_copy_gets(tmp_path: Path, class_file, first_bad):
+    """As in Java: a refused first entry still gives the copy the last one; a refused last entry gives the copy no
+    entry of the name, and the class is missing."""
+    bad, good = class_file("../A"), class_file("p/A")
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", bad if first_bad else good), ("p/B.class", class_file("p/B")),
+                                      ("p/A.class", good if first_bad else bad)])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    ((target, names),) = runner.calls
+    assert names == (["p/A.class", "p/B.class"] if first_bad else ["p/B.class"])
+    if first_bad:
+        assert runner.data[0]["p/A.class"] == good
+    assert (report.classes, report.missing_classes) == (2, 0 if first_bad else 1)
+
+
+@pytest.mark.class_names
+def test_an_engine_gets_a_copy_of_a_normal_archive(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("p/r.txt", b"r")])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    ((target, names),) = runner.calls
+    assert target != jar and target.name == "app.jar" and names == ["p/A.class", "p/r.txt"] and warns == []
+    assert (report.classes, report.missing_classes, report.refused) == (1, 0, 0)
+    assert not target.parent.exists() and list(ctx.tmp_root.iterdir()) == []  # the copy went with the row
+
+
+@pytest.mark.class_names
+def test_the_warning_shows_a_control_character_of_the_first_name_as_an_escape(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("\x1b[2J/../B.class", class_file("B"))])
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert warns == ["app.jar: decaf does not use 1 of its entries, because a name or a class name can leave the output"
+                     " folder, or decaf cannot read the class name; the first is '\\x1b[2J/../B.class'"]
+
+
+
+def _folder_runner():
+    """Fake engine: records the class files of the folder that it gets, and writes one file for each of them (a
+    class file of the tests lists no inner class, so each class is top-level for the JVM)."""
+    sent: list[list[str]] = []
+
+    def _run(spec, jar_path, target, dest, timeout, **kw):
+        rels = sorted(p.relative_to(target).as_posix() for p in Path(target).rglob("*.class"))
+        sent.append(rels)
+        for rel in rels:
+            out = Path(dest) / (rel[: -len(".class")] + ".java")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("class X {}\n")
+        return EngineResult(spec.name, 0, False, len(rels), "")
+
+    _run.sent = sent
+    return _run
+
+
+def _snapshot(folder: Path) -> dict[str, bytes]:
+    return {p.relative_to(folder).as_posix(): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
+
+
+@pytest.mark.class_names
+def test_an_engine_gets_the_class_folder_without_its_refused_class_files(tmp_path: Path, class_file):
+    folder = _tree(tmp_path / "classes", {
+        "p/A.class": class_file("p/A"), "p/A$1.class": class_file("p/A$1"), "p/B.class": class_file("p/../../B"),
+        "p/r.txt": b"r",
+    })
+    before = _snapshot(folder)
+    runner = _folder_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(folder, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert runner.sent == [["p/A$1.class", "p/A.class"]]
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 3, 1, 2)
+    assert warns == ["_classes: decaf does not use 1 of its class files, because a name or a class name can leave the"
+                     " output folder, or decaf cannot read the class name; the first is 'p/B.class'"]
+    assert _snapshot(folder) == before
+
+
+@pytest.mark.class_names
+def test_a_normal_class_folder_gives_the_engine_each_class_file(tmp_path: Path, class_file):
+    """copy_class_tree copies each class file: the expected classes of the folder and of its copy are the same."""
+    folder = _tree(tmp_path / "classes", {
+        "p/A.class": class_file("p/A"), "p/A$1.class": class_file("p/A$1"), "q/r/B.class": class_file("q/r/B"),
+        "build/C.class": class_file("C"), "p/r.txt": b"r",
+    })
+    runner = _folder_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(folder, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert runner.sent == [["build/C.class", "p/A$1.class", "p/A.class", "q/r/B.class"]] and warns == []
+    assert (report.classes, report.missing_classes, report.java_files) == (4, 0, 4)
+
+
+@pytest.mark.class_names
+def test_a_retry_tree_lacks_the_refused_class_files_of_a_family(tmp_path: Path, class_file):
+    """The first engine writes no file for p/A. The retry tree of its family lacks p/A$1.class, whose class name
+    leaves the folder, and an entry whose name leaves the folder with a backslash."""
+    jar = _zip(tmp_path / "app.jar", [
+        ("p/A.class", class_file("p/A")), ("p/A$1.class", class_file("../A$1")), ("p/B.class", class_file("p/B")),
+        ("q\\..\\..\\Z.class", class_file("Z")),
+    ])
+    runner = writing_runner({"vineflower": {"p/B.java": "class B {}"}})
+    ctx = make_ctx(tmp_path, runner)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [name for name, _ in runner.calls][:2] == ["vineflower", "cfr"]
+    assert runner.sent[1] == ["p/A.class"]
+
+
+@pytest.mark.class_names
+def test_the_root_jar_leaves_out_a_path_with_a_drive_or_a_backslash_parent(tmp_path: Path, class_file):
+    from decaf.pipeline import _root_jar
+
+    war = _zip(tmp_path / "app.war", [
+        ("WEB-INF/classes/com/x/A.class", class_file("com/x/A")),
+        ("WEB-INF/classes/C:/x/D.class", class_file("x/D")),
+        ("WEB-INF/classes/q\\..\\..\\B.class", class_file("B")),
+        ("WEB-INF/classes/q/.../E.class", class_file("q/E")),
+    ])
+    jar = tmp_path / "root/classes.jar"
+    jar.parent.mkdir()
+    _root_jar(war, "WEB-INF/classes/", jar)
+    with zipfile.ZipFile(jar) as zf:
+        assert zf.namelist() == ["com/x/A.class"]
+
+
+@pytest.mark.class_names
+def test_an_archive_with_only_refused_entries_starts_no_engine(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("../A")), ("../r.txt", b"r")])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert runner.calls == []
+    assert (report.outcome, report.failure, report.classes, report.refused) == (
+        "failed", "no class file is left: decaf refused each one", 1, 2)
+
+
+@pytest.mark.class_names
+def test_a_class_folder_that_holds_the_temp_root_counts_only_its_own_classes(tmp_path: Path, class_file):
+    """The input folder can hold the temp folder of the run: the expected classes come from the copy, also with a
+    refused class file, as on main."""
+    _tree(tmp_path / "loose", {"p/A.class": class_file("p/A"), "p/B.class": class_file("../B")})
+    runner = _folder_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)  # ctx.tmp_root is tmp_path / "work"
+    report, _ = process_artifact(Artifact(tmp_path, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert runner.sent == [["loose/p/A.class"]]
+    assert (report.classes, report.missing_classes, report.java_files) == (2, 1, 1)
+    assert ctx.expected_before_refusal == {}  # the row took its set
+
+
+@pytest.mark.class_names
+def test_the_hold_step_and_the_class_retries_read_only_the_copy(tmp_path: Path, class_file):
+    """The input archive goes after the first engine call: the retry of p/A reads the copy."""
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")), ("p/B.class", class_file("p/B"))])
+    inner = writing_runner({"vineflower": {"p/B.java": "class B {}"}, "cfr": {"p/A.java": "class A {}"}})
+
+    def runner(spec, jar_path, target, dest, timeout, **kw):
+        jar.unlink(missing_ok=True)
+        return inner(spec, jar_path, target, dest, timeout)
+
+    ctx = make_ctx(tmp_path, runner)
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [name for name, _ in inner.calls] == ["vineflower", "cfr"] and inner.sent[1] == ["p/A.class"]
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 2, 0, 2)
+
+
+@pytest.mark.class_names
+def test_the_readers_of_a_target_see_the_same_in_the_copy_of_a_normal_archive(tmp_path: Path, class_file):
+    import decaf.pipeline as pipeline
+
+    war = _zip(tmp_path / "app.war", [
+        ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\n\r\n"), ("WEB-INF/web.xml", b"<web-app/>"),
+        ("WEB-INF/classes/com/x/A.class", class_file("com/x/A")),
+        ("WEB-INF/classes/com/x/A$1.class", class_file("com/x/A$1")),
+        ("WEB-INF/lib/dep.jar", _zip(tmp_path / "dep.jar", [("q/B.class", class_file("q/B"))]).read_bytes()),
+        ("module-info.class", class_file("module-info")), ("p/C.class", class_file("p/C")),
+    ])
+    copy, _ = _engine_copy(war, tmp_path)
+    for read in (pipeline._class_bytes, pipeline._container_classes, pipeline._stems_and_claims,
+                 lambda p: pipeline._stems_and_claims(p, read=False), pipeline.expected_class_stems,
+                 pipeline._class_versions):
+        assert read(copy) == read(war)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    pipeline._root_jar(war, "WEB-INF/classes/", tmp_path / "a/x.jar")
+    pipeline._root_jar(copy, "WEB-INF/classes/", tmp_path / "b/x.jar")
+    assert _entries(tmp_path / "a/x.jar") == _entries(tmp_path / "b/x.jar") != []
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("refused", [False, True])
+def test_the_fetch_stage_gives_stage_2_the_input_archive_with_no_test(tmp_path: Path, class_file, refused,
+                                                                      monkeypatch):
+    """The fetch stage does the same work as before the fix: the order in which the jars get ready makes the batches.
+    Stage 2 makes the copy and counts the refused entries."""
+    import decaf.pipeline as pipeline
+
+    jar = _zip(tmp_path / "app.jar", [("p/A.class", class_file("p/A")),
+                                      ("p/B.class", class_file("../B" if refused else "p/B"))])
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    monkeypatch.setattr(pipeline, "_engine_copy", lambda *a: pytest.fail("a copy in the fetch stage"))
+    report, _, target = pipeline._fetch_stage(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (target, report.refused, warns, ctx.expected_before_refusal) == (jar, 0, [], {})
+    assert "app.jar" not in ctx.family_dirs and list(ctx.tmp_root.iterdir()) == []
+
+
+# --- decaf's own use of a nested archive name ---
+
+
+def _drive(ctx, jar: Path) -> list:
+    """process_artifact on an input and its nested archives, as the scheduler does (nest before a write)."""
+    rows = []
+    todo = [Artifact(jar, jar.name, ArtifactKind.ARCHIVE)]
+    while todo:
+        a = todo.pop()
+        report, nested = process_artifact(a, ctx)
+        rows.append(report)
+        for n in nested:
+            ctx.writer.nest(n.rel, a.rel)
+            todo.append(n)
+    return rows
+
+
+def _outside(tmp_path: Path, known: set[Path]) -> list[Path]:
+    keep = [(tmp_path / "out").resolve(), (tmp_path / "work").resolve()]
+    return [p for p in tmp_path.rglob("*")
+            if p.is_file() and not any(p.resolve().is_relative_to(k) for k in keep) and p not in known]
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("mirror", [True, False])
+@pytest.mark.parametrize("at_limit", [False, True])
+def test_a_nested_archive_name_that_leaves_its_folder_gives_no_row(tmp_path: Path, class_file, mirror, at_limit):
+    """Below the depth limit, the name points at an archive outside the extraction folder that is no part of the
+    input. At the depth limit, the row of the name would copy the entry (mirror mode)."""
+    known: set[Path] = set()
+    if at_limit:
+        (tmp_path / "build").mkdir()
+        inner = _zip(tmp_path / "build/inner.jar", [("q/B.class", class_file("q/B")),
+                                                    ("../../../../landing/blob.jar", b"blob")])
+        jar = _zip(tmp_path / "outer.jar", [("p/A.class", class_file("p/A")), ("lib/inner.jar", inner.read_bytes())])
+        parent, bad = "outer.jar!/lib/inner.jar", "../../../../landing/blob.jar"
+        known.add(inner)
+    else:
+        (tmp_path / "elsewhere").mkdir()
+        local = _zip(tmp_path / "elsewhere/local.jar", [("s/Secret.class", class_file("s/Secret"))])
+        jar = _zip(tmp_path / "outer.jar", [("p/A.class", class_file("p/A")), ("../../elsewhere/local.jar", b"x")])
+        parent, bad = "outer.jar", "../../elsewhere/local.jar"
+        known.add(local)
+    known.add(jar)
+    runner = _names_runner()
+    writer = MirrorWriter(tmp_path / "out") if mirror else MergeWriter(tmp_path / "out/src")
+    ctx = make_ctx(tmp_path, runner, fallback=False, writer=writer)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    rows = {r.rel: r for r in _drive(ctx, jar)}
+    assert sorted(rows) == sorted(["outer.jar", "outer.jar!/lib/inner.jar"] if at_limit else ["outer.jar"])
+    assert all(t.name in ("outer.jar", "inner.jar") for t, _ in runner.calls)  # no engine call for the name
+    assert rows[parent].refused == 1
+    assert [w for w in warns if bad in w or ascii(bad) in w] == warns and len(warns) == 1
+    assert warns[0].startswith(parent + ": ")
+    assert _outside(tmp_path, known) == []
+
+
+@pytest.mark.class_names
+def test_the_mirror_writer_refuses_a_folder_that_is_not_below_its_root(tmp_path: Path, make_jar):
+    """Defense in depth: a rel whose folder leaves the output folder raises, also in add_resources and add_blob."""
+    from decaf.pipeline import OutsideOutput
+
+    writer = MirrorWriter(tmp_path / "out")
+    writer.nest("a.jar!/../../x.jar", "a.jar")
+    jar = make_jar("x.jar", {"r.txt": b"r"})
+    with pytest.raises(OutsideOutput):
+        writer.dest_for("a.jar!/../../x.jar")
+    with pytest.raises(OutsideOutput):
+        writer.add_resources(jar, "a.jar!/../../x.jar")
+    with pytest.raises(OutsideOutput):
+        writer.add_blob(jar, "r.txt", "a.jar!/../../x.jar")
+    assert writer.dest_for("a.jar") == tmp_path / "out/a.jar"
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == [jar]
+
+
+@pytest.mark.class_names
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlink needs extra rights on Windows")
+def test_the_mirror_writer_writes_through_a_linked_subfolder_of_the_output_folder(tmp_path: Path):
+    """The test is of the folder text, as on main a linked subfolder gets its files."""
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out/lib").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    tree = _tree(tmp_path / "tree", {"p/A.java": b"class A {}"})
+    writer = MirrorWriter(tmp_path / "out")
+    assert writer.dest_for("lib/a.jar") == tmp_path / "out/lib/a.jar"
+    assert writer.add_tree(tree, "lib/a.jar")[0] == 1
+    assert (tmp_path / "elsewhere/a.jar/p/A.java").read_text() == "class A {}"
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("rel", ["a.jar!/../../x.jar", "../x.jar", "a/../../x.jar", "/abs/x.jar"])
+def test_the_mirror_writer_refuses_a_folder_text_with_a_parent_part_or_a_root(tmp_path: Path, rel):
+    from decaf.pipeline import OutsideOutput
+
+    with pytest.raises(OutsideOutput):
+        MirrorWriter(tmp_path / "out").dest_for(rel)
+
+
+# --- an archive built by hand ---
+
+
+def _raw_zip(path: Path, entries: list[tuple[bytes, bytes]], *, prefix: bytes = b"",
+             flags: dict[int, int] | None = None, extras: dict[int, bytes] | None = None) -> Path:
+    """A stored zip, built by hand: prefix goes before the first entry, flags gives an entry its flag bits, and extras
+    its extra field."""
+    import struct
+    import zlib
+
+    body, central = bytearray(prefix), bytearray()
+    starts = []
+    for i, (name, data) in enumerate(entries):
+        starts.append(len(body))
+        flag, extra = (flags or {}).get(i, 0), (extras or {}).get(i, b"")
+        crc = zlib.crc32(data)
+        body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, flag, 0, 0, 0, crc, len(data), len(data), len(name),
+                            len(extra))
+        body += name + extra + data
+    cd_start = len(body)
+    for i, (name, data) in enumerate(entries):
+        flag, extra = (flags or {}).get(i, 0), (extras or {}).get(i, b"")
+        central += struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flag, 0, 0, 0, zlib.crc32(data), len(data),
+                               len(data), len(name), len(extra), 0, 0, 0, 0, starts[i]) + name + extra
+    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(central), cd_start, 0)
+    path.write_bytes(bytes(body + central + eocd))
+    return path
+
+
+@pytest.mark.class_names
+def test_a_name_with_a_nul_is_refused_by_its_name_before_the_cut(tmp_path: Path, class_file):
+    jar = _raw_zip(tmp_path / "a.jar", [(b"p/A.class\0x", class_file("p/A")), (b"p/B.class", class_file("p/B"))])
+    with zipfile.ZipFile(jar) as zf:
+        assert zf.namelist()[0] == "p/A.class"  # zipfile cuts the name at the NUL
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class\0x"] and _entries(copy) == [("p/B.class", class_file("p/B"))]
+
+
+@pytest.mark.class_names
+def test_an_archive_with_bytes_before_its_first_entry_goes_to_the_engines_as_a_copy_without_them(tmp_path: Path,
+                                                                                                  class_file):
+    jar = _raw_zip(tmp_path / "app.jar", [(b"p/A.class", class_file("p/A"))], prefix=b"#!/bin/sh\n")
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    ((target, names),) = runner.calls
+    assert target != jar and target.name == "app.jar" and names == ["p/A.class"]
+    assert runner.heads == [b"PK\x03\x04"]
+    assert (warns, report.refused, report.classes, report.missing_classes) == ([], 0, 1, 0)
+
+
+# --- a refused item leaves a trace in the row ---
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("as_folder", [False, True])
+def test_a_refused_inner_class_makes_the_row_partial(tmp_path: Path, class_file, as_folder):
+    """A class file of an inner class that does not parse is no expected class, so no class is missing."""
+    files = {"p/A.class": class_file("p/A"), "p/A$1.class": b"no class"}
+    if as_folder:
+        source, kind, runner = _tree(tmp_path / "classes", files), ArtifactKind.CLASS_TREE, _folder_runner()
+    else:
+        source, kind, runner = _zip(tmp_path / "app.jar", list(files.items())), ArtifactKind.ARCHIVE, _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(source, "app", kind), ctx)
+    assert (report.outcome, report.classes, report.missing_classes, report.refused) == ("ok", 1, 0, 1)
+    assert report.partial and len(warns) == 1
+
+
+@pytest.mark.class_names
+def test_a_maven_row_with_a_gap_counts_its_refused_class(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "lib-1.2.jar", [("com/x/A.class", class_file("com/x/A")), ("com/x/B.class", class_file("../B"))])
+    sources = _zip(tmp_path / "lib-1.2-sources.jar", [("com/x/A.java", b"// upstream\nclass A {}")])
+    runner = writing_runner({"vineflower": {"com/x/B.java": "// engine\nclass B {}"}})
+    ctx = make_ctx(tmp_path, runner, resolver=_hit(sources), maven=True)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "lib-1.2.jar", ArtifactKind.ARCHIVE), ctx)
+    assert (report.method, report.sources_gap, report.missing_classes, report.refused) == ("maven", 1, 1, 1)
+    assert runner.calls == []  # the retry tree of the gap lacks the refused class file: no engine run
+    assert report.partial and len(warns) == 1 and warns[0].startswith("lib-1.2.jar: ")
+
+
+@pytest.mark.class_names
+def test_the_row_line_shows_the_refused_count(tmp_path: Path):
+    from decaf.pipeline import ArtifactReport
+    from decaf.report_view import _status_line
+
+    r = ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="vineflower", classes=3, missing_classes=1,
+                       refused=2)
+    assert r.partial and "1 missing[/], [yellow]2 refused" in _status_line(r)
+    assert ArtifactReport(rel="a.jar", kind="archive", outcome="ok", refused=1).partial
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_reads_a_class_entry_whose_suffix_has_other_case(tmp_path: Path, class_file):
+    jar = _zip(tmp_path / "a.jar", [("p/A.CLASS", class_file("../A")), ("p/B.Class", class_file("p/B")),
+                                    ("p/C.claſſ", b"no class")])  # the long s: upper() and casefold() give s
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.CLASS", "p/C.claſſ"] and _entries(copy) == [("p/B.Class", class_file("p/B"))]
+
+
+def _raw_names(path: Path) -> list[bytes]:
+    with zipfile.ZipFile(path) as zf:
+        return [i.orig_filename.encode("utf-8" if i.flag_bits & 0x800 else "cp437") for i in zf.infolist()]
+
+
+@pytest.mark.class_names
+def test_the_copy_keeps_the_name_bytes_of_a_utf8_name_without_the_utf8_flag(tmp_path: Path, class_file):
+    jar = _raw_zip(tmp_path / "a.jar", [(b"p/A.class", class_file("p/A")), (b"p/\xc3\xa9t\xc3\xa9.txt", b"r")])
+    copy, _ = _engine_copy(jar, tmp_path)
+    assert _raw_names(copy) == _raw_names(jar) == [b"p/A.class", b"p/\xc3\xa9t\xc3\xa9.txt"]
+
+
+@pytest.mark.class_names
+def test_an_entry_is_a_class_entry_by_its_name_in_the_copy(tmp_path: Path, class_file):
+    """With no UTF-8 flag, zipfile reads the bytes of the long s as cp437 text; the copy writes them as UTF-8, and
+    p/A.clas + long s ends with .CLASS under upper()."""
+    raw = b"p/A.clas\xc5\xbf"
+    jar = _raw_zip(tmp_path / "a.jar", [(raw, class_file("../A")), (b"p/B.class", class_file("p/B"))])
+    with zipfile.ZipFile(jar) as zf:
+        assert zf.namelist()[0] == raw.decode("cp437") and not zf.namelist()[0].upper().endswith(".CLASS")
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [raw.decode("cp437")] and _entries(copy) == [("p/B.class", class_file("p/B"))]
+
+
+@pytest.mark.class_names
+def test_a_retry_tree_with_no_class_file_left_goes_at_once(tmp_path: Path, class_file):
+    from decaf.pipeline import _extract_failed_classes
+
+    jar = _zip(tmp_path / "a.jar", [("p/A.class", class_file("../A")), ("p/B.class", class_file("p/B"))])
+    ctx = make_ctx(tmp_path, _names_runner())
+    assert _extract_failed_classes(jar, {"p/A"}, ctx) is None
+    assert list(ctx.tmp_root.iterdir()) == []
+
+
+@pytest.mark.class_names
+def test_a_nested_archive_works_by_its_zipfile_name_and_is_refused_by_either_name(tmp_path: Path, class_file,
+                                                                                    monkeypatch):
+    """On Windows, zipfile gives a raw name with backslashes as a name with /: the nested archive keeps its row. A
+    raw name with a NUL is refused, though zipfile cuts it, and so is the zipfile name of an extra field. A good entry
+    with the zipfile name of a refused entry gives no row either: the last entry of the name can be the refused one."""
+    from decaf.pipeline import _discover_nested, _outside_names
+
+    dep = _zip(tmp_path / "dep.jar", [("q/B.class", class_file("q/B"))]).read_bytes()
+    war = _raw_zip(tmp_path / "app.war", [(b"lib/dep.jar", dep), (b"lib/x.jar", dep), (b"lib/x.jar\0y", dep),
+                                          (b"lib/u.jar", dep), (b"../v.jar", dep), (b"p/A.class", class_file("p/A"))],
+                   extras={3: _unicode_path("lib/u.jar", "../u.jar"), 4: _unicode_path("../v.jar", "lib/v.jar")})
+    assert _outside_names(war) == ["lib/x.jar\0y", "lib/u.jar", "../v.jar"]
+    infolist = zipfile.ZipFile.infolist
+    calls = []
+
+    def windows_names(self):
+        """The first call is the one of _discover_nested: a later open compares the local name with orig_filename."""
+        infos = infolist(self)
+        calls.append(1)
+        for info in infos if len(calls) == 1 else ():
+            if info.filename == "lib/dep.jar":
+                info.orig_filename = "lib\\dep.jar"  # what zipfile on Windows keeps of a raw name with a backslash
+        return infos
+
+    monkeypatch.setattr(zipfile.ZipFile, "infolist", windows_names)
+    ctx = make_ctx(tmp_path, _names_runner())
+    nested = _discover_nested(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
+    assert [(a.rel, a.kind) for a in nested] == [("app.war!/lib/dep.jar", ArtifactKind.ARCHIVE)]
+
+
+def _warned_run(tmp_path: Path, artifact: Artifact, **kw) -> tuple:
+    ctx = make_ctx(tmp_path, _names_runner(), **kw)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    if artifact.kind is ArtifactKind.ARCHIVE and "resolver" not in kw:
+        ctx.case_insensitive = "output directory"
+    report, _ = process_artifact(artifact, ctx)
+    return report, warns
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", ["resources only", "sources jar", "case collision", "maven hit"])
+def test_a_row_that_no_engine_reads_counts_the_names_that_leave_its_folder(tmp_path: Path, class_file, kind):
+    entries = [("../up.txt", b"x"), ("r.txt", b"r")]
+    kw: dict = {}
+    if kind == "resources only":
+        artifact_kind = ArtifactKind.RESOURCE_ONLY
+    elif kind == "sources jar":
+        entries.append(("p/A.java", b"class A {}"))
+        artifact_kind = ArtifactKind.SOURCES_JAR
+    elif kind == "case collision":
+        entries += [("p/A.class", class_file("p/A")), ("p/a.class", class_file("p/a"))]
+        artifact_kind = ArtifactKind.ARCHIVE
+    else:
+        entries.append(("com/x/A.class", class_file("com/x/A")))
+        sources = _zip(tmp_path / "lib-1.2-sources.jar", [("com/x/A.java", b"class A {}")])
+        artifact_kind, kw = ArtifactKind.ARCHIVE, {"resolver": _hit(sources), "maven": True}
+    jar = _zip(tmp_path / "lib-1.2.jar", entries)
+    report, warns = _warned_run(tmp_path, Artifact(jar, "lib-1.2.jar", artifact_kind), **kw)
+    assert report.refused == 1
+    assert warns == ["lib-1.2.jar: decaf does not use 1 of its entries, because a name or a class name can leave the"
+                     " output folder, or decaf cannot read the class name; the first is '../up.txt'"]
+    if kind == "case collision":
+        assert report.outcome == "failed" and report.failure.startswith("case collision")
+    if kind == "maven hit":
+        assert (report.method, report.sources_gap) == ("maven", 0)
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", [ArtifactKind.ARCHIVE, ArtifactKind.RESOURCE_ONLY, ArtifactKind.SOURCES_JAR])
+def test_decaf_writes_no_file_from_an_entry_that_the_row_counts_as_refused(tmp_path: Path, class_file, kind):
+    """These names pass the resolve test of Linux (a backslash and a colon are file name characters there), but not
+    the name rule: decaf's own extraction skips them, as the row counts them."""
+    entries = [("r.txt", b"r"), ("q\\..\\..\\up.txt", b"x"), ("C:x.txt", b"x")]
+    if kind is ArtifactKind.ARCHIVE:
+        entries.append(("p/A.class", class_file("p/A")))
+    if kind is ArtifactKind.SOURCES_JAR:
+        entries += [("p/A.java", b"class A {}"), ("q\\..\\..\\B.java", b"class B {}"), ("C:C.java", b"class C {}")]
+    jar = _zip(tmp_path / "lib.jar", entries)
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "lib.jar", kind), ctx)
+    written = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*") if p.is_file())
+    assert written == {ArtifactKind.ARCHIVE: ["lib.jar/p/A.java", "lib.jar/r.txt"],
+                       ArtifactKind.RESOURCE_ONLY: ["lib.jar/r.txt"],
+                       ArtifactKind.SOURCES_JAR: ["lib.jar/p/A.java", "lib.jar/r.txt"]}[kind]
+    assert report.refused == (4 if kind is ArtifactKind.SOURCES_JAR else 2)
+
+
+def test_decaf_writes_no_file_with_the_name_of_an_entry_that_the_row_counts_as_refused(tmp_path: Path):
+    """zipfile cuts the second name at the NUL, so both entries have one zipfile name: the refused one decides."""
+    jar = _raw_zip(tmp_path / "lib.jar", [(b"r.txt", b"good"), (b"r.txt\0x", b"bad"), (b"s.txt", b"s")])
+    ctx = make_ctx(tmp_path, _names_runner(), fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    report, _ = process_artifact(Artifact(jar, "lib.jar", ArtifactKind.RESOURCE_ONLY), ctx)
+    written = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*") if p.is_file())
+    assert written == ["lib.jar/s.txt"]
+    assert report.refused == 1
+
+
+def test_the_engine_copy_refuses_a_name_that_zipfile_cannot_write(tmp_path: Path):
+    """A name with no UTF-8 flag is cp437: each high byte becomes two bytes of UTF-8 in the copy, and a name of the
+    copy above 65,535 bytes does not fit in its field."""
+    long_name = b"p/" + b"\xff" * 40_000 + b".txt"
+    jar = _raw_zip(tmp_path / "a.jar", [(long_name, b"x"), (b"r.txt", b"r")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == [long_name.decode("cp437")]
+    assert _entries(copy) == [("r.txt", b"r")]
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", [ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE])
+def test_a_row_whose_class_files_decaf_refused_each_starts_no_engine(make_jar, tmp_path: Path, class_file, kind):
+    files = {"p/A.class": class_file("../A"), "p/B.class": class_file("../B"), "p/r.txt": b"r"}
+    if kind is ArtifactKind.ARCHIVE:
+        target = make_jar("a.jar", files)
+    else:
+        target = tmp_path / "in"
+        for rel, data in files.items():
+            (target / rel).parent.mkdir(parents=True, exist_ok=True)
+            (target / rel).write_bytes(data)
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner)
+    report, _ = process_artifact(Artifact(target, "a", kind), ctx)
+    assert runner.calls == [] and report.attempts == []
+    assert (report.outcome, report.failure) == ("failed", "no class file is left: decaf refused each one")
+    assert (report.classes, report.refused, report.missing_classes) == (2, 2, 0)
+
+
+def test_the_warning_cuts_a_long_name(tmp_path: Path):
+    from decaf.pipeline import ArtifactReport, _note_refused
+
+    warns: list[str] = []
+    ctx = make_ctx(tmp_path, _names_runner())
+    ctx.on_warn = warns.append
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    _note_refused(Artifact(tmp_path / "a.jar", "a.jar", ArtifactKind.ARCHIVE), ctx, report, ["../" + "\xe9" * 500], "entries")
+    shown = ascii("../" + "\xe9" * 500)[:200]
+    assert warns[0].endswith(f"; the first is {shown}...") and report.refused == 1
+    _note_refused(Artifact(tmp_path / "a.jar", "a.jar", ArtifactKind.ARCHIVE), ctx, report, ["../x"], "entries")
+    assert warns[1].endswith("; the first is '../x'")
+
+
+@pytest.mark.class_names
+def test_the_class_test_ignores_the_dots_and_spaces_at_the_end_of_a_name(tmp_path: Path, class_file):
+    """Windows drops the dots and spaces at the end of a file name: such an entry is a class entry."""
+    jar = _zip(tmp_path / "a.jar", [("p/A.class.", class_file("../A")), ("p/B.class . ", class_file("../B")),
+                                    ("p/C.class", class_file("p/C")), ("p/D.txt.", b"d")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["p/A.class.", "p/B.class . "]
+    assert _entries(copy) == [("p/C.class", class_file("p/C")), ("p/D.txt.", b"d")]
+
+
+def test_the_copy_folder_of_a_solo_row_goes_after_an_engine_call_that_raises(make_jar, tmp_path: Path):
+    import decaf.pipeline as pipeline
+    from decaf.pipeline import ArtifactReport
+
+    jar = make_jar("a.jar", {"com/a/A.class": b"x"})
+    targets: list[Path] = []
+
+    def raising(spec, jar_path, target, dest, timeout, **kw):
+        targets.append(Path(target))
+        raise RuntimeError("engine call failed")
+
+    ctx = make_ctx(tmp_path, raising)
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok")
+    with pytest.raises(RuntimeError):
+        pipeline._decompile(Artifact(jar, "a.jar", ArtifactKind.ARCHIVE), jar, ctx, report)
+    assert [t.name for t in targets] == ["a.jar"] and targets[0] != jar
+    assert not targets[0].parent.exists() and list(ctx.tmp_root.iterdir()) == []
+
+
+def _bad_crc(path: Path, data: bytes) -> Path:
+    """The zip at path, with a wrong CRC-32 for the entry that holds data, in both headers."""
+    import struct
+    import zlib
+
+    raw = path.read_bytes()
+    good, bad = struct.pack("<I", zlib.crc32(data)), struct.pack("<I", zlib.crc32(data) ^ 1)
+    assert raw.count(good) == 2
+    path.write_bytes(raw.replace(good, bad))
+    return path
+
+
+def test_a_read_error_after_the_first_read_of_a_large_entry_leaves_no_part_of_it(tmp_path: Path, monkeypatch):
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 64)
+    big = bytes(range(256)) * 256  # far above the limit and the 4 KiB of one zipfile read: the CRC test comes later
+    jar = _bad_crc(_raw_zip(tmp_path / "a.jar", [(b"big.bin", big), (b"r.txt", b"r")]), big)
+    with zipfile.ZipFile(jar) as zf, zf.open("big.bin") as f:
+        assert len(f.read(65)) == 65  # the first read has no error
+        with pytest.raises(zipfile.BadZipFile):
+            f.read()
+    copy, refused = _engine_copy(jar, tmp_path)  # the helper also checks that no part file stays
+    assert (refused, _entries(copy)) == ([], [("r.txt", b"r")])
+
+
+def test_a_large_entry_goes_in_with_its_size(tmp_path: Path, monkeypatch):
+    """zipfile takes the size of an entry before its data: with a small ZIP64_LIMIT, a wrong size raises."""
+    import decaf.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "_CLASS_FILE_MAX", 64)
+    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 1000)
+    big = bytes(range(256)) * 20
+    jar = _zip(tmp_path / "a.jar", [("big.bin", big), ("r.txt", b"r")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    with zipfile.ZipFile(copy) as zf:
+        assert [(i.filename, i.file_size) for i in zf.infolist()] == [("big.bin", len(big)), ("r.txt", 1)]
+        assert zf.read("big.bin") == big
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", [ArtifactKind.ARCHIVE, ArtifactKind.CLASS_TREE])
+def test_a_row_with_only_a_module_info_and_a_refused_item_still_runs_the_engine(make_jar, tmp_path: Path, class_file,
+                                                                               kind):
+    """module-info.class is no expected class, but it is a class file: the engine gets it."""
+    files = {"module-info.class": class_file("module-info")}
+    if kind is ArtifactKind.ARCHIVE:
+        target = _zip(tmp_path / "a.jar", [*files.items(), ("../r.txt", b"r")])
+    else:
+        target = tmp_path / "in"
+        files["p/A.class"] = class_file("../A")
+        for rel, data in files.items():
+            (target / rel).parent.mkdir(parents=True, exist_ok=True)
+            (target / rel).write_bytes(data)
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    report, _ = process_artifact(Artifact(target, "a", kind), ctx)
+    assert [c["classes"] for c in runner.calls][:1] == [["module-info.class"]]
+    assert (report.outcome, report.refused, report.java_files, report.partial) == ("ok", 1, 1, True)
+
+
+@pytest.mark.class_names
+def test_the_engine_copy_refuses_an_entry_with_the_zipfile_name_of_an_entry_that_fails_the_rule(tmp_path: Path,
+                                                                                                class_file):
+    """zipfile cuts the first name at the NUL: both entries have one zipfile name. decaf's own extraction skips the
+    name, so the copy refuses it too, and the row counts it."""
+    jar = _raw_zip(tmp_path / "app.jar", [(b"p/A.class", class_file("p/A")), (b"r.txt\0x", b"bad"),
+                                          (b"r.txt", b"good"), (b"s.txt", b"s")])
+    runner = _names_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False, writer=MirrorWriter(tmp_path / "out"))
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
+    assert [names for _, names in runner.calls] == [["p/A.class", "s.txt"]]
+    written = sorted(p.relative_to(tmp_path / "out").as_posix() for p in (tmp_path / "out").rglob("*") if p.is_file())
+    assert written == ["app.jar/p/A.java", "app.jar/s.txt"]
+    assert (report.refused, len(warns), report.partial) == (1, 1, True)
+
+
+def test_a_folder_entry_with_a_name_that_fails_the_rule_stays_out_with_no_count(tmp_path: Path):
+    """decaf never makes a file from a folder entry: only the file entry counts."""
+    from decaf.pipeline import _outside_names
+
+    jar = _zip(tmp_path / "a.jar", [("/abs/", b""), ("/abs/js/", b""), ("C:/dir/", b""), ("/abs/js/x.js", b"x"),
+                                    ("r.txt", b"r")])
+    copy, refused = _engine_copy(jar, tmp_path)
+    assert refused == ["/abs/js/x.js"] and _outside_names(jar) == ["/abs/js/x.js"]
+    assert _entries(copy) == [("r.txt", b"r")]
+
+
+def test_after_ctrl_c_a_gap_row_runs_no_tests_of_its_archive(make_jar, tmp_path, monkeypatch):
+    import decaf.pipeline as pipeline
+    from decaf.engines import PROCESSES
+    from decaf.pipeline import ArtifactReport
+
+    monkeypatch.setattr(pipeline, "_engine_copy", lambda *a: pytest.fail("the tests of the copy after Ctrl-C"))
+    jar = make_jar("a.jar", {"com/a/A.class": b"x", "com/a/B.class": b"y"})
+    runner = by_name_runner()
+    ctx = make_ctx(tmp_path, runner)
+    ctx.maven_gaps["a.jar"] = {"com/a/B"}
+    report = ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="maven")
+    PROCESSES.kill_all()
+    try:
+        pipeline._decompile(Artifact(jar, "a.jar", ArtifactKind.ARCHIVE), jar, ctx, report)
+    finally:
+        PROCESSES.reset()
+    assert runner.calls == [] and report.refused == 0

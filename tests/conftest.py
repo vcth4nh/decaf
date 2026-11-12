@@ -10,6 +10,20 @@ import httpx
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def fake_class_files_go_to_the_engines(request, monkeypatch):
+    """Many tests use fake class files such as b"x" or a bare header. They do not parse, so in a real run no
+    engine gets them. Here such a file goes to the engines; a class file whose constant pool parses gets the real
+    test. A test with the mark class_names, and a test of real engines (the mark slow), gets the real test for each
+    file."""
+    if request.node.get_closest_marker("class_names") is not None or request.node.get_closest_marker("slow") is not None:
+        return
+    from decaf import check, pipeline
+
+    real = pipeline._safe_class
+    monkeypatch.setattr(pipeline, "_safe_class", lambda data: data is not None and (check._pool(data) is None or real(data)))
+
+
 @pytest.fixture
 def make_jar(tmp_path: Path):
     """Build a zip/jar at tmp_path/relname with {entry_name: content} members."""
@@ -50,11 +64,11 @@ def make_damaged_jar(tmp_path: Path):
 
 @pytest.fixture
 def class_file():
-    """A minimal class file: this_class is name; with source_file, a SourceFile attribute names it (#180);
-    with interfaces, it lists that many interface entries."""
+    """A minimal class file: this_class is name (bytes: the name bytes as they are); with source_file, a SourceFile
+    attribute names it (#180); with interfaces, it lists that many interface entries."""
 
-    def _make(name: str, source_file: str | None = None, interfaces: int = 0) -> bytes:
-        utf = name.encode()
+    def _make(name: str | bytes, source_file: str | None = None, interfaces: int = 0) -> bytes:
+        utf = name if isinstance(name, bytes) else name.encode()
         pool = [b"\x01" + len(utf).to_bytes(2, "big") + utf, b"\x07\x00\x01"]  # 1: Utf8 name, 2: Class -> 1
         attributes = b"\x00\x00"
         if source_file is not None:

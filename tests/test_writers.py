@@ -154,6 +154,7 @@ def test_report_json_and_totals(tmp_path: Path):
         "flagged_files": 0,
         "noted_files": 0,
         "unchecked_files": 0,
+        "refused_entries": 0,
     }
     report = RunReport(settings={"engine": "vineflower"}, artifacts=reports, totals=totals, duration_seconds=1.5)
     parsed = json.loads(report.to_json())

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import engines, memory
+from .scanner import stays_inside
 
 KINDS = ("parse", "name", "flow", "type", "other")
 RETRY_KINDS = frozenset({"parse", "name", "flow"})
@@ -458,6 +459,51 @@ def class_name(data: bytes) -> str | None:
     pool = _pool(data)
     name = _class_at(pool, data, pool[2] + 2) if pool is not None else None
     return name.decode("utf-8", "replace") if name else None
+
+
+def _strict_name(raw: bytes) -> str | None:
+    """The text of name bytes when they are valid UTF-8 with no character above U+FFFF (a class file has no
+    4-byte form), else None. A reader can decode bytes that are not valid UTF-8 in another way than decaf."""
+    if raw.isascii():
+        return raw.decode("ascii")  # the common case, fast
+    try:
+        text = raw.decode("utf-8", "surrogatepass")
+    except UnicodeDecodeError:
+        return None
+    return None if any(ord(c) > 0xFFFF for c in text) else text
+
+
+def safe_class_name(data: bytes) -> str | None:
+    """The internal name of a class file (this_class), when decaf can prove that it is valid UTF-8 and has none of
+    the characters . ; [ that the JVM does not allow in a class name, else None.
+
+    None also when the class file does not parse or has no name. A reader can decode bytes that are not valid
+    UTF-8 in another way than decaf.
+    """
+    return _safe_name(_pool(data), data)
+
+
+def _safe_name(pool: tuple[dict[int, bytes], dict[int, int], int] | None, data: bytes) -> str | None:
+    """safe_class_name with the parsed pool of the class file."""
+    name = _class_at(pool, data, pool[2] + 2) if pool is not None else None
+    text = _strict_name(name) if name else None
+    return None if text is None or any(c in text for c in ".;[") else text
+
+
+def class_names_stay_inside(data: bytes) -> bool:
+    """Does each class name of a class file stay inside a folder: its safe_class_name, and the name of each Class
+    entry of its constant pool (an array name such as [Ljava/lang/String; as it is)?"""
+    pool = _pool(data)
+    name = _safe_name(pool, data)
+    if name is None or not stays_inside(name):
+        return False
+    utf8, classes, _ = pool
+    for index in classes.values():
+        raw = utf8.get(index)
+        text = _strict_name(raw) if raw is not None else None
+        if text is None or not stays_inside(text):
+            return False
+    return True
 
 
 def _utf8(text: bytes) -> bytes:

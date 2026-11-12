@@ -335,9 +335,10 @@ def test_run_check_marks_the_files_of_a_killed_checker_interrupted(tmp_path: Pat
     assert [(r.status, r.reason) for r in out[0]] == [("clean", None), ("unchecked", "interrupted")]
 
 
-def _class_file(name: str, long_first: bool = False) -> bytes:
-    """A minimal class file whose this_class is name; long_first puts a Long (two pool slots) first."""
-    utf = name.encode()
+def _class_file(name: str | bytes, long_first: bool = False) -> bytes:
+    """A minimal class file whose this_class is name (bytes: the name bytes as they are); long_first puts a Long
+    (two pool slots) first."""
+    utf = name if isinstance(name, bytes) else name.encode()
     pool = b"\x05" + bytes(8) if long_first else b""
     first = 3 if long_first else 1
     pool += b"\x01" + len(utf).to_bytes(2, "big") + utf + b"\x07" + first.to_bytes(2, "big")
@@ -351,6 +352,29 @@ def test_class_name_reads_this_class():
     assert check.class_name(_class_file("q/B$1", long_first=True)) == "q/B$1"
     assert check.class_name(b"not a class") is None
     assert check.class_name(_class_file("p/A")[:12]) is None
+
+
+def test_safe_class_name_reads_this_class():
+    assert check.safe_class_name(_class_file("p/A")) == "p/A"
+    assert check.safe_class_name(_class_file("q/B$1", long_first=True)) == "q/B$1"
+    assert check.safe_class_name(_class_file("p/\u00e9t\u00e9")) == "p/\u00e9t\u00e9"  # 2-byte forms
+    assert check.safe_class_name(_class_file(b"p/\xed\xa0\x80")) == "p/\ud800"  # a 3-byte form of a surrogate
+
+
+@pytest.mark.parametrize("data", [
+    b"not a class",  # does not parse
+    _class_file("p/A")[:12],  # cut in the pool
+    _class_file("p/A")[:-6],  # no this_class
+    _class_file(""),  # no name
+    _class_file(b"p/\xc0\xae\xc0\xae/A"),  # a 2-byte form of an ASCII character: no UTF-8
+    _class_file(b"p/\xc0\x80"),  # the 2-byte form of NUL
+    _class_file(b"p/\xff"),  # no UTF-8
+    _class_file("p/\U0001f600"),  # a 4-byte form: a class file has none
+    _class_file("p/A.B"), _class_file("p/A;"), _class_file("[Lp/A;"),  # the JVM allows none of . ; [ in a class name
+])
+def test_safe_class_name_gives_none_when_readers_can_differ(data):
+    """Each reader gives the same text for the name bytes, or there is no name."""
+    assert check.safe_class_name(data) is None
 
 
 def test_run_check_gives_the_crash_text(tmp_path: Path, monkeypatch):
@@ -725,11 +749,12 @@ def test_run_check_gives_classify_the_detached_files(tmp_path: Path, monkeypatch
     assert [r.status for r in out[0]] == ["noted", "flagged"]
 
 
-def _class_with(name: str, interfaces: tuple[str, ...] = (), utf8: tuple[str, ...] = ()) -> bytes:
-    """A minimal class file with interfaces and more Utf8 constants, e.g. an annotation descriptor."""
+def _class_with(name: str, interfaces: tuple[str | bytes, ...] = (), utf8: tuple[str, ...] = ()) -> bytes:
+    """A minimal class file with interfaces (bytes: the name bytes as they are) and more Utf8 constants, e.g. an
+    annotation descriptor."""
     pool, index = b"", {}
     for i, n in enumerate((name, *interfaces)):
-        u = n.encode()
+        u = n if isinstance(n, bytes) else n.encode()
         pool += b"\x01" + len(u).to_bytes(2, "big") + u + b"\x07" + (2 * i + 1).to_bytes(2, "big")
         index[n] = 2 * i + 2
     for s in utf8:
@@ -918,3 +943,26 @@ def test_run_check_notes_bytecode_only_errors_of_the_non_java_files(tmp_path: Pa
     jobs = [check.Job("0", (), (groovy, java), non_java=frozenset({groovy}))]
     out = check.run_check(jobs, timeout=5, cpu_budget=1, java="java", install=tmp_path, tmp_root=tmp_path)
     assert [r.status for r in out[0]] == ["noted", "flagged"]
+
+
+def test_class_names_stay_inside_tests_each_class_entry_of_the_pool():
+    assert check.class_names_stay_inside(_class_with("p/A", interfaces=("java/io/Serializable", "[Ljava/lang/String;")))
+    assert not check.class_names_stay_inside(_class_with("p/A", interfaces=("../../x/I",)))
+    assert not check.class_names_stay_inside(_class_with("p/A", interfaces=(b"p/\xc0\xae\xc0\xae/I",)))
+    assert not check.class_names_stay_inside(_class_with("p/A", interfaces=("p/\U0001f600",)))
+    assert not check.class_names_stay_inside(_class_with("../A"))
+    assert not check.class_names_stay_inside(_class_with("p/A.B"))
+    assert not check.class_names_stay_inside(b"not a class")
+
+
+def test_class_names_stay_inside_parses_the_constant_pool_one_time(monkeypatch):
+    real, calls = check._pool, []
+
+    def counting_pool(data):
+        calls.append(1)
+        return real(data)
+
+    monkeypatch.setattr(check, "_pool", counting_pool)
+    assert check.class_names_stay_inside(_class_with("p/A", interfaces=("java/io/Serializable",)))
+    assert len(calls) == 1
+    assert check.safe_class_name(_class_with("p/A")) == "p/A"

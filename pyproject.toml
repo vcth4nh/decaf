@@ -31,4 +31,5 @@ addopts = '-q -m "not network and not slow"'
 markers = [
     "network: needs internet access",
     "slow: runs real decompiler engines",
+    "class_names: a fake class file that does not parse goes to no engine, as in a real run",
 ]
