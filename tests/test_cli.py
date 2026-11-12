@@ -1325,6 +1325,15 @@ def test_report_artifact_glob_shows_detail(tmp_path: Path):
     assert "missing_classes=1" in plain
 
 
+def test_report_artifact_shows_the_refused_count_and_the_ending_counts_the_refused_entries(tmp_path: Path):
+    artifacts = [ArtifactReport(rel="r.jar", kind="archive", outcome="ok", method="cfr", classes=2, refused=3)]
+    out = _write_report(tmp_path / "out", _mixed_report(artifacts=artifacts, totals=compute_totals(artifacts)))
+    plain = ANSI.sub("", runner.invoke(app, ["report", str(out), "--artifact", "r*"]).output)
+    assert "refused=3" in plain
+    plain = ANSI.sub("", runner.invoke(app, ["report", str(out)]).output)
+    assert "3 refused entries" in plain and "Completed with problems" in plain
+
+
 def test_report_artifact_no_match_prints_message(tmp_path: Path):
     out = _write_report(tmp_path / "out", _mixed_report())
     result = runner.invoke(app, ["report", str(out), "--artifact", "nope*"])
