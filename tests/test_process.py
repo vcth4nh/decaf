@@ -316,14 +316,15 @@ def test_resource_only_container_still_descended(make_jar, tmp_path: Path):
 
 
 def test_class_tree_decompiled_from_copied_tree(tmp_path: Path):
-    (tmp_path / "loose/com/x").mkdir(parents=True)
-    (tmp_path / "loose/com/x/A.class").write_bytes(b"a")
+    root = tmp_path / "in"  # not the folder of ctx.tmp_root: the expected classes come from the input folder
+    (root / "loose/com/x").mkdir(parents=True)
+    (root / "loose/com/x/A.class").write_bytes(b"a")
     runner = writing_runner({"vineflower": {"com/x/A.java": "class A {}"}})
     ctx = make_ctx(tmp_path, runner)
-    report, _ = process_artifact(Artifact(tmp_path, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    report, _ = process_artifact(Artifact(root, "_classes", ArtifactKind.CLASS_TREE), ctx)
     assert report.outcome == "ok"
     assert report.classes == 1
-    assert runner.sent[0] == ["loose/com/x/A.class"] and runner.calls[0][1] != tmp_path  # copied tree, not the input root
+    assert runner.sent[0] == ["loose/com/x/A.class"] and runner.calls[0][1] != root  # copied tree, not the input root
 
 
 def test_runner_exception_becomes_failed_report(make_jar, tmp_path: Path):
@@ -4929,3 +4930,59 @@ def test_the_warning_shows_a_control_character_of_the_first_name_as_an_escape(tm
     process_artifact(Artifact(jar, "app.jar", ArtifactKind.ARCHIVE), ctx)
     assert warns == ["app.jar: no engine gets 1 of its entries, because a name or a class name can leave the output"
                      " folder, or decaf cannot read the class name; the first is '\\x1b[2J/../B.class'"]
+
+
+
+def _folder_runner():
+    """Fake engine: records the class files of the folder that it gets, and writes one file for each of them (a
+    class file of the tests lists no inner class, so each class is top-level for the JVM)."""
+    sent: list[list[str]] = []
+
+    def _run(spec, jar_path, target, dest, timeout, **kw):
+        rels = sorted(p.relative_to(target).as_posix() for p in Path(target).rglob("*.class"))
+        sent.append(rels)
+        for rel in rels:
+            out = Path(dest) / (rel[: -len(".class")] + ".java")
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("class X {}\n")
+        return EngineResult(spec.name, 0, False, len(rels), "")
+
+    _run.sent = sent
+    return _run
+
+
+def _snapshot(folder: Path) -> dict[str, bytes]:
+    return {p.relative_to(folder).as_posix(): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
+
+
+def test_an_engine_gets_the_class_folder_without_its_refused_class_files(tmp_path: Path, class_file):
+    folder = _tree(tmp_path / "classes", {
+        "p/A.class": class_file("p/A"), "p/A$1.class": class_file("p/A$1"), "p/B.class": class_file("p/../../B"),
+        "p/r.txt": b"r",
+    })
+    before = _snapshot(folder)
+    runner = _folder_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(folder, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert runner.sent == [["p/A$1.class", "p/A.class"]]
+    assert (report.outcome, report.classes, report.missing_classes, report.java_files) == ("ok", 3, 1, 2)
+    assert warns == ["_classes: no engine gets 1 of its class files, because a name or a class name can leave the"
+                     " output folder, or decaf cannot read the class name; the first is 'p/B.class'"]
+    assert _snapshot(folder) == before
+
+
+def test_a_normal_class_folder_gives_the_engine_each_class_file(tmp_path: Path, class_file):
+    """copy_class_tree copies each class file: the expected classes of the folder and of its copy are the same."""
+    folder = _tree(tmp_path / "classes", {
+        "p/A.class": class_file("p/A"), "p/A$1.class": class_file("p/A$1"), "q/r/B.class": class_file("q/r/B"),
+        "build/C.class": class_file("C"), "p/r.txt": b"r",
+    })
+    runner = _folder_runner()
+    ctx = make_ctx(tmp_path, runner, fallback=False)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    report, _ = process_artifact(Artifact(folder, "_classes", ArtifactKind.CLASS_TREE), ctx)
+    assert runner.sent == [["build/C.class", "p/A$1.class", "p/A.class", "q/r/B.class"]] and warns == []
+    assert (report.classes, report.missing_classes, report.java_files) == (4, 0, 4)

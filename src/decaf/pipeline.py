@@ -2008,7 +2008,9 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
         _retry_missing_classes(artifact, artifact.path, gap, set(), ctx, report, ctx.chain, _Held(written=published))
         return
     source = target if target.is_dir() else artifact.path
-    expected = expected_class_stems(source)
+    # From the input, not from the target: a class that no engine gets (_refused) counts as missing. The copy of a
+    # class folder has each class file of the folder (copy_class_tree), so a normal folder gives the same set.
+    expected = expected_class_stems(artifact.path)
     report.classes = len(expected)
     produced: set[str] = set()
     held = _Held()
@@ -2220,6 +2222,11 @@ def _fetch_stage(
             state("copying classes")
             tmp = _tmp_dir(ctx)
             copy_class_tree(artifact.path, tmp)
+            refused = _refused(tmp)  # the files of the copy: the bytes that the engines get
+            for rel in refused:
+                (tmp / rel).unlink()
+            if refused and ctx.on_warn is not None:
+                ctx.on_warn(_refused_warning(artifact.rel, len(refused), "class files", refused[0]))
             return report, nested, tmp
         else:  # ARCHIVE
             state("scanning")
