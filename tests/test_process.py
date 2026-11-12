@@ -1,4 +1,5 @@
 import re
+import sys
 import warnings
 import zipfile
 from pathlib import Path
@@ -5343,6 +5344,29 @@ def test_the_mirror_writer_refuses_a_folder_that_is_not_below_its_root(tmp_path:
         writer.add_blob(jar, "r.txt", "a.jar!/../../x.jar")
     assert writer.dest_for("a.jar") == tmp_path / "out/a.jar"
     assert [p for p in tmp_path.rglob("*") if p.is_file()] == [jar]
+
+
+@pytest.mark.class_names
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlink needs extra rights on Windows")
+def test_the_mirror_writer_writes_through_a_linked_subfolder_of_the_output_folder(tmp_path: Path):
+    """The test is of the folder text, as on main a linked subfolder gets its files."""
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out/lib").symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    tree = _tree(tmp_path / "tree", {"p/A.java": b"class A {}"})
+    writer = MirrorWriter(tmp_path / "out")
+    assert writer.dest_for("lib/a.jar") == tmp_path / "out/lib/a.jar"
+    assert writer.add_tree(tree, "lib/a.jar")[0] == 1
+    assert (tmp_path / "elsewhere/a.jar/p/A.java").read_text() == "class A {}"
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("rel", ["a.jar!/../../x.jar", "../x.jar", "a/../../x.jar", "/abs/x.jar"])
+def test_the_mirror_writer_refuses_a_folder_text_with_a_parent_part_or_a_root(tmp_path: Path, rel):
+    from decaf.pipeline import OutsideOutput
+
+    with pytest.raises(OutsideOutput):
+        MirrorWriter(tmp_path / "out").dest_for(rel)
 
 
 # --- an archive built by hand ---

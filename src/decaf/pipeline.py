@@ -317,15 +317,14 @@ class MirrorWriter:
         self._folders[rel] = f"{self._folders.get(parent, parent)}/{rel.removeprefix(f'{parent}!/')}"
 
     def dest_for(self, rel: str) -> Path:
-        """The folder of an artifact below root. A folder that is not below root raises OutsideOutput."""
-        dest = self.root / self._folders.get(rel, rel)
-        try:
-            inside = dest.resolve().is_relative_to(self.root.resolve())
-        except OSError:
-            inside = False
-        if not inside:
+        """The folder of an artifact below root. A folder text with a root, a drive, or a .. part raises OutsideOutput.
+
+        The test is of the text, not of the disk: a linked folder below root gets its files, as before.
+        """
+        folder = Path(self._folders.get(rel, rel))
+        if folder.anchor or ".." in folder.parts:
             raise OutsideOutput(f"{ascii(rel)}: the folder of this artifact is not below the output folder")
-        return dest
+        return self.root / folder
 
     def out_path(self, rel: str, raw: str) -> str:
         """The path below the artifact folder of an engine file: the engine path (#174)."""
