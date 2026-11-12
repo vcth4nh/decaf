@@ -207,7 +207,8 @@ Typical flow:
 `completed_with_failures`, `interrupted`, `aborted` when an error stopped the run),
 `totals` (`artifacts`, `ok`, `partial`, `failed`, `skipped`, `maven_sources`, `decompiled`,
 `extracted`, `java_files`, `collisions`, `flagged_files`, `noted_files`, `unchecked_files`,
-`network_misses`; `ok` includes the partial ones), and `artifacts[]` with `rel`, `kind`,
+`network_misses`, `refused_entries`; `ok` includes the partial ones), and `artifacts[]` with
+`rel`, `kind`,
 `outcome` (`ok`, `failed`, `skipped`; partial is `ok` with `missing_classes` > 0,
 `refused` > 0, `stubs[]`, `flagged[]`, or a `sources_miss` that starts with `network:`,
 which is a network miss: the lookup failed and the jar was decompiled), `method`, `gav`,

@@ -414,6 +414,7 @@ def compute_totals(reports: list[ArtifactReport]) -> dict:
         "flagged_files": sum((r.check or {}).get("flagged", 0) for r in reports),
         "noted_files": sum((r.check or {}).get("noted", 0) for r in reports),
         "unchecked_files": sum((r.check or {}).get("unchecked", 0) for r in reports),
+        "refused_entries": sum(r.refused for r in reports),
     }
 
 
@@ -740,6 +741,22 @@ def _copy_name(info: zipfile.ZipInfo) -> str:
         return name  # other bytes: zipfile writes the cp437 text as UTF-8
 
 
+def _names_stay(info: zipfile.ZipInfo) -> bool:
+    """Do both names of an entry stay inside: its raw name, and its zipfile name (zipfile cuts the raw name at a NUL,
+    on Windows it changes a backslash to /, and it can take the name from an extra field)?"""
+    return stays_inside(info.orig_filename) and stays_inside(info.filename)
+
+
+def _outside_names(archive: Path) -> list[str]:
+    """The raw names of the entries of an archive whose names do not stay inside (_names_stay). No class is read: for
+    a row whose archive no engine reads."""
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            return [info.orig_filename for info in zf.infolist() if not _names_stay(info)]
+    except (zipfile.BadZipFile, OSError):
+        return []
+
+
 def _is_class_entry(name: str) -> bool:
     """Does a name end with .class for a reader that ignores the case?"""
     return name.lower().endswith(".class") or name.upper().endswith(".CLASS") or name.casefold().endswith(".class")
@@ -790,8 +807,8 @@ def _engine_copy(archive: Path, folder: Path | None) -> tuple[Path | None, list[
             last[_copy_name(info)] = info  # a dict keeps the place of the first entry of a name
         try:
             for name, info in last.items():
-                raw = info.orig_filename  # info.filename: cut at a NUL, or taken from an extra field
-                if not (stays_inside(raw) and stays_inside(info.filename) and stays_inside(name)):
+                raw = info.orig_filename
+                if not (_names_stay(info) and stays_inside(name)):
                     refused.append(raw)
                     continue
                 entry = zipfile.ZipInfo(name, info.date_time)
@@ -2133,24 +2150,19 @@ def _decompile(artifact: Artifact, target: Path, ctx: Ctx, report: ArtifactRepor
     report.outcome = "ok"
 
 
-def _discover_nested(artifact: Artifact, ctx: Ctx, refused: list[str] | None = None) -> list[Artifact]:
-    """The nested archives of an archive. A name that does not stay inside gives no artifact: it goes to refused,
-    before any other use, so no path is made from it."""
+def _discover_nested(artifact: Artifact, ctx: Ctx) -> list[Artifact]:
+    """The nested archives of an archive. An entry whose names do not stay inside (_names_stay) gives no artifact,
+    and neither does another entry with its zipfile name: the name test comes before each other use, so no path is
+    made from such a name, and the bytes of such an entry never become a row. The row counts them (_outside_names)."""
     try:
         with zipfile.ZipFile(artifact.path) as zf:
             infos = zf.infolist()
     except (zipfile.BadZipFile, OSError):
         return []
-    # The work takes the zipfile name, as safe_extract_zip does; the test also takes the raw name (zipfile cuts a
-    # name at a NUL, and on Windows it changes a backslash to /).
-    found = []
-    for info in infos:
-        if not find_nested_archives([info.filename]):
-            continue
-        if stays_inside(info.orig_filename) and stays_inside(info.filename):
-            found.append(info.filename)
-        elif refused is not None:
-            refused.append(info.orig_filename)
+    # The work takes the zipfile name, as safe_extract_zip does: the last entry of the name.
+    outside = {info.filename for info in infos if not _names_stay(info)}
+    found = [info.filename for info in infos
+             if _names_stay(info) and info.filename not in outside and find_nested_archives([info.filename])]
     names = list(dict.fromkeys(found))  # two entries of one name: one row, and the last one wins, as in Java
     if not names:
         return []
@@ -2256,9 +2268,8 @@ def _fetch_stage(
             groups = casefs.case_groups(_output_stems(artifact))
             if groups:
                 if artifact.kind in (ArtifactKind.ARCHIVE, ArtifactKind.SOURCES_JAR):
-                    bad: list[str] = []
-                    nested = _discover_nested(artifact, ctx, bad)  # nested jars get their own check
-                    _note_refused(artifact, ctx, report, bad, "entries")
+                    nested = _discover_nested(artifact, ctx)  # nested jars get their own check
+                    _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
                 unit = "source files" if artifact.kind is ArtifactKind.SOURCES_JAR else "classes"
                 report.outcome = "failed"
                 report.failure = _case_failure(groups, unit, ctx.case_insensitive)
@@ -2268,9 +2279,8 @@ def _fetch_stage(
             report.failure = "unreadable archive"
         elif artifact.kind is ArtifactKind.RESOURCE_ONLY:
             state("scanning")
-            bad = []
-            nested = _discover_nested(artifact, ctx, bad)  # e.g. a war bundling only jars
-            _note_refused(artifact, ctx, report, bad, "entries")
+            nested = _discover_nested(artifact, ctx)  # e.g. a war bundling only jars
+            _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
             state("copying resources")
             copied, skipped = ctx.writer.add_resources(
                 artifact.path, artifact.rel, include_sources=True
@@ -2288,9 +2298,8 @@ def _fetch_stage(
             report.failure = f"nested deeper than --max-depth {ctx.settings.max_depth}"
         elif artifact.kind is ArtifactKind.SOURCES_JAR:
             state("scanning")
-            bad = []
-            nested = _discover_nested(artifact, ctx, bad)  # e.g. a war with one stray .java and its jars (#110)
-            _note_refused(artifact, ctx, report, bad, "entries")
+            nested = _discover_nested(artifact, ctx)  # e.g. a war with one stray .java and its jars (#110)
+            _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
             state("extracting")
             tmp = _tmp_dir(ctx)
             damaged: list[str] = []
@@ -2322,8 +2331,7 @@ def _fetch_stage(
             return report, nested, tmp
         else:  # ARCHIVE
             state("scanning")
-            bad = []
-            nested = _discover_nested(artifact, ctx, bad)  # its names are refused entries of the archive too
+            nested = _discover_nested(artifact, ctx)
             state("copying resources")
             copied, skipped = ctx.writer.add_resources(artifact.path, artifact.rel)
             report.resources_copied += copied
@@ -2387,8 +2395,8 @@ def _fetch_stage(
                     if gap:
                         msg += f"; {len(gap)} classes not in the sources jar"
                     ctx.on_stderr(f"maven {artifact.rel}: {msg}")
-            if hit and not gap:  # no engine runs: only the names of the nested archives were not used
-                _note_refused(artifact, ctx, report, bad, "entries")
+            if hit and not gap:  # no engine runs: only the names count
+                _note_refused(artifact, ctx, report, _outside_names(artifact.path), "entries")
                 return report, nested, None
             if gap:  # the engines get only the retry trees of the gap classes: the same tests, no copy
                 _, refused = _engine_copy(artifact.path, None)

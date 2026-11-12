@@ -740,3 +740,37 @@ def test_render_artifact_shows_the_sources_gap():
     r = ArtifactReport(rel="g.jar", kind="archive", outcome="ok", method="maven", gav="g:a:1", classes=280, sources_gap=32)
     render_artifact(console, report(artifacts=[r]), ["g.jar"])
     assert "missing_classes=0 sources_gap=32 stubbed=0" in console.file.getvalue()
+
+
+# --- the refused count of a row and of a run ---
+
+
+@pytest.mark.parametrize(("row", "text"), [
+    (dict(outcome="ok", method="extracted", kind="sources_jar", java_files=2),
+     "extracted sources jar, [yellow]2 refused"),
+    (dict(outcome="ok", kind="resource_only", resources_copied=3), "resources only, 3 files, [yellow]2 refused"),
+    (dict(outcome="skipped", kind="resource_only"), "(resource-only, skipped, [yellow]2 refused[/])"),
+])
+def test_the_row_line_of_each_kind_shows_the_refused_count(row, text):
+    assert text in _status_line(ArtifactReport(rel="a.jar", refused=2, **row))
+    assert "refused" not in _status_line(ArtifactReport(rel="a.jar", **row))
+
+
+def test_the_artifact_details_show_the_refused_count():
+    arts = [ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="vineflower", classes=2, refused=2)]
+    console = _plain_console()
+    render_artifact(console, report(artifacts=arts, totals=compute_totals(arts)), ["a.jar"])
+    assert "refused=2" in console.file.getvalue()
+
+
+def test_the_run_counts_the_refused_entries_and_ends_with_problems():
+    arts = [ArtifactReport(rel="a.jar", kind="archive", outcome="ok", method="vineflower", classes=2, refused=2),
+            ArtifactReport(rel="r.jar", kind="resource_only", outcome="skipped", refused=1)]
+    totals = compute_totals(arts)
+    assert totals["refused_entries"] == 3 and compute_totals([])["refused_entries"] == 0
+    c = _console()
+    render_ending(c, report(artifacts=arts[1:], totals=compute_totals(arts[1:])),
+                  output=Path("out"), report_path=Path("out/decaf-report.json"), verbose=False)
+    lines = c.file.getvalue().splitlines()
+    assert lines[0] == "Completed with problems in 42s"  # a skipped row is not partial
+    assert "1 refused entries" in c.file.getvalue()

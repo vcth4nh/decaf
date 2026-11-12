@@ -5349,8 +5349,9 @@ def test_the_mirror_writer_refuses_a_folder_that_is_not_below_its_root(tmp_path:
 
 
 def _raw_zip(path: Path, entries: list[tuple[bytes, bytes]], *, prefix: bytes = b"",
-             flags: dict[int, int] | None = None) -> Path:
-    """A stored zip, built by hand: prefix goes before the first entry, and flags gives an entry its flag bits."""
+             flags: dict[int, int] | None = None, extras: dict[int, bytes] | None = None) -> Path:
+    """A stored zip, built by hand: prefix goes before the first entry, flags gives an entry its flag bits, and extras
+    its extra field."""
     import struct
     import zlib
 
@@ -5358,15 +5359,16 @@ def _raw_zip(path: Path, entries: list[tuple[bytes, bytes]], *, prefix: bytes = 
     starts = []
     for i, (name, data) in enumerate(entries):
         starts.append(len(body))
-        flag = (flags or {}).get(i, 0)
+        flag, extra = (flags or {}).get(i, 0), (extras or {}).get(i, b"")
         crc = zlib.crc32(data)
-        body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, flag, 0, 0, 0, crc, len(data), len(data), len(name), 0)
-        body += name + data
+        body += struct.pack("<IHHHHHIIIHH", 0x04034B50, 20, flag, 0, 0, 0, crc, len(data), len(data), len(name),
+                            len(extra))
+        body += name + extra + data
     cd_start = len(body)
     for i, (name, data) in enumerate(entries):
-        flag = (flags or {}).get(i, 0)
+        flag, extra = (flags or {}).get(i, 0), (extras or {}).get(i, b"")
         central += struct.pack("<IHHHHHHIIIHHHHHII", 0x02014B50, 20, 20, flag, 0, 0, 0, zlib.crc32(data), len(data),
-                               len(data), len(name), 0, 0, 0, 0, 0, starts[i]) + name
+                               len(data), len(name), len(extra), 0, 0, 0, 0, starts[i]) + name + extra
     eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(central), cd_start, 0)
     path.write_bytes(bytes(body + central + eocd))
     return path
@@ -5475,11 +5477,15 @@ def test_a_retry_tree_with_no_class_file_left_goes_at_once(tmp_path: Path, class
 def test_a_nested_archive_works_by_its_zipfile_name_and_is_refused_by_either_name(tmp_path: Path, class_file,
                                                                                     monkeypatch):
     """On Windows, zipfile gives a raw name with backslashes as a name with /: the nested archive keeps its row. A
-    raw name with a NUL is refused, though zipfile cuts it."""
-    from decaf.pipeline import _discover_nested
+    raw name with a NUL is refused, though zipfile cuts it, and so is the zipfile name of an extra field. A good entry
+    with the zipfile name of a refused entry gives no row either: the last entry of the name can be the refused one."""
+    from decaf.pipeline import _discover_nested, _outside_names
 
     dep = _zip(tmp_path / "dep.jar", [("q/B.class", class_file("q/B"))]).read_bytes()
-    war = _raw_zip(tmp_path / "app.war", [(b"lib/dep.jar", dep), (b"lib/x.jar\0y", dep), (b"p/A.class", class_file("p/A"))])
+    war = _raw_zip(tmp_path / "app.war", [(b"lib/dep.jar", dep), (b"lib/x.jar", dep), (b"lib/x.jar\0y", dep),
+                                          (b"lib/u.jar", dep), (b"../v.jar", dep), (b"p/A.class", class_file("p/A"))],
+                   extras={3: _unicode_path("lib/u.jar", "../u.jar"), 4: _unicode_path("../v.jar", "lib/v.jar")})
+    assert _outside_names(war) == ["lib/x.jar\0y", "lib/u.jar", "../v.jar"]
     infolist = zipfile.ZipFile.infolist
     calls = []
 
@@ -5494,7 +5500,43 @@ def test_a_nested_archive_works_by_its_zipfile_name_and_is_refused_by_either_nam
 
     monkeypatch.setattr(zipfile.ZipFile, "infolist", windows_names)
     ctx = make_ctx(tmp_path, _names_runner())
-    refused: list[str] = []
-    nested = _discover_nested(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx, refused)
+    nested = _discover_nested(Artifact(war, "app.war", ArtifactKind.ARCHIVE), ctx)
     assert [(a.rel, a.kind) for a in nested] == [("app.war!/lib/dep.jar", ArtifactKind.ARCHIVE)]
-    assert refused == ["lib/x.jar\0y"]
+
+
+def _warned_run(tmp_path: Path, artifact: Artifact, **kw) -> tuple:
+    ctx = make_ctx(tmp_path, _names_runner(), **kw)
+    warns: list[str] = []
+    ctx.on_warn = warns.append
+    if artifact.kind is ArtifactKind.ARCHIVE and "resolver" not in kw:
+        ctx.case_insensitive = "output directory"
+    report, _ = process_artifact(artifact, ctx)
+    return report, warns
+
+
+@pytest.mark.class_names
+@pytest.mark.parametrize("kind", ["resources only", "sources jar", "case collision", "maven hit"])
+def test_a_row_that_no_engine_reads_counts_the_names_that_leave_its_folder(tmp_path: Path, class_file, kind):
+    entries = [("../up.txt", b"x"), ("r.txt", b"r")]
+    kw: dict = {}
+    if kind == "resources only":
+        artifact_kind = ArtifactKind.RESOURCE_ONLY
+    elif kind == "sources jar":
+        entries.append(("p/A.java", b"class A {}"))
+        artifact_kind = ArtifactKind.SOURCES_JAR
+    elif kind == "case collision":
+        entries += [("p/A.class", class_file("p/A")), ("p/a.class", class_file("p/a"))]
+        artifact_kind = ArtifactKind.ARCHIVE
+    else:
+        entries.append(("com/x/A.class", class_file("com/x/A")))
+        sources = _zip(tmp_path / "lib-1.2-sources.jar", [("com/x/A.java", b"class A {}")])
+        artifact_kind, kw = ArtifactKind.ARCHIVE, {"resolver": _hit(sources), "maven": True}
+    jar = _zip(tmp_path / "lib-1.2.jar", entries)
+    report, warns = _warned_run(tmp_path, Artifact(jar, "lib-1.2.jar", artifact_kind), **kw)
+    assert report.refused == 1
+    assert warns == ["lib-1.2.jar: decaf does not use 1 of its entries, because a name or a class name can leave the"
+                     " output folder, or decaf cannot read the class name; the first is '../up.txt'"]
+    if kind == "case collision":
+        assert report.outcome == "failed" and report.failure.startswith("case collision")
+    if kind == "maven hit":
+        assert (report.method, report.sources_gap) == ("maven", 0)

@@ -197,7 +197,8 @@ def _status_line(r: ArtifactReport, mark: tuple[str, str] = _MARKS) -> str:
             return f"[dim]{line}[/]"
         return line
     if r.outcome == "skipped":
-        return f"[yellow]-[/] {safe(r.rel)} ({safe(r.failure or 'resource-only')}, skipped)"
+        refused = f", [yellow]{r.refused} refused[/]" if r.refused else ""
+        return f"[yellow]-[/] {safe(r.rel)} ({safe(r.failure or 'resource-only')}, skipped{refused})"
     reason = safe((r.failure or "failed").splitlines()[-1])
     return f"[red]{mark[1]}[/] {safe(r.rel)} ({reason})"
 
@@ -226,7 +227,7 @@ def render_ending(
         )
     elif t["failed"] > 0:
         console.print(f"[bold red]Completed with failures in {dur}[/]")
-    elif partial > 0 or t["network_misses"] > 0 or t["collisions"] > 0:
+    elif partial > 0 or t["network_misses"] > 0 or t["collisions"] > 0 or t["refused_entries"] > 0:
         console.print(f"[bold yellow]Completed with problems in {dur}[/]")
     else:
         console.print(f"[bold green]Completed in {dur}[/]")
@@ -274,6 +275,8 @@ def render_ending(
         warnings.append(f"{stubbed} stubbed classes")
     if flagged:
         warnings.append(f"{flagged} flagged files")
+    if t["refused_entries"]:
+        warnings.append(f"{t['refused_entries']} refused entries")
     if t["collisions"]:
         warnings.append(f"{t['collisions']} collisions")
     if t["network_misses"]:
