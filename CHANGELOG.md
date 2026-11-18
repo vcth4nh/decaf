@@ -227,6 +227,14 @@
   decaf decompiles the artifact, and the row is a network fallback. The
   check costs one request for each sources jar from another repository, and
   two when Maven Central holds another build.
+- With `--merge`, a decompiled file replaced the published source of the
+  same class from another artifact when its artifact was first in input
+  path order (#190). The published source came from a Maven sources jar or
+  from a sources jar in the input. This also occurred for a class that
+  decaf decompiles for a Maven row because its sources jar lacks the class
+  (#180). Now a published source wins over a decompiled file, and between
+  two files of one origin the first in input path order still wins. The
+  report records the collision, and `kept` can now name the later artifact.
 
 ### Security
 

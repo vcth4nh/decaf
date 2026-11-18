@@ -36,8 +36,11 @@ decaf app.war -o out --merge
 - A class folder above its package root loses that part too:
   `target/classes/p/A.class` gives `out/src/p/A.java`.
 - Identical duplicate classes are deduplicated.
-- Conflicting duplicates use the first file in input path order. The report
-  records each collision.
+- When two files of one class differ, a published source wins over a
+  decompiled file. A published source comes from a Maven sources jar or from
+  a sources jar in the input.
+- Between two files of one origin, the first file in input path order wins.
+- The report records each collision.
 - Resources are skipped and counted in the report.
 
 See [reports](reports.md) to check collisions and other incomplete results.

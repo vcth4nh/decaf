@@ -71,10 +71,11 @@ Typical flow:
   are copied before decompilation, so an artifact whose engines all fail can still have
   a folder with resources. `--no-resource` keeps the layout and drops the resources.
 - `--merge` writes `.java` and `.kt` files only, under `out/src/`. You lose which archive a
-  file came from; duplicate classes are deduped, the first in input order wins, and the
-  report counts the conflicts (`collisions`); container prefixes such as `WEB-INF/classes/`
-  are stripped. For a review that must name the archive, keep the mirror and use
-  `grep -r --include='*.java' --include='*.kt'`.
+  file came from; duplicate classes are deduped, a published source (a Maven sources jar or
+  a sources jar in the input) wins over a decompiled file, else the first in input order
+  wins, and the report counts the conflicts (`collisions`); container prefixes such as
+  `WEB-INF/classes/` are stripped. For a review that must name the archive, keep the
+  mirror and use `grep -r --include='*.java' --include='*.kt'`.
 - Options after `--` go to the first engine unchanged; without `--no-fallback`, decaf stops
   with exit 2. Each engine has its own option names.
 - In the default output mode, everything (progress, ending, errors) goes to stdout and
