@@ -199,9 +199,12 @@ def _resource_members(archive: Path, include_sources: bool) -> list[str]:
 class MergeWriter:
     """Merges source files (.java/.kt by default) from many trees into one package tree.
 
-    Collisions are deterministic: the tree with the lowest sort_key wins, and of one sort_key a base class before
-    its versions twin, then the lowest engine path,
-    regardless of the order in which worker threads deliver results. On a
+    The file that stays: a published source (a Maven sources jar, or a sources jar of the input) wins over
+    a decompiled file, but a published versions twin has no such priority (#190). Then the tree with the lowest
+    sort_key wins, and of one sort_key a base class before its versions twin, then the lowest engine path,
+    regardless of the order in which worker threads deliver results (an equal copy keeps the lower rank). The
+    list of collisions can differ with that order: a file records one entry against the file that the index has
+    at that time, and an equal copy records none. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
     The root prefix of each class file of a class folder (target/classes/) is cut before all else (#199).
@@ -213,7 +216,8 @@ class MergeWriter:
         self.root = src_root
         self._lock = threading.Lock()
         self._case_insensitive = case_insensitive
-        self._index: dict[str, tuple[tuple[str, bool, str], str, str]] = {}  # key -> (rank, sha256, rel)
+        # key -> (rank, sha256, rel); rank = (decompiled, sort_key, twin, raw), and the lowest rank wins
+        self._index: dict[str, tuple[tuple[bool, str, bool, str], str, str]] = {}
         # artifact rel -> {the path of a class file without .class: its root prefix}, only non-empty prefixes
         self._roots = roots or {}
 
@@ -236,11 +240,13 @@ class MergeWriter:
         if self._twin(sort_key, raw):
             with self._lock:
                 existing = self._index.get(casefs.fold(rel) if self._case_insensitive else rel)
-            if existing is not None and existing[0][0] == sort_key and not existing[0][1]:
+            if existing is not None and existing[0][1] == sort_key and not existing[0][2]:
                 return _strip_container(self._cut(sort_key, raw))
         return rel
 
-    def add_tree(self, tree: Path, sort_key: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
+    def add_tree(
+        self, tree: Path, sort_key: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES, *, published: bool = False
+    ) -> tuple[int, list[dict]]:
         java = 0
         collisions: list[dict] = []
         files = sorted(tree.rglob("*"))
@@ -253,7 +259,9 @@ class MergeWriter:
             raw = p.relative_to(tree).as_posix()
             # A held or retried base class can come in a later tree than its twin: of one sort key, the base wins.
             # Of two files of one sort key, the first engine path wins, in any order of the trees.
-            rank = (sort_key, self._twin(sort_key, raw), raw)
+            # A published source wins over a decompiled file of each sort key, but not as a versions twin (#190).
+            twin = self._twin(sort_key, raw)
+            rank = (not (published and not twin), sort_key, twin, raw)
             rel = self._target(sort_key, raw)
             key = casefs.fold(rel) if self._case_insensitive else rel
             content = p.read_bytes()
@@ -265,26 +273,27 @@ class MergeWriter:
                     target = self.root / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
-                elif existing[1] == digest:
-                    pass  # identical duplicate
+                elif existing[1] == digest:  # identical duplicate: the file stays, with the lower rank
+                    if rank < existing[0]:
+                        self._index[key] = (rank, digest, existing[2])
                 elif rank < existing[0]:
-                    entry = {"path": rel, "kept": sort_key, "dropped": existing[0][0]}
+                    entry = {"path": rel, "kept": sort_key, "dropped": existing[0][1]}
                     if existing[2] != rel:
                         entry["dropped_path"] = existing[2]
                         (self.root / existing[2]).unlink(missing_ok=True)
-                    if sort_key == existing[0][0] and raw != existing[0][2]:
-                        entry |= {"kept_file": raw, "dropped_file": existing[0][2]}
+                    if sort_key == existing[0][1] and raw != existing[0][3]:
+                        entry |= {"kept_file": raw, "dropped_file": existing[0][3]}
                     collisions.append(entry)
                     self._index[key] = (rank, digest, rel)
                     target = self.root / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
                 else:
-                    entry = {"path": existing[2], "kept": existing[0][0], "dropped": sort_key}
+                    entry = {"path": existing[2], "kept": existing[0][1], "dropped": sort_key}
                     if existing[2] != rel:
                         entry["dropped_path"] = rel
-                    if sort_key == existing[0][0] and raw != existing[0][2]:
-                        entry |= {"kept_file": existing[0][2], "dropped_file": raw}
+                    if sort_key == existing[0][1] and raw != existing[0][3]:
+                        entry |= {"kept_file": existing[0][3], "dropped_file": raw}
                     collisions.append(entry)
         return java, collisions
 
@@ -331,7 +340,10 @@ class MirrorWriter:
         """The path below the artifact folder of an engine file: the engine path (#174)."""
         return raw
 
-    def add_tree(self, tree: Path, rel: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES) -> tuple[int, list[dict]]:
+    def add_tree(
+        self, tree: Path, rel: str, suffixes: tuple[str, ...] = SOURCE_SUFFIXES, *, published: bool = False
+    ) -> tuple[int, list[dict]]:
+        """published: no effect here; each artifact has its own folder."""
         dest = self.dest_for(rel)
         java = 0
         for p in sorted(tree.rglob("*")):
@@ -2367,7 +2379,7 @@ def _fetch_stage(
             tmp = _tmp_dir(ctx)
             damaged: list[str] = []
             extract_sources(artifact.path, tmp, damaged)
-            java, collisions = ctx.writer.add_tree(tmp, artifact.rel)
+            java, collisions = ctx.writer.add_tree(tmp, artifact.rel, published=True)
             _drop(tmp)
             report.java_files = java
             report.collisions = collisions
@@ -2419,7 +2431,7 @@ def _fetch_stage(
                 if extract_sources(resolution.sources_jar, tmp, damaged, suffixes=maven.MAVEN_SOURCE_SUFFIXES) > 0 and not damaged:
                     expected = expected_class_stems(artifact.path)
                     gap = _sources_gap(artifact.path, expected, tmp)
-                    java, collisions = ctx.writer.add_tree(tmp, artifact.rel, suffixes=maven.MAVEN_SOURCE_SUFFIXES)
+                    java, collisions = ctx.writer.add_tree(tmp, artifact.rel, suffixes=maven.MAVEN_SOURCE_SUFFIXES, published=True)
                     report.method = "maven"
                     report.repo = resolution.repo
                     report.resolved_by = resolution.resolved_by

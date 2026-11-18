@@ -227,6 +227,26 @@
   decaf decompiles the artifact, and the row is a network fallback. The
   check costs one request for each sources jar from another repository, and
   two when Maven Central holds another build.
+- With `--merge`, a decompiled file replaced the published source of the
+  same class from another artifact when its artifact was first in input
+  path order (#190). The published source came from a Maven sources jar or
+  from a sources jar in the input. This also occurred for a class that
+  decaf decompiles for a Maven row because its sources jar lacks the class
+  (#180). Now a published source wins over a decompiled file, and between
+  two files of one origin the first in input path order still wins. A file
+  from `META-INF/versions/N/` has no such priority: for this rule it counts
+  as a decompiled file. The published source also wins when the two
+  artifacts hold different versions of the class, so the merged tree then
+  has the source of the artifact with the published source. The report
+  records the collision, and `kept` can now name the later artifact.
+- With `--merge`, the file that stayed for one output path could depend on
+  the order in which the worker threads delivered three or more files
+  (#190). A file with the same bytes as the kept file did not give its
+  better place in the order of the rule to that file. Example: two copies
+  of one multi-release jar in two folders, with an engine that writes the
+  `META-INF/versions/N/` variants. The variant of the first copy could
+  replace the base class. Now the file with the best place stays in each
+  order.
 
 ### Security
 

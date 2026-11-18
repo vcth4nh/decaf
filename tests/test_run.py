@@ -2843,6 +2843,67 @@ def test_run_case_insensitive_merge_records_cross_jar_clash(fake_env, make_jar, 
     assert report.totals["collisions"] == 1
 
 
+# --- with --merge, a published source wins over a decompiled file (#190) ---
+
+PUBLISHED_UTIL = "// the published source of b\npackage com.example.shared;\npublic class Util {}\n"
+
+
+def _two_jars_with_util(make_jar, input_dir: Path) -> None:
+    make_jar("a-1.0.jar", {"com/example/a/A.class": b"a", "com/example/shared/Util.class": b"u"}, base=input_dir)
+    make_jar("b-1.0.jar", {"com/example/b/B.class": b"b", "com/example/shared/Util.class": b"u"}, base=input_dir)
+
+
+@pytest.mark.parametrize("a_has_sources", [True, False], ids=["gap-class", "decompiled-jar"])
+def test_run_merge_keeps_the_published_source_over_a_decompiled_file_of_an_earlier_jar(
+    fake_env, make_jar, tmp_path: Path, a_has_sources
+):
+    """Before, a-1.0.jar is first in path order, so its decompiled Util.java replaced the published source of
+    b-1.0.jar: a class of the gap of a Maven row (#180), or a class of a jar with no Maven sources."""
+    input_dir = tmp_path / "in"
+    _two_jars_with_util(make_jar, input_dir)
+    sources = {
+        "b-1.0.jar": make_jar("b-1.0-sources.jar", {"com/example/b/B.java": "package com.example.b;\nclass B {}\n",
+                                                    "com/example/shared/Util.java": PUBLISHED_UTIL}),
+    }
+    if a_has_sources:  # the sources of a-1.0.jar lack Util: an engine writes it
+        sources["a-1.0.jar"] = make_jar("a-1.0-sources.jar", {"com/example/a/A.java": "package com.example.a;\n"})
+
+    def resolver(jar_path, repos, client, cache_dir, **kw):
+        name = Path(jar_path).name
+        if name not in sources:
+            return Resolution(miss="no pom.properties; 0 candidates")
+        return Resolution(gav=Gav("com.example", name.removesuffix("-1.0.jar"), "1.0"), sources_jar=sources[name],
+                          repo="https://r.test/m2", resolved_by="pom-properties")
+
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, mirror=False, jobs=1), runner=perfect_engine, resolver=resolver)
+    rows = {r.rel: r for r in report.artifacts}
+    assert ((rows["a-1.0.jar"].method, rows["a-1.0.jar"].sources_gap) == ("maven", 1) if a_has_sources
+            else rows["a-1.0.jar"].method == "vineflower")
+    assert rows["b-1.0.jar"].method == "maven" and report.totals["failed"] == 0
+    assert (out / "src/com/example/shared/Util.java").read_text() == PUBLISHED_UTIL
+    assert [c for r in report.artifacts for c in r.collisions] == [
+        {"path": "com/example/shared/Util.java", "kept": "b-1.0.jar", "dropped": "a-1.0.jar"}
+    ]
+
+
+def test_run_merge_keeps_an_input_sources_jar_over_a_decompiled_file_of_an_earlier_jar(
+    fake_env, make_jar, tmp_path: Path
+):
+    """A sources jar in the input is also published source."""
+    input_dir = tmp_path / "in"
+    make_jar("a-1.0.jar", {"com/example/shared/Util.class": b"u"}, base=input_dir)
+    make_jar("b-1.0-sources.jar", {"com/example/shared/Util.java": PUBLISHED_UTIL}, base=input_dir)
+    out = tmp_path / "out"
+    report = run(Settings(input=input_dir, output=out, maven=False, mirror=False, jobs=1), runner=perfect_engine)
+    rows = {r.rel: r.method for r in report.artifacts}
+    assert rows == {"a-1.0.jar": "vineflower", "b-1.0-sources.jar": "extracted"}
+    assert (out / "src/com/example/shared/Util.java").read_text() == PUBLISHED_UTIL
+    assert [c for r in report.artifacts for c in r.collisions] == [
+        {"path": "com/example/shared/Util.java", "kept": "b-1.0-sources.jar", "dropped": "a-1.0.jar"}
+    ]
+
+
 @pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions as non-root")
 def test_run_unwritable_output_is_a_clean_error(fake_env, make_jar, tmp_path: Path):
     input_dir = tmp_path / "in"
