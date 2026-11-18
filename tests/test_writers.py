@@ -437,3 +437,60 @@ def test_out_path_of_a_versions_twin_in_mirror_mode_is_the_engine_path(tmp_path:
     mirror.add_tree(tree(tmp_path / "t", {"com/y/S.java": "// base", "META-INF/versions/11/com/y/S.java": "// v11"}), "mr.jar")
     assert mirror.out_path("mr.jar", "META-INF/versions/11/com/y/S.java") == "META-INF/versions/11/com/y/S.java"
     assert mirror.out_path("mr.jar", "com/y/S.java") == "com/y/S.java"
+
+
+# --- a published source wins over a decompiled file with --merge (#190) ---
+
+
+@pytest.mark.parametrize("published_first", [True, False], ids=["published-first", "decompiled-first"])
+def test_merge_keeps_a_published_source_over_a_decompiled_file_of_an_earlier_key(tmp_path: Path, published_first):
+    """Before, the decompiled file of a.jar replaced the published source of b.jar, because a.jar is first."""
+    w = MergeWriter(tmp_path / "src")
+    published = tree(tmp_path / "t1", {"com/x/A.java": "// the published source of b"})
+    decompiled = tree(tmp_path / "t2", {"com/x/A.java": "// decompiled from a"})
+    steps = [lambda: w.add_tree(published, "b.jar", published=True)[1], lambda: w.add_tree(decompiled, "a.jar")[1]]
+    collisions = [c for step in (steps if published_first else steps[::-1]) for c in step()]
+    assert (tmp_path / "src/com/x/A.java").read_text() == "// the published source of b"
+    assert collisions == [{"path": "com/x/A.java", "kept": "b.jar", "dropped": "a.jar"}]
+
+
+@pytest.mark.parametrize("order", [("a.jar", "b.jar"), ("b.jar", "a.jar")])
+def test_merge_keeps_the_lowest_key_of_two_published_sources(tmp_path: Path, order):
+    w = MergeWriter(tmp_path / "src")
+    collisions = []
+    for key in order:
+        t = tree(tmp_path / key, {"com/x/A.java": f"// the published source of {key}"})
+        collisions += w.add_tree(t, key, published=True)[1]
+    assert (tmp_path / "src/com/x/A.java").read_text() == "// the published source of a.jar"
+    assert collisions == [{"path": "com/x/A.java", "kept": "a.jar", "dropped": "b.jar"}]
+
+
+@pytest.mark.parametrize("twin_first", [True, False], ids=["twin-first", "base-first"])
+def test_merge_gives_a_published_versions_twin_no_priority(tmp_path: Path, twin_first):
+    """The base class wins over its versions twin (#107), also when the twin is published."""
+    w = MergeWriter(tmp_path / "src")
+    twin = tree(tmp_path / "t1", {"META-INF/versions/11/p/A.java": "// v11"})
+    base = tree(tmp_path / "t2", {"p/A.java": "// base"})
+    steps = [lambda: w.add_tree(twin, "mr.jar", published=True)[1], lambda: w.add_tree(base, "mr.jar")[1]]
+    collisions = [c for step in (steps if twin_first else steps[::-1]) for c in step()]
+    assert (tmp_path / "src/p/A.java").read_text() == "// base"
+    assert collisions == [{"path": "p/A.java", "kept": "mr.jar", "dropped": "mr.jar",
+                           "kept_file": "p/A.java", "dropped_file": "META-INF/versions/11/p/A.java"}]
+
+
+@pytest.mark.parametrize("twin_first", [True, False], ids=["twin-first", "base-first"])
+def test_merge_keeps_a_decompiled_base_of_an_earlier_key_over_a_published_twin(tmp_path: Path, twin_first):
+    w = MergeWriter(tmp_path / "src")
+    twin = tree(tmp_path / "t1", {"META-INF/versions/11/p/A.java": "// v11 of b"})
+    base = tree(tmp_path / "t2", {"p/A.java": "// base of a"})
+    steps = [lambda: w.add_tree(twin, "b.jar", published=True)[1], lambda: w.add_tree(base, "a.jar")[1]]
+    collisions = [c for step in (steps if twin_first else steps[::-1]) for c in step()]
+    assert (tmp_path / "src/p/A.java").read_text() == "// base of a"
+    assert collisions == [{"path": "p/A.java", "kept": "a.jar", "dropped": "b.jar"}]
+
+
+def test_mirror_writer_accepts_the_published_flag(tmp_path: Path):
+    t = tree(tmp_path / "t", {"com/x/A.java": "class A {}", "res.properties": "k=v"})
+    assert MirrorWriter(tmp_path / "out").add_tree(t, "x.jar", published=True) == (1, [])
+    assert (tmp_path / "out/x.jar/com/x/A.java").read_text() == "class A {}"
+    assert not (tmp_path / "out/x.jar/res.properties").exists()
