@@ -575,3 +575,14 @@ def test_merge_keeps_a_published_source_when_an_equal_twin_came_first(tmp_path: 
         key, files, published = trees[name]
         w.add_tree(tree(tmp_path / name, files), key, published=published)
     assert (tmp_path / "src/p/A.java").read_text() == "// S"
+
+
+def test_merge_case_insensitive_keeps_the_name_on_disk_when_an_equal_file_lowers_the_rank(tmp_path: Path):
+    """The equal file of a.jar lowers the rank, but the file on disk keeps the name from c.jar. The file that wins
+    later removes that name, and its entry has the name as dropped_path."""
+    w = MergeWriter(tmp_path / "src", case_insensitive=True)
+    w.add_tree(tree(tmp_path / "c", {"p/A.java": "class A {}"}), "c.jar")
+    w.add_tree(tree(tmp_path / "a", {"p/a.java": "class A {}"}), "a.jar")
+    _, collisions = w.add_tree(tree(tmp_path / "z", {"p/A.JAVA": "// published"}), "z.jar", published=True)
+    assert [q.name for q in (tmp_path / "src/p").iterdir()] == ["A.JAVA"]
+    assert collisions == [{"path": "p/A.JAVA", "kept": "z.jar", "dropped": "a.jar", "dropped_path": "p/A.java"}]

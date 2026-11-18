@@ -72,8 +72,9 @@ Typical flow:
   a folder with resources. `--no-resource` keeps the layout and drops the resources.
 - `--merge` writes `.java` and `.kt` files only, under `out/src/`. You lose which archive a
   file came from; duplicate classes are deduped, a published source (a Maven sources jar or
-  a sources jar in the input) wins over a decompiled file, else the first in input order
-  wins, and the report counts the conflicts (`collisions`); container prefixes such as
+  a sources jar in the input, but not a `META-INF/versions/N/` file) wins over a decompiled
+  file, else the first in input order wins, and the report counts the conflicts
+  (`collisions`); container prefixes such as
   `WEB-INF/classes/` are stripped. For a review that must name the archive, keep the
   mirror and use `grep -r --include='*.java' --include='*.kt'`.
 - Options after `--` go to the first engine unchanged; without `--no-fallback`, decaf stops

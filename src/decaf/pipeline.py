@@ -203,7 +203,8 @@ class MergeWriter:
     a decompiled file, but a published versions twin has no such priority (#190). Then the tree with the lowest
     sort_key wins, and of one sort_key a base class before its versions twin, then the lowest engine path,
     regardless of the order in which worker threads deliver results (an equal copy keeps the lower rank). The
-    list of collisions can differ with that order, because an equal copy records no entry. On a
+    list of collisions can differ with that order: a file records one entry against the file that the index has
+    at that time, and an equal copy records none. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
     The root prefix of each class file of a class folder (target/classes/) is cut before all else (#199).
