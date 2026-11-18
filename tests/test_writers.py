@@ -1,3 +1,4 @@
+import itertools
 import json
 from pathlib import Path
 
@@ -506,3 +507,33 @@ def test_mirror_writer_accepts_the_published_flag(tmp_path: Path):
     assert MirrorWriter(tmp_path / "out").add_tree(t, "x.jar", published=True) == (1, [])
     assert (tmp_path / "out/x.jar/com/x/A.java").read_text() == "class A {}"
     assert not (tmp_path / "out/x.jar/res.properties").exists()
+
+
+# --- an equal file keeps the lowest rank: the file that stays does not depend on the arrival order ---
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations("abc")), ids="".join)
+def test_merge_keeps_the_file_of_the_lowest_key_when_an_equal_file_comes_later(tmp_path: Path, order):
+    """Before, the order c, a, b wrote Y: the equal file of a did not lower the rank of c, so b won over it."""
+    trees = {"a": ("a/lib-1.0.jar", "// X"), "b": ("b/lib-1.1.jar", "// Y"), "c": ("c/lib-1.0.jar", "// X")}
+    w = MergeWriter(tmp_path / "src")
+    for name in order:
+        key, text = trees[name]
+        w.add_tree(tree(tmp_path / name, {"p/A.java": text}), key)
+    assert (tmp_path / "src/p/A.java").read_text() == "// X"
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations("abc")), ids="".join)
+def test_merge_keeps_a_published_source_when_an_equal_twin_came_first(tmp_path: Path, order):
+    """Before, the order b, c, a wrote the decompiled file of a: the published base of c did not lower the rank
+    of the equal published twin of b, which ranks as a decompiled file."""
+    trees = {
+        "a": ("a.jar", {"p/A.java": "// Y"}, False),
+        "b": ("b.jar", {"META-INF/versions/11/p/A.java": "// S"}, True),
+        "c": ("c.jar", {"p/A.java": "// S"}, True),
+    }
+    w = MergeWriter(tmp_path / "src")
+    for name in order:
+        key, files, published = trees[name]
+        w.add_tree(tree(tmp_path / name, files), key, published=published)
+    assert (tmp_path / "src/p/A.java").read_text() == "// S"

@@ -271,8 +271,9 @@ class MergeWriter:
                     target = self.root / rel
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(content)
-                elif existing[1] == digest:
-                    pass  # identical duplicate
+                elif existing[1] == digest:  # identical duplicate: the file stays, with the lower rank
+                    if rank < existing[0]:
+                        self._index[key] = (rank, digest, existing[2])
                 elif rank < existing[0]:
                     entry = {"path": rel, "kept": sort_key, "dropped": existing[0][1]}
                     if existing[2] != rel:
