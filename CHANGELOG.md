@@ -234,7 +234,10 @@
   decaf decompiles for a Maven row because its sources jar lacks the class
   (#180). Now a published source wins over a decompiled file, and between
   two files of one origin the first in input path order still wins. The
-  report records the collision, and `kept` can now name the later artifact.
+  published source also wins when the two artifacts hold different versions
+  of the class, so the merged tree then has the source of the artifact with
+  the published source. The report records the collision, and `kept` can
+  now name the later artifact.
 
 ### Security
 

@@ -199,10 +199,11 @@ def _resource_members(archive: Path, include_sources: bool) -> list[str]:
 class MergeWriter:
     """Merges source files (.java/.kt by default) from many trees into one package tree.
 
-    Collisions are deterministic: a published source (a Maven sources jar, or a sources jar of the input) wins over
+    The file that stays: a published source (a Maven sources jar, or a sources jar of the input) wins over
     a decompiled file, but a published versions twin has no such priority (#190). Then the tree with the lowest
     sort_key wins, and of one sort_key a base class before its versions twin, then the lowest engine path,
-    regardless of the order in which worker threads deliver results. On a
+    regardless of the order in which worker threads deliver results (an equal copy keeps the lower rank). The
+    list of collisions can differ with that order, because an equal copy records no entry. On a
     case-insensitive output tree the index is keyed by the case-folded path,
     so two jars with `p/A` and `p/a` collide instead of overwriting (#93).
     The root prefix of each class file of a class folder (target/classes/) is cut before all else (#199).
