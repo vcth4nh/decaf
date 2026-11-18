@@ -489,6 +489,18 @@ def test_merge_keeps_a_decompiled_base_of_an_earlier_key_over_a_published_twin(t
     assert collisions == [{"path": "p/A.java", "kept": "a.jar", "dropped": "b.jar"}]
 
 
+@pytest.mark.parametrize("twin_first", [True, False], ids=["twin-first", "base-first"])
+def test_merge_keeps_a_published_base_of_a_later_key_over_a_published_twin(tmp_path: Path, twin_first):
+    """A published twin ranks with the decompiled files, so the published base of a later artifact wins over it."""
+    w = MergeWriter(tmp_path / "src")
+    twin = tree(tmp_path / "t1", {"META-INF/versions/11/p/A.java": "// v11 of a"})
+    base = tree(tmp_path / "t2", {"p/A.java": "// base of b"})
+    steps = [lambda: w.add_tree(twin, "a.jar", published=True)[1], lambda: w.add_tree(base, "b.jar", published=True)[1]]
+    collisions = [c for step in (steps if twin_first else steps[::-1]) for c in step()]
+    assert (tmp_path / "src/p/A.java").read_text() == "// base of b"
+    assert collisions == [{"path": "p/A.java", "kept": "b.jar", "dropped": "a.jar"}]
+
+
 def test_mirror_writer_accepts_the_published_flag(tmp_path: Path):
     t = tree(tmp_path / "t", {"com/x/A.java": "class A {}", "res.properties": "k=v"})
     assert MirrorWriter(tmp_path / "out").add_tree(t, "x.jar", published=True) == (1, [])
